@@ -1,1 +1,1 @@
-# smart-contract-sanctuary-arbitrum
+# smart-contract-sanctuary-bsc
