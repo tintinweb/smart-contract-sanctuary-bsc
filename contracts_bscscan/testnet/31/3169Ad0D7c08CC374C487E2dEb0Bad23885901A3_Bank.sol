@@ -1,0 +1,28 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-02-05
+*/
+
+//SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract Bank {
+    mapping(address => uint) _balances;
+
+    function balance() public view returns(uint) {
+        return _balances[msg.sender];
+    }
+
+    function deposit() public payable {
+        _balances[msg.sender] += msg.value;
+    }
+
+    function withdraw(uint amount) public {
+        require(amount <= _balances[msg.sender], "amount exceed balance");
+        _balances[msg.sender] -= amount;
+        payable(msg.sender).transfer(amount);
+    }
+    
+    function totalSupply() public view returns(uint) {
+        return address(this).balance;
+    }
+}
