@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "./BEP20.sol";
+
+contract ZCoinToken is BEP20Detailed, BEP20 {
+  constructor() BEP20Detailed("ZZCrypto Test", "ZCT", 3) {
+    uint256 totalTokens = 100000000000 * 10**uint256(decimals());
+    _mint(msg.sender, totalTokens);
+  }
+
+  function burn(uint256 amount) external {
+    _burn(msg.sender, amount);
+  }
+}
