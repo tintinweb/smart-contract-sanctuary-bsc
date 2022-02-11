@@ -28,10 +28,11 @@ def main():
     parser.add_argument('-v', "--verbose", action="store_true", default=False, help="Set loglevel to DEBUG")
     parser.add_argument('-n', "--network", type=str, default=None, help="network")
     parser.add_argument('-c', "--chain", type=str, default="etherscan.io", required=True, help="blockchain")
+    parser.add_argument('-Z', "--save-to-contracts", action="store_true", default=False, help="save contracts to ./contracts/ instead of ./contracts_chainname/")
 
     args = parser.parse_args()
     
-    if args.chain.startswith("etherscan"):
+    if args.chain.startswith("etherscan") or args.save_to_contracts == True:
         # special etherscan case :D
         output_directory = "../contracts/%s/"%("mainnet" if args.network==None else args.network)
     else:
