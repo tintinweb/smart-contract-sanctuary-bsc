@@ -1,0 +1,416 @@
+// SPDX-License-Identifier: AGPL-3.0
+pragma solidity 0.7.5;
+
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+import "./interfaces/IERC20Metadata.sol";
+
+import "./libraries/SafeMath.sol";
+import "./libraries/SafeERC20.sol";
+
+contract TrapezaCloser is Ownable {
+  using SafeMath for uint256;
+  using SafeERC20 for IERC20Metadata;
+
+  /* ========== STATE VARIABLES ========== */
+
+  address public FIDL;
+  address public targetToken;
+
+  bool public shutdown = true;
+
+  uint256 public exchangeRate; // 100 equals 1$
+
+  /* ========== EVENTS ========== */
+
+  event Toggled(bool shutdown);
+  event Destroyed(address indexed owner);
+  event UpdateExchangeRate(uint256 preExchangeRate, uint256 curExchangeRate);
+  event Exchanged(
+    address indexed sender,
+    address indexed receipient,
+    uint256 exchangeRate,
+    uint256 fidlAmount,
+    uint256 targetTokenAmount
+  );
+
+  /* ========== CONSTRUCTOR ========== */
+  constructor(
+    address _FIDL,
+    address _targetToken,
+    uint256 _exchangeRate
+  ) {
+    require(_FIDL != address(0), "Zero address: _FIDL");
+    FIDL = _FIDL;
+
+    require(_targetToken != address(0), "Zero address: _targetToken");
+    targetToken = _targetToken;
+
+    require(_exchangeRate >= 100, "_exchangeRate too small, 100 means 1$");
+    require(_exchangeRate <= 10000, "_exchangeRate too large, 10000 means 100$");
+    exchangeRate = _exchangeRate;
+  }
+
+  /* ========== OWNABLE ========== */
+
+  /**
+   * @notice update exchange rate, only owner available
+   * @param _exchangeRate Token address
+   */
+  function updateExchangeRate(uint256 _exchangeRate) external onlyOwner {
+    require(_exchangeRate >= 100, "_exchangeRate too small, 100 means 1$");
+    require(_exchangeRate <= 10000, "_exchangeRate too large, 10000 means 100$");
+
+    emit UpdateExchangeRate(exchangeRate, _exchangeRate);
+
+    exchangeRate = _exchangeRate;
+  }
+
+  /**
+   * @notice withdraw, only owner available
+   * @param _token Token address
+   * @param _amount withdraw amount
+   * @param _recipient The address to receive
+   */
+  function withdraw(
+    address _token,
+    uint256 _amount,
+    address _recipient
+  ) external onlyOwner {
+    require(_token != address(0), "Zero address: _token");
+    require(_token != FIDL, "FIDL can not withdraw");
+    require(_amount > 0, "Zero amount");
+
+    if (_recipient == address(0)) {
+      _recipient = msg.sender;
+    }
+
+    IERC20Metadata(_token).approve(_recipient, _amount);
+    IERC20Metadata(_token).safeTransferFrom(address(this), _recipient, _amount);
+  }
+
+  /**
+   * @notice toggle shutdown
+   */
+  function halt() external onlyOwner {
+    shutdown = !shutdown;
+
+    emit Toggled(shutdown);
+  }
+
+  /**
+   * @notice destroy migrator
+   */
+  function destroy() external onlyOwner {
+    shutdown = true;
+
+    FIDL = address(0);
+    targetToken = address(0);
+
+    exchangeRate = 0;
+
+    emit Destroyed(msg.sender);
+  }
+
+  /* ========== MUTATION ========== */
+  /**
+   * @notice deposit token to this contract (approve first)
+   * @param _token Token address to deposit
+   * @param _amount Token amount
+   */
+  function deposit(address _token, uint256 _amount) external {
+    require(_amount > 0, "Zero amount");
+
+    IERC20Metadata(_token).safeTransferFrom(msg.sender, address(this), _amount);
+  }
+
+  /**
+   * @notice exchange FIDL to targetToken
+   * @param _amount FIDL amount
+   * @param _recipient The address to receive
+   */
+  function exchange(uint256 _amount, address _recipient) external {
+    require(!shutdown, "shutdown");
+    require(_amount > 0, "Zero amount");
+    require(_recipient != address(0), "Zero address: _recipient");
+
+    IERC20Metadata(FIDL).safeTransferFrom(msg.sender, address(this), _amount);
+
+    uint256 exchangedCurrency = expect(_amount);
+
+    IERC20Metadata(targetToken).approve(_recipient, exchangedCurrency);
+    IERC20Metadata(targetToken).safeTransferFrom(address(this), _recipient, exchangedCurrency);
+
+    emit Exchanged(msg.sender, _recipient, exchangeRate, _amount, exchangedCurrency);
+  }
+
+  /* ========== VIEW FUNCTIONS ========== */
+
+  /**
+   * @notice expect currency from FIDL to targetToken (control point is 100)
+   * @param _amount sFIDL amount
+   * @return uint256 gFIDL amount
+   */
+  function expect(uint256 _amount) public view returns (uint256) {
+    return
+      _amount
+        .mul(exchangeRate)
+        .mul(10**IERC20Metadata(targetToken).decimals())
+        .div(10**IERC20Metadata(FIDL).decimals())
+        .div(100);
+  }
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity >=0.6.0 <0.8.0;
+
+import "../utils/Context.sol";
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owner.
+     */
+    constructor () internal {
+        address msgSender = _msgSender();
+        _owner = msgSender;
+        emit OwnershipTransferred(address(0), msgSender);
+    }
+
+    /**
+     * @dev Returns the address of the current owner.
+     */
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    /**
+     * @dev Throws if called by any account other than the owner.
+     */
+    modifier onlyOwner() {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    /**
+     * @dev Leaves the contract without owner. It will not be possible to call
+     * `onlyOwner` functions anymore. Can only be called by the current owner.
+     *
+     * NOTE: Renouncing ownership will leave the contract without an owner,
+     * thereby removing any functionality that is only available to the owner.
+     */
+    function renounceOwnership() public virtual onlyOwner {
+        emit OwnershipTransferred(_owner, address(0));
+        _owner = address(0);
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Can only be called by the current owner.
+     */
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        emit OwnershipTransferred(_owner, newOwner);
+        _owner = newOwner;
+    }
+}
+
+// SPDX-License-Identifier: AGPL-3.0
+pragma solidity >=0.7.5;
+
+import "./IERC20.sol";
+
+interface IERC20Metadata is IERC20 {
+  function name() external view returns (string memory);
+
+  function symbol() external view returns (string memory);
+
+  function decimals() external view returns (uint8);
+}
+
+// SPDX-License-Identifier: AGPL-3.0
+pragma solidity ^0.7.5;
+
+// TODO(zx): Replace all instances of SafeMath with OZ implementation
+library SafeMath {
+  function add(uint256 a, uint256 b) internal pure returns (uint256) {
+    uint256 c = a + b;
+    require(c >= a, "SafeMath: addition overflow");
+
+    return c;
+  }
+
+  function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+    return sub(a, b, "SafeMath: subtraction overflow");
+  }
+
+  function sub(
+    uint256 a,
+    uint256 b,
+    string memory errorMessage
+  ) internal pure returns (uint256) {
+    require(b <= a, errorMessage);
+    uint256 c = a - b;
+
+    return c;
+  }
+
+  function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+    if (a == 0) {
+      return 0;
+    }
+
+    uint256 c = a * b;
+    require(c / a == b, "SafeMath: multiplication overflow");
+
+    return c;
+  }
+
+  function div(uint256 a, uint256 b) internal pure returns (uint256) {
+    return div(a, b, "SafeMath: division by zero");
+  }
+
+  function div(
+    uint256 a,
+    uint256 b,
+    string memory errorMessage
+  ) internal pure returns (uint256) {
+    require(b > 0, errorMessage);
+    uint256 c = a / b;
+    assert(a == b * c + (a % b)); // There is no case in which this doesn't hold
+
+    return c;
+  }
+
+  // Only used in the  BondingCalculator.sol
+  function sqrrt(uint256 a) internal pure returns (uint256 c) {
+    if (a > 3) {
+      c = a;
+      uint256 b = add(div(a, 2), 1);
+      while (b < c) {
+        c = b;
+        b = div(add(div(a, b), b), 2);
+      }
+    } else if (a != 0) {
+      c = 1;
+    }
+  }
+}
+
+// SPDX-License-Identifier: AGPL-3.0-only
+pragma solidity >=0.7.5;
+
+import { IERC20 } from "../interfaces/IERC20.sol";
+
+/// @notice Safe IERC20 and ETH transfer library that safely handles missing return values.
+/// @author Modified from Uniswap (https://github.com/Uniswap/uniswap-v3-periphery/blob/main/contracts/libraries/TransferHelper.sol)
+/// Taken from Solmate
+library SafeERC20 {
+  function safeTransferFrom(
+    IERC20 token,
+    address from,
+    address to,
+    uint256 amount
+  ) internal {
+    (bool success, bytes memory data) = address(token).call(
+      abi.encodeWithSelector(IERC20.transferFrom.selector, from, to, amount)
+    );
+
+    require(success && (data.length == 0 || abi.decode(data, (bool))), "TRANSFER_FROM_FAILED");
+  }
+
+  function safeTransfer(
+    IERC20 token,
+    address to,
+    uint256 amount
+  ) internal {
+    (bool success, bytes memory data) = address(token).call(
+      abi.encodeWithSelector(IERC20.transfer.selector, to, amount)
+    );
+
+    require(success && (data.length == 0 || abi.decode(data, (bool))), "TRANSFER_FAILED");
+  }
+
+  function safeApprove(
+    IERC20 token,
+    address to,
+    uint256 amount
+  ) internal {
+    (bool success, bytes memory data) = address(token).call(
+      abi.encodeWithSelector(IERC20.approve.selector, to, amount)
+    );
+
+    require(success && (data.length == 0 || abi.decode(data, (bool))), "APPROVE_FAILED");
+  }
+
+  function safeTransferETH(address to, uint256 amount) internal {
+    (bool success, ) = to.call{ value: amount }(new bytes(0));
+
+    require(success, "ETH_TRANSFER_FAILED");
+  }
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity >=0.6.0 <0.8.0;
+
+/*
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with GSN meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address payable) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes memory) {
+        this; // silence state mutability warning without generating bytecode - see https://github.com/ethereum/solidity/issues/2691
+        return msg.data;
+    }
+}
+
+// SPDX-License-Identifier: AGPL-3.0
+pragma solidity >=0.7.5;
+
+interface IERC20 {
+  function totalSupply() external view returns (uint256);
+
+  function balanceOf(address account) external view returns (uint256);
+
+  function transfer(address recipient, uint256 amount) external returns (bool);
+
+  function allowance(address owner, address spender) external view returns (uint256);
+
+  function approve(address spender, uint256 amount) external returns (bool);
+
+  function transferFrom(
+    address sender,
+    address recipient,
+    uint256 amount
+  ) external returns (bool);
+
+  event Transfer(address indexed from, address indexed to, uint256 value);
+
+  event Approval(address indexed owner, address indexed spender, uint256 value);
+}
