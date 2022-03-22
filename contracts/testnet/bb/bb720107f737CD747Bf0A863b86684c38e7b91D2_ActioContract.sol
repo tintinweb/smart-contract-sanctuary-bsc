@@ -1,0 +1,475 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-03-22
+*/
+
+// SPDX-License-Identifier: Unlicensed
+
+pragma solidity ^0.8.4;
+
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address recipient, uint256 amount) external returns (bool);
+    function allowance(address owner, address spender) external view returns (uint256);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+interface Token {
+    function transferFrom(address, address, uint) external returns (bool);
+    function transfer(address, uint) external returns (bool);
+}
+
+interface IUniswapV2Factory {
+    function createPair(address tokenA, address tokenB) external returns (address pair);
+}
+
+interface IUniswapV2Router02 {
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+    function factory() external pure returns (address);
+    function WETH() external pure returns (address);
+    function addLiquidityETH(
+        address token,
+        uint amountTokenDesired,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
+}
+
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+}
+
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        uint256 c = a + b;
+        require(c >= a, "SafeMath: addition overflow");
+        return c;
+    }
+
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return sub(a, b, "SafeMath: subtraction overflow");
+    }
+
+    function sub(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b <= a, errorMessage);
+        uint256 c = a - b;
+        return c;
+    }
+
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        if (a == 0) {
+            return 0;
+        }
+        uint256 c = a * b;
+        require(c / a == b, "SafeMath: multiplication overflow");
+        return c;
+    }
+
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return div(a, b, "SafeMath: division by zero");
+    }
+
+    function div(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b > 0, errorMessage);
+        uint256 c = a / b;
+        return c;
+    }
+
+}
+
+contract Ownable is Context {
+    address private _owner;
+    address private _previousOwner;
+
+    constructor () {
+        address msgSender = _msgSender();
+        _owner = msgSender;
+        emit OwnershipTransferred(address(0), msgSender);
+    }
+
+    function owner() public view returns (address) {
+        return _owner;
+    }
+
+    modifier onlyOwner() {
+        require(_owner == _msgSender(), "Caller is not the owner");
+        _;
+    }
+
+    function renounceOwnership() public virtual onlyOwner {
+        emit OwnershipTransferred(_owner, address(0));
+        _owner = address(0);
+    }
+    
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        emit OwnershipTransferred(_owner, newOwner);
+        _owner = newOwner;
+    }
+}
+
+// deploy ins
+// "0x9Ac64Cc6e4415144C455BD8E4837Fea55603e5c3", "0xDE5Eff9F645E14C346E2Fda02BddA4EcCCd04547"
+contract ActioContract is Context, IERC20, Ownable {
+    
+    using SafeMath for uint256;
+    // mapping (address => uint256) private _rOwned;
+    mapping (address => uint256) public _rOwned;                 // map kepemilikan token
+    
+    //mapping (address => uint256) private _tOwned;              // GAK DIPAKAI DIMANA MANA
+    
+    mapping (address => mapping (address => uint256)) private _allowances;
+    mapping (address => bool) private _isExcludedFromFee;
+    
+    uint256 private constant MAX = ~uint256(0);
+    uint256 private constant _tTotal = 5_000_000_000 * 10**18;      // 5 milyar
+    uint256 private _rTotal = (MAX - (MAX % _tTotal));              // total apa sih?
+    uint256 public _tFeeTotal;
+    //uint256 private _tFeeTotal;
+    
+    uint256 private _taxFeeOnTransfer = 9;                  // persentase
+    uint256 public _taxFee;
+    //uint256 private _taxFee;
+    uint256 private _minSwap = 1 * 10**18;         // min swap 1 AIO
+    
+    string private constant _name = "Actio24";
+    string private constant _symbol = "AIO24";
+    uint8 private constant _decimals = 18;
+    
+    address payable private _reserverAddress;
+
+    IUniswapV2Router02 public uniswapV2Router;
+    address public uniswapV2Pair;
+    
+    bool private inSwap = false;
+    bool private swapEnabled = true;
+
+    // -------------- hanya untuk log melihat fee bekerja -------------
+    uint256 public mylogCount;
+    struct mylogObj {
+        address from;
+        address to;
+        address mylogFee;
+    }
+    //      mylogCount
+    mapping(uint256 => mylogObj) public mylogtransfers;
+    mapping(uint256 => uint256) public mylogxs;
+    mapping(uint256 => uint256) public mylogTaxs;
+    mapping(uint256 => uint256) public mylogtaketeamSebelum;
+    mapping(uint256 => uint256) public mylogtaketeamSesudah;
+    mapping(uint256 => uint256) public mylogswaptokenforEth;
+    // -------------- hanya untuk log melihat fee bekerja -------------
+
+    
+    modifier lockTheSwap {
+        inSwap = true;
+        _;
+        inSwap = false;
+    }
+    constructor (address routerAddress, address payable feeAddress) {
+        _rOwned[_msgSender()] = _rTotal;
+        
+        IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(routerAddress);
+        uniswapV2Router = _uniswapV2Router;
+        uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory())
+            .createPair(address(this), _uniswapV2Router.WETH());
+
+        _reserverAddress = feeAddress;
+
+        _isExcludedFromFee[owner()] = true;
+        _isExcludedFromFee[address(this)] = true;
+        _isExcludedFromFee[_reserverAddress] = true;
+
+        emit Transfer(address(0x0000000000000000000000000000000000000000), _msgSender(), _tTotal);
+
+        // -------------- hanya untuk log melihat fee bekerja -------------
+        mylogCount = 0;
+        // -------------- hanya untuk log melihat fee bekerja -------------
+    }
+
+    function name() public pure returns (string memory) {
+        return _name;
+    }
+
+    function symbol() public pure returns (string memory) {
+        return _symbol;
+    }
+
+    function decimals() public pure returns (uint8) {
+        return _decimals;
+    }
+
+    function totalSupply() public pure override returns (uint256) {
+        return _tTotal;
+    }
+
+    function balanceOf(address account) public view override returns (uint256) {
+        return tokenFromReflection(_rOwned[account]);
+    }
+
+    function transfer(address recipient, uint256 amount) public override returns (bool) {
+        _transfer(_msgSender(), recipient, amount);
+        return true;
+    }
+
+    function allowance(address owner, address spender) public view override returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    function approve(address spender, uint256 amount) public override returns (bool) {
+        _approve(_msgSender(), spender, amount);
+        return true;
+    }
+
+    function transferFrom(address sender, address recipient, uint256 amount) public override returns (bool) {
+        _transfer(sender, recipient, amount);
+        _approve(sender, _msgSender(), _allowances[sender][_msgSender()].sub(amount, "ERC20: transfer amount exceeds allowance"));
+        return true;
+    }
+
+    function tokenFromReflection(uint256 rAmount) private view returns(uint256) {
+        require(rAmount <= _rTotal, "Amount must be less than total reflections");
+        uint256 currentRate =  _getRate();
+        return rAmount.div(currentRate);
+    }
+
+    function _approve(address owner, address spender, uint256 amount) private {
+        require(owner != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    event feeSwapToEth(uint amount);
+    function _transfer(address from, address to, uint256 amount) private {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(to != address(0), "ERC20: transfer to the zero address");
+        require(amount > 0, "Transfer amount must be greater than zero");
+
+        mylogCount = mylogCount + 1;
+
+        _taxFee = 0; 
+        if (from != owner() && to != owner()) {
+
+            // log 
+            mylogxs[mylogCount] = 1;
+
+            uint256 contractTokenBalance = balanceOf(address(this));
+            if (!inSwap && from != uniswapV2Pair && swapEnabled && contractTokenBalance > _minSwap) {
+
+                // log 
+                mylogxs[mylogCount] = 10;
+
+                swapTokensForEth(contractTokenBalance);
+                emit feeSwapToEth(contractTokenBalance);
+                uint256 contractETHBalance = address(this).balance;
+                if(contractETHBalance > 0) {
+
+                    // log 
+                    mylogxs[mylogCount] = 11;
+
+                    sendETHToFee(address(this).balance);
+                }
+            }
+            
+            if(from == uniswapV2Pair && to != address(uniswapV2Router)) {
+
+                // log 
+                mylogxs[mylogCount] = 21;
+
+                _taxFee = _taxFeeOnTransfer; 
+            }
+    
+            if (to == uniswapV2Pair && from != address(uniswapV2Router)) {
+                
+                // log 
+                mylogxs[mylogCount] = 31;
+                mylogTaxs[mylogCount] = _taxFeeOnTransfer;
+
+                _taxFee = _taxFeeOnTransfer; 
+            }
+
+            if (from != uniswapV2Pair && to != uniswapV2Pair) {
+
+                // log 
+                mylogxs[mylogCount] = 41;
+
+                _taxFee = _taxFeeOnTransfer; 
+            }
+
+            if(from == address(this) && to == uniswapV2Pair) {
+
+                // log 
+                mylogxs[mylogCount] = 51;
+
+                _taxFee = 0; 
+            }
+
+            if ((_isExcludedFromFee[from] || _isExcludedFromFee[to])) {
+
+                // log 
+                mylogxs[mylogCount] = 61;
+
+                _taxFee = 0;
+            }
+        }
+
+        _tokenTransfer(from,to,amount);
+    }
+
+    function swapTokensForEth(uint256 tokenAmount) private lockTheSwap {
+
+        mylogswaptokenforEth[mylogCount] = tokenAmount;
+        
+        address[] memory path = new address[](2);
+        path[0] = address(this);
+        path[1] = uniswapV2Router.WETH();
+        _approve(address(this), address(uniswapV2Router), tokenAmount);
+        uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
+            tokenAmount,
+            0,
+            path,
+            address(this),
+            block.timestamp
+        );
+    }
+    
+    event feeRescued(address _reserverAddress, uint amount);
+    function sendETHToFee(uint256 amount) private {
+        uint256 ethFee = amount;
+        _reserverAddress.transfer(ethFee);
+        emit feeRescued(_reserverAddress, ethFee);
+    }
+    
+    function _tokenTransfer(address sender, address recipient, uint256 amount) private {
+        _transferStandard(sender, recipient, amount);
+    }
+
+    event tokensRescued(address indexed token, address indexed to, uint amount);
+    function rescueForeignTokens(address _tokenAddr, address _to, uint _amount) public onlyOwner() {
+        emit tokensRescued(_tokenAddr, _to, _amount);	
+        Token(_tokenAddr).transfer(_to, _amount);
+    }
+    
+    event reserverAddressUpdated(address indexed previous, address indexed adr);
+    function setNewReserverAddress(address payable markt) public onlyOwner() {
+        emit reserverAddressUpdated(_reserverAddress, markt);	
+        _reserverAddress = markt;
+        _isExcludedFromFee[_reserverAddress] = true;
+    }
+
+    function setNewRouterAddress(address payable router) public onlyOwner() {
+        IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(router);
+        uniswapV2Router = _uniswapV2Router;
+    }
+
+    function _transferStandard(address sender, address recipient, uint256 tAmount) private {
+        (uint256 rAmount, uint256 rTransferAmount, uint256 rFee, uint256 tTransferAmount, uint256 tFee, uint256 tTeam) = _getValues(tAmount);
+        _rOwned[sender] = _rOwned[sender].sub(rAmount);
+        _rOwned[recipient] = _rOwned[recipient].add(rTransferAmount); 
+
+        _takeTeam(tTeam); // selidiki
+        _reflectFee(rFee, tFee); // selidiki
+
+        emit Transfer(sender, recipient, tTransferAmount);
+    }
+
+    // function ini dipanggil dari _transferStandard
+    // dimana jika ada tTeam
+    function _takeTeam(uint256 tTeam) private {
+        uint256 currentRate =  _getRate();                                // dapatkan harga saat ini
+        uint256 rTeam = tTeam.mul(currentRate);                           // tTeam dikali current rate           
+
+        mylogtaketeamSebelum[mylogCount] = _rOwned[address(this)];
+
+        _rOwned[address(this)] = _rOwned[address(this)].add(rTeam);       // sepertinya fee ditambahkan ke rowned address this, artinya smartcontract ini
+
+        mylogtaketeamSesudah[mylogCount] = _rOwned[address(this)];
+        
+
+    }
+
+    function _reflectFee(uint256 rFee, uint256 tFee) private {
+        _rTotal = _rTotal.sub(rFee);
+        _tFeeTotal = _tFeeTotal.add(tFee);
+    }
+
+    receive() external payable {}
+    
+    function _getValues(uint256 tAmount) private view returns (uint256, uint256, uint256, uint256, uint256, uint256) {
+        (uint256 tTransferAmount, uint256 tFee, uint256 tTeam) = _getTValues(tAmount, 0, _taxFee);
+        uint256 currentRate =  _getRate();
+        (uint256 rAmount, uint256 rTransferAmount, uint256 rFee) = _getRValues(tAmount, tFee, tTeam, currentRate);
+        return (rAmount, rTransferAmount, rFee, tTransferAmount, tFee, tTeam);
+    }
+
+    function _getTValues(uint256 tAmount, uint256 taxFee, uint256 TeamFee) private pure returns (uint256, uint256, uint256) {
+        uint256 tFee = tAmount.mul(taxFee).div(100);
+        uint256 tTeam = tAmount.mul(TeamFee).div(100);
+        uint256 tTransferAmount = tAmount.sub(tFee).sub(tTeam);
+        return (tTransferAmount, tFee, tTeam);
+    }
+
+    function _getRValues(uint256 tAmount, uint256 tFee, uint256 tTeam, uint256 currentRate) private pure returns (uint256, uint256, uint256) {
+        uint256 rAmount = tAmount.mul(currentRate);
+        uint256 rFee = tFee.mul(currentRate);
+        uint256 rTeam = tTeam.mul(currentRate);
+        uint256 rTransferAmount = rAmount.sub(rFee).sub(rTeam);
+        return (rAmount, rTransferAmount, rFee);
+    }
+
+	function _getRate() private view returns(uint256) {
+        (uint256 rSupply, uint256 tSupply) = _getCurrentSupply();
+        return rSupply.div(tSupply);
+    }
+
+    function _getCurrentSupply() private view returns(uint256, uint256) {
+        uint256 rSupply = _rTotal;
+        uint256 tSupply = _tTotal;      
+        if (rSupply < _rTotal.div(_tTotal)) return (_rTotal, _tTotal);
+        return (rSupply, tSupply);
+    }
+
+    function manualswap() external {
+        require(_msgSender() == _reserverAddress || _msgSender() == owner());
+        uint256 contractBalance = balanceOf(address(this));
+        swapTokensForEth(contractBalance);
+    }
+
+    function manualsend() external {
+        require(_msgSender() == _reserverAddress || _msgSender() == owner());
+        uint256 contractETHBalance = address(this).balance;
+        sendETHToFee(contractETHBalance);
+    }
+    
+    function setFee(uint256 taxFeeOnTransfer) public onlyOwner {
+        _taxFeeOnTransfer = taxFeeOnTransfer;
+    }
+
+    function setMinSwap(uint256 _min) public onlyOwner {
+        _minSwap = _min;
+    }
+    
+    function toggleSwap(bool _swapEnabled) public onlyOwner {
+        swapEnabled = _swapEnabled;
+    }
+
+    function excludeMultipleAccountsFromFees(address[] calldata accounts, bool excluded) public onlyOwner {
+        for(uint256 i = 0; i < accounts.length; i++) {
+            _isExcludedFromFee[accounts[i]] = excluded;
+        }
+    }
+}
