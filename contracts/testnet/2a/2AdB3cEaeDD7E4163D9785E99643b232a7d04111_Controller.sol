@@ -1,0 +1,63 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.9;
+
+import "./IController.sol";
+import "./IManager.sol";
+
+
+contract Controller is IController {
+    // Track information about a registered contract
+    struct ContractInfo {
+        address contractAddress; // Address of contract
+        bytes20 gitCommitHash; // SHA1 hash of head Git commit during registration of this contract
+    }
+
+    // Track contract ids and contract info
+    mapping(bytes32 => ContractInfo) private registry;
+
+    constructor() {
+        // Start system as paused
+        // paused = true;
+    }
+
+    /**
+     * @notice Register contract id and mapped address
+     * @param _id Contract id (keccak256 hash of contract name)
+     * @param _contractAddress Contract address
+     */
+    function setContractInfo(
+        bytes32 _id,
+        address _contractAddress,
+        bytes20 _gitCommitHash
+    ) external override  {
+        registry[_id].contractAddress = _contractAddress;
+        registry[_id].gitCommitHash = _gitCommitHash;
+
+        emit SetContractInfo(_id, _contractAddress, _gitCommitHash);
+    }
+
+    /**
+     * @notice Update contract's controller
+     * @param _id Contract id (keccak256 hash of contract name)
+     * @param _controller Controller address
+     */
+    function updateController(bytes32 _id, address _controller) external override  {
+        return IManager(registry[_id].contractAddress).setController(_controller);
+    }
+
+    /**
+     * @notice Return contract info for a given contract id
+     * @param _id Contract id (keccak256 hash of contract name)
+     */
+    function getContractInfo(bytes32 _id) public view returns (address, bytes20) {
+        return (registry[_id].contractAddress, registry[_id].gitCommitHash);
+    }
+
+    /**
+     * @notice Get contract address for an id
+     * @param _id Contract id
+     */
+    function getContract(bytes32 _id) public view override returns (address) {
+        return registry[_id].contractAddress;
+    }
+}
