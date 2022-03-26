@@ -1,0 +1,44 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-03-25
+*/
+
+// SPDX-License-Identifier: MIT 
+pragma solidity ^0.6.12;
+
+contract associateSystem {
+
+    event TitleValue(uint256 indexed _BNB);
+    event Withdraw  (address indexed, uint indexed _BNB, uint indexed balance);
+    event Deposit   (address indexed sender, uint indexed amount, uint indexed balance);
+
+    uint public BNB = 1 ether;
+    
+    mapping(address => bool) public Associates;
+
+constructor() public payable{}
+
+    function associate() external payable {
+        require(msg.sender != address(0), 'FST Info: O endereço nao pode ser zero');
+        require(!Associates[msg.sender],'FST Info: Este endereço ja esta associado');
+        require(msg.value == BNB, 'FST Info: Voce nao possui BNB suficiante para ser um associado');
+        Associates[msg.sender] = true;
+        emit Deposit   (msg.sender, msg.value, address(this).balance);}
+
+    function withdraw(uint _BNB) public returns(uint){
+        // require(roles[ADMIN][msg.sender], "FST Info: Você não está autorizado para utilizar este comando");
+        require(address(this).balance > 0,'FST Info: O cotrato nao possue fundos');
+        (msg.sender).transfer(_BNB);
+        emit Withdraw(msg.sender, _BNB, address(this).balance);
+        return address(this).balance;
+    }
+
+    function set_Titlevalue(uint256 _BNB) public{
+        require(_BNB != BNB, 'FST Info: O BNB nao pode ser igual ao mesmo');
+        BNB = _BNB *10**8;
+        emit TitleValue(_BNB);
+    }
+
+    function getContractBalance() public view returns (uint){
+        return address(this).balance;
+    }
+}
