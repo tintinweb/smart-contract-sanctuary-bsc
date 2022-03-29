@@ -1,0 +1,400 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-03-29
+*/
+
+/**
+    AQUI PONEN LO QUE QUIERAN
+*/
+
+// SPDX-License-Identifier: Unlicensed
+
+pragma solidity ^0.8.6;
+
+interface IBEP20 {
+    function totalSupply() external view returns (uint256);
+    function decimals() external view returns (uint8);
+    function symbol() external view returns (string memory);
+    function name() external view returns (string memory);
+    function getOwner() external view returns (address);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address recipient, uint256 amount) external returns (bool);
+    function allowance(address _owner, address spender) external view returns (uint256);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+abstract contract Ownable {
+    address internal owner;
+    address private _previousOwner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    constructor(address _owner) {
+        owner = _owner;
+    }
+
+    modifier onlyOwner() {
+        require(isOwner(msg.sender), "You are not the owner!");
+        _;
+    }
+
+    function isOwner(address account) public view returns (bool) {
+        return account == owner;
+    }
+
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
+    }
+}
+
+/**
+ * Router Interfaces
+ */
+
+interface IDEXFactory {
+    function createPair(address tokenA, address tokenB) external returns (address pair);
+}
+
+interface IDEXRouter {
+    function factory() external pure returns (address);
+    function WETH() external pure returns (address);
+
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint amountADesired,
+        uint amountBDesired,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountA, uint amountB, uint liquidity);
+
+    function addLiquidityETH(
+        address token,
+        uint amountTokenDesired,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
+
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+
+    function swapExactETHForTokensSupportingFeeOnTransferTokens(
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external payable;
+
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+}
+
+/**
+ * Contract Code
+ */
+
+contract Lunes28 is IBEP20, Ownable {
+    address DEAD = 0x000000000000000000000000000000000000dEaD;
+
+    string constant _name = "Lunes 28";
+    string constant _symbol = "L28"; 
+    uint8 constant _decimals = 9;
+    uint256 _totalSupply = 1 * 10**9 * 10**_decimals;
+
+    mapping (address => uint256) _balances;
+    mapping (address => mapping (address => uint256)) _allowances;
+
+    bool public tradingEnabled = false;
+    uint256 private genesisBlock = 0;
+    uint256 private deadline = 0;
+
+    mapping (address => bool) public isBlacklisted;
+
+    mapping (address => bool) public isFeeExempt;
+    mapping (address => bool) public isTxLimitExempt;
+    
+    //General Fees Variables
+    uint256 public devFee;
+    uint256 public marketingFee;
+    uint256 public buybackFee;
+    uint256 public totalFee;
+
+    //Buy Fees Variables
+    uint256 private buyDevFee = 2;
+    uint256 private buyMarketingFee = 8;
+    uint256 private buyBuybackFee = 0;
+    uint256 private buyTotalFee = buyDevFee + buyMarketingFee + buyBuybackFee;
+
+    //Sell Fees Variables
+    uint256 private sellDevFee = 2;
+    uint256 private sellMarketingFee = 8;
+    uint256 private sellBuybackFee = 0;
+    uint256 private sellTotalFee = sellDevFee + sellMarketingFee + sellBuybackFee;
+
+    //Max Transaction & Wallet
+    uint256 public _maxTxAmount = _totalSupply * 50 / 10000; //Initial 0.5%
+    uint256 public _maxWalletAmount = _totalSupply * 100 / 10000; //Initial 1%
+
+    // Fees Receivers
+    address public devFeeReceiver = 0xBa362B5119d31662a875716D710d6DA2C1E088FC;
+    address public marketingFeeReceiver = 0x7Ea76EbDF64D129E6fa0e4af51a075d9662853c4;
+    address public buybackFeeReceiver = 0x42d588746c6bb7C1D959129BB80D69A0e00A43Cf;
+
+    IDEXRouter public router;
+    address public pair;
+
+    bool public swapEnabled = true;
+    uint256 public swapThreshold = _totalSupply * 10 / 10000; //0.1%
+    uint256 public maxSwapSize = _totalSupply * 50 / 10000; //0.5%
+
+    bool inSwap;
+    modifier swapping() { inSwap = true; _; inSwap = false; }
+  
+    constructor () Ownable(msg.sender) {
+        router = IDEXRouter(0x9Ac64Cc6e4415144C455BD8E4837Fea55603e5c3);
+        pair = IDEXFactory(router.factory()).createPair(router.WETH(), address(this));
+        _allowances[address(this)][address(router)] = type(uint256).max;
+
+        isFeeExempt[msg.sender] = true;
+        isTxLimitExempt[msg.sender] = true;
+
+        _balances[msg.sender] = _totalSupply;
+        emit Transfer(address(0), msg.sender, _totalSupply);
+    }
+
+    receive() external payable { }
+      
+    function totalSupply() external view override returns (uint256) { return _totalSupply; }
+    function decimals() external pure override returns (uint8) { return _decimals; }
+    function symbol() external pure override returns (string memory) { return _symbol; }
+    function name() external pure override returns (string memory) { return _name; }
+    function getOwner() external view override returns (address) { return owner; }
+    function balanceOf(address account) public view override returns (uint256) { return _balances[account]; }
+    function allowance(address holder, address spender) external view override returns (uint256) { return _allowances[holder][spender]; }
+    function approve(address spender, uint256 amount) public override returns (bool) {
+        _allowances[msg.sender][spender] = amount;
+        emit Approval(msg.sender, spender, amount);
+        return true;
+    }
+
+    function setTradingStatus(bool status, uint256 deadblocks) external onlyOwner {
+        require(status, "No rug here ser");
+        tradingEnabled = status;
+        deadline = deadblocks;
+        if (status == true) {
+            genesisBlock = block.number;
+        }
+    }
+
+    function transfer(address recipient, uint256 amount) external override returns (bool) {
+        return _transferFrom(msg.sender, recipient, amount);
+    }
+
+    function transferFrom(address sender, address recipient, uint256 amount) external override returns (bool) {
+        if(_allowances[sender][msg.sender] != type(uint256).max){
+            _allowances[sender][msg.sender] = _allowances[sender][msg.sender] - amount;
+        }
+
+        return _transferFrom(sender, recipient, amount);
+    }
+
+    function _transferFrom(address sender, address recipient, uint256 amount) internal returns (bool) {
+        if(inSwap || amount == 0){ return _basicTransfer(sender, recipient, amount); }
+
+        if(!isFeeExempt[sender] && !isFeeExempt[recipient] && !tradingEnabled && sender == pair) {
+            isBlacklisted[recipient] = true;
+        }
+
+        require(!isBlacklisted[sender], "You are a bot!"); 
+
+        setFees(sender);
+        
+        if (sender != owner && recipient != address(this) && recipient != address(DEAD) && recipient != pair) {
+            uint256 heldTokens = balanceOf(recipient);
+            require((heldTokens + amount) <= _maxWalletAmount || isTxLimitExempt[recipient], "Total Holding is currently limited, you can not hold that much.");
+        }
+
+        // Checks Max Transaction Limit
+        if(sender == pair){
+            require(amount <= _maxTxAmount || isTxLimitExempt[recipient], "TX limit exceeded.");
+        }
+
+        if(shouldSwapBack()){ swapBack(); }
+
+        _balances[sender] = _balances[sender] - amount;
+
+        uint256 amountReceived = shouldTakeFee(sender) ? takeFee(recipient, amount) : amount;
+        _balances[recipient] = _balances[recipient] + amountReceived;
+
+        emit Transfer(sender, recipient, amountReceived);
+
+        return true;
+    }
+
+    function manageBlacklist(address account, bool status) public onlyOwner {
+        isBlacklisted[account] = status;
+    }
+
+    function setFees(address sender) internal {
+        if(sender == pair) {
+            buyFees();
+        }
+        else {
+            sellFees();
+        }
+    }
+    
+    function _basicTransfer(address sender, address recipient, uint256 amount) internal returns (bool) {
+        _balances[sender] = _balances[sender] - amount;
+        _balances[recipient] = _balances[recipient] + (amount);
+        emit Transfer(sender, recipient, amount);
+        return true;
+    }
+
+    function buyFees() internal {
+        devFee = buyDevFee;
+        marketingFee = buyMarketingFee;
+        buybackFee = buyBuybackFee;
+        totalFee = buyTotalFee;
+    }
+
+    function sellFees() internal{
+        devFee = sellDevFee;
+        marketingFee = sellMarketingFee;
+        buybackFee = sellBuybackFee;
+        totalFee = sellTotalFee;
+    }
+
+    function shouldTakeFee(address sender) internal view returns (bool) {
+        return !isFeeExempt[sender];
+    }
+
+    function takeFee(address sender, uint256 amount) internal returns (uint256) {
+        uint256 feeAmount = block.number <= (genesisBlock + deadline) ?  amount / 100 * 99 : amount / 100 * totalFee;
+        
+        _balances[address(this)] = _balances[address(this)] + (feeAmount);
+
+        emit Transfer(sender, address(this), feeAmount);
+
+        return amount - feeAmount;
+    }
+  
+    function shouldSwapBack() internal view returns (bool) {
+        return msg.sender != pair
+        && !inSwap
+        && swapEnabled
+        && _balances[address(this)] >= swapThreshold;
+    }
+
+    function swapBack() internal swapping {
+        uint256 amountToSwap = 0;
+        uint256 contractTokenBalance = balanceOf(address(this));
+        if(contractTokenBalance >= maxSwapSize) {
+            amountToSwap = maxSwapSize;            
+        }
+        else {
+            amountToSwap = contractTokenBalance;
+        }
+
+        address[] memory path = new address[](2);
+        path[0] = address(this);
+        path[1] = router.WETH();
+
+        uint256 balanceBefore = address(this).balance;
+
+        router.swapExactTokensForETHSupportingFeeOnTransferTokens(
+            amountToSwap,
+            0,
+            path,
+            address(this),
+            block.timestamp
+        );
+
+        uint256 amountBNB = address(this).balance - (balanceBefore);
+        
+        uint256 amountBNBDev = amountBNB * (devFee) / (totalFee);
+        uint256 amountBNBMarketing = amountBNB * (marketingFee) / (totalFee);
+        uint256 amountBNBBuyback = amountBNB * (buybackFee) / (totalFee);
+
+        (bool devSucess,) = payable(devFeeReceiver).call{value: amountBNBDev, gas: 30000}("");
+        require(devSucess, "receiver rejected ETH transfer");
+        (bool marketingSucess,) = payable(marketingFeeReceiver).call{value: amountBNBMarketing, gas: 30000}("");
+        require(marketingSucess, "receiver rejected ETH transfer");
+        (bool buybackSucess,) = payable(buybackFeeReceiver).call{value: amountBNBBuyback, gas: 30000}("");
+        require(buybackSucess, "receiver rejected ETH transfer");
+    }
+
+    function setBuyFees(uint256 _devFee, uint256 _marketingFee, uint256 _buybackFee) external onlyOwner {
+        buyDevFee = _devFee;
+        buyMarketingFee = _marketingFee;
+        buyBuybackFee = _buybackFee;
+        buyTotalFee = buyDevFee + buyMarketingFee + buyBuybackFee;
+        require(buyTotalFee <= 25, "Invalid buy tax fees");
+    }
+
+    function setSellFees(uint256 _devFee, uint256 _marketingFee, uint256 _buybackFee) external onlyOwner {
+        sellDevFee = _devFee;
+        sellMarketingFee = _marketingFee;
+        sellBuybackFee = _buybackFee;
+        sellTotalFee = sellDevFee + sellMarketingFee + sellBuybackFee;
+        require(sellTotalFee <= 25, "Invalid sell tax fees");
+    }
+    
+    function setFeeReceivers(address _devFeeReceiver, address _marketingFeeReceiver, address _buybackFeeReceiver) external onlyOwner {
+        devFeeReceiver = _devFeeReceiver;
+        marketingFeeReceiver = _marketingFeeReceiver;
+        buybackFeeReceiver = _buybackFeeReceiver;
+    }
+
+    function setSwapBackSettings(bool _enabled, uint256 _percentageMinimum, uint256 _percentageMaximum) external onlyOwner {
+        swapEnabled = _enabled;
+        swapThreshold = _totalSupply * _percentageMinimum / 10000;
+        maxSwapSize = _totalSupply * _percentageMaximum / 10000;
+    }
+
+    function setIsFeeExempt(address account, bool exempt) external onlyOwner {
+        isFeeExempt[account] = exempt;
+    }
+    
+    function setIsTxLimitExempt(address account, bool exempt) external onlyOwner {
+        isTxLimitExempt[account] = exempt;
+    }
+
+    function setMaxWalletAmount(uint256 maxWalletAmount) external onlyOwner {
+        require(maxWalletAmount >= 100, "Invalid max wallet amount");
+        _maxWalletAmount = _totalSupply * maxWalletAmount / 10000;
+    }
+
+    function setMaxTxAmount(uint256 maxTxAmount) external onlyOwner {
+        _maxTxAmount = _totalSupply * maxTxAmount / 10000;
+    }
+
+    // Stuck Balances Functions
+
+    function rescueToken(address tokenAddress, uint256 tokens) public onlyOwner returns (bool success) {
+        return IBEP20(tokenAddress).transfer(msg.sender, tokens);
+    }
+
+    function clearStuckBalance() external onlyOwner {
+        uint256 amountBNB = address(this).balance;
+        payable(msg.sender).transfer(amountBNB);
+    }
+}
