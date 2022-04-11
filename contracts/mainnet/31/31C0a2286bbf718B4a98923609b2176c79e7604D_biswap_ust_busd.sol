@@ -1,0 +1,5322 @@
+//SPDX-License-Identifier: Unlicense
+pragma solidity ^0.8.0;
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
+import "../interfaces/IZapDepositer.sol";
+import "../interfaces/IStrategy.sol";
+import "../interfaces/IBiswapFarm.sol";
+// import "./interfaces/IExchangeRegistry.sol";
+import "../StrategyRouter.sol";
+
+import "hardhat/console.sol";
+
+contract biswap_ust_busd is Ownable, IStrategy {
+    IERC20 public ust = IERC20(0x23396cF899Ca06c4472205fC903bDB4de249D6fC);
+    IERC20 public busd = IERC20(0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56);
+    IERC20 public bsw = IERC20(0x965F527D9159dCe6288a2219DB51fc6Eef120dD1);
+    IERC20 public lpToken = IERC20(0x9E78183dD68cC81bc330CAF3eF84D354a58303B5);
+    IBiswapFarm public farm =
+        IBiswapFarm(0xDbc1A13490deeF9c3C12b44FE77b503c1B061739);
+    IUniswapV2Router02 public biswapRouter =
+        IUniswapV2Router02(0x3a6d8cA21D1CF76F653A67577FA0D27453350dD8);
+    StrategyRouter public strategyRouter;
+    uint256 public poolId = 18;
+    uint256 public max_leftover_busd = 1 * 10**ERC20(address(busd)).decimals();
+    uint256 public max_leftover_ust = 1 * 10**ERC20(address(ust)).decimals();
+
+    constructor(StrategyRouter _strategyRouter) {
+        strategyRouter = _strategyRouter;
+    }
+
+    function deposit(uint256 amount)
+        external
+        override
+        onlyOwner
+    {
+        console.log("block.number", block.number);
+
+        // TODO: Is there a way to swap ust to busd so that we'll get perfect ratio to addLiquidity?
+        //       If so, we could get rid of that helper function.
+        fix_leftover(amount);
+
+        // swap a bit more to reduce consequences of slippage and fees (0.06% on acryptos for ust-busd)
+        uint256 busdAmount = amount * 5002 / 10000;
+        Exchange exchange = strategyRouter.exchange();
+        ust.transfer(address(exchange), busdAmount);
+        console.log("busdAmount", busdAmount);
+        busdAmount = exchange.swapRouted(busdAmount, ust, busd, address(this));
+        // console.log(
+        //     "ust %s busd %s",
+        //     ust.balanceOf(address(this)),
+        //     busd.balanceOf(address(this))
+        // );
+
+        uint256 ustAmount = ust.balanceOf(address(this));
+        busdAmount = busd.balanceOf(address(this));
+
+        ust.approve(address(biswapRouter), ustAmount);
+        busd.approve(address(biswapRouter), busdAmount);
+        (uint256 amountA, uint256 amountB, uint256 liquidity) = biswapRouter
+            .addLiquidity(
+                address(ust),
+                address(busd),
+                ustAmount,
+                busdAmount,
+                0,
+                0,
+                address(this),
+                block.timestamp
+            );
+
+        console.log("addLiquidity leftover", ustAmount - amountA, busdAmount - amountB);
+        lpToken.approve(address(farm), liquidity);
+        //  console.log(lpAmount, amount, lpToken.balanceOf(address(this)), lpToken.balanceOf(address(farm)));
+        farm.deposit(poolId, liquidity);
+
+        // after add_liquidity some tokens leftover, send them back to StrategyRouter
+        // busd.transfer(msg.sender, busd.balanceOf(address(this)));
+        //  console.log(lpAmount, amount, lpToken.balanceOf(address(this)), lpToken.balanceOf(address(farm)));
+
+        // (uint256 amount, , , ) = farm.userInfo(address(lpToken), address(this));
+        //  console.log(lpAmount, amount);
+    }
+
+    function withdraw(uint256 amount)
+        external
+        override
+        onlyOwner
+        returns (uint256 amountWithdrawn)
+    {
+        console.log("--- biswap withdraw");
+        address token0 = IUniswapV2Pair(address(lpToken)).token0();
+        address token1 = IUniswapV2Pair(address(lpToken)).token1();
+        uint256 balance0 = IERC20(token0).balanceOf(address(lpToken));
+        uint256 balance1 = IERC20(token1).balanceOf(address(lpToken));
+        (uint112 _reserve0, uint112 _reserve1, ) = IUniswapV2Pair(
+            address(lpToken)
+        ).getReserves();
+
+        uint256 amountUst = amount / 2;
+        uint256 amountBusd;
+        uint256 amountUstToBusd = amount - amountUst;
+
+        (_reserve0, _reserve1) = token0 == address(ust)
+            ? (_reserve0, _reserve1)
+            : (_reserve1, _reserve0);
+
+        amountBusd = biswapRouter.quote(amountUstToBusd, _reserve0, _reserve1);
+
+        uint256 liquidity = (lpToken.totalSupply() * (amountUst + amountBusd)) /
+            (balance0 + balance1);
+
+        // console.log(
+        //     "amountUst %s amountBusd %s",
+        //     amountUst,
+        //     amountBusd
+        // );
+
+        farm.withdraw(poolId, liquidity);
+        console.log(
+            "liquidity %s, lpToken.balanceOf(address(this)) %s",
+            liquidity,
+            lpToken.balanceOf(address(this))
+        );
+        lpToken.approve(address(biswapRouter), liquidity);
+        (uint256 amountA, uint256 amountB) = biswapRouter.removeLiquidity(
+            address(ust),
+            address(busd),
+            lpToken.balanceOf(address(this)),
+            0,
+            0,
+            address(this),
+            block.timestamp
+        );
+
+        Exchange exchange = strategyRouter.exchange();
+        busd.transfer(address(exchange), amountB);
+        console.log("amountA %s amountB %s", amountA, amountB);
+        amountA += exchange.swapRouted(amountB, busd, ust, address(this));
+        console.log("amountA %s amountB %s", amountA, amountB);
+        ust.transfer(msg.sender, amountA);
+        amountWithdrawn = amountA;
+    }
+
+    function compound()
+        external
+        override
+        onlyOwner
+    {
+        farm.withdraw(poolId, 0);
+        // use balance because BSW is harvested on deposit and withdraw calls
+        uint256 bswAmount = bsw.balanceOf(address(this));
+        console.log("bswAmount", bswAmount);
+
+        console.log("block.number", block.number);
+        if (bswAmount > 0) {
+            fix_leftover(0);
+            sellBSW(bswAmount);
+            uint256 balanceUst = ust.balanceOf(address(this));
+            uint256 balanceBusd = busd.balanceOf(address(this));
+
+            ust.approve(address(biswapRouter), balanceUst);
+            busd.approve(address(biswapRouter), balanceBusd);
+
+            console.log(
+                "receivedUst %s receivedBusd %s",
+                balanceUst,
+                balanceBusd
+            );
+            (uint256 amountA, uint256 amountB, uint256 liquidity) = biswapRouter
+                .addLiquidity(
+                    address(ust),
+                    address(busd),
+                    balanceUst,
+                    balanceBusd,
+                    0,
+                    0,
+                    address(this),
+                    block.timestamp
+                );
+
+            uint256 lpAmount = lpToken.balanceOf(address(this));
+            lpToken.approve(address(farm), lpAmount);
+            console.log(
+                "liquidity %s amountA %s amountB %s",
+                liquidity,
+                amountA,
+                amountB
+            );
+            farm.deposit(poolId, lpAmount);
+            console.log(
+                "biswap farm compound leftover ust %s busd %s, max_leftover_busd %s",
+                ust.balanceOf(address(this)),
+                busd.balanceOf(address(this)),
+                max_leftover_busd
+            );
+        }
+    }
+
+    /// @dev Swaps half of ust to busd once leftover amounts reach predefined limit.
+    ///      Half of busd is also swapped if it reaches limit.
+    function fix_leftover(uint256 amoungIgnore) public {
+        Exchange exchange = strategyRouter.exchange();
+        uint256 busdAmount = busd.balanceOf(address(this));
+        uint256 ustAmount = ust.balanceOf(address(this)) - amoungIgnore;
+        if (busdAmount > max_leftover_busd) {
+            console.log("fix_leftover busd %s", busdAmount);
+            busd.transfer(address(exchange), busdAmount);
+            exchange.swapRouted(busdAmount / 2, busd, ust, address(this));
+        }
+        if (ustAmount > max_leftover_ust) {
+            console.log("fix_leftover ust %s", ustAmount);
+            ust.transfer(address(exchange), ustAmount);
+            exchange.swapRouted(ustAmount / 2, ust, busd, address(this));
+        }
+    }
+
+    function totalTokens() external view override returns (uint256) {
+        (uint256 liquidity, ) = farm.userInfo(poolId, address(this));
+
+
+        uint256 _totalSupply = lpToken.totalSupply();
+        // this formula is from remove_liquidity -> burn of uniswapV2pair
+        uint256 amountUst = (liquidity * ust.balanceOf(address(lpToken))) /
+            _totalSupply;
+        uint256 amountBusd = (liquidity * busd.balanceOf(address(lpToken))) /
+            _totalSupply;
+
+        if (amountBusd > 0) {
+
+            address token0 = IUniswapV2Pair(address(lpToken)).token0();
+
+            (uint112 _reserve0, uint112 _reserve1, ) = IUniswapV2Pair(
+                address(lpToken)
+            ).getReserves();
+
+            (_reserve0, _reserve1) = token0 == address(busd)
+                ? (_reserve0, _reserve1)
+                : (_reserve1, _reserve0);
+
+            // convert amountBusd to amount of ust
+            amountUst += biswapRouter.quote(amountBusd, _reserve0, _reserve1);
+        }
+
+        return amountUst;
+    }
+
+    // swap bsw for ust & busd in proportions 50/50
+    function sellBSW(uint256 amountA)
+        public
+        returns (uint256 receivedUst, uint256 receivedBusd)
+    {
+        bsw.approve(address(biswapRouter), amountA);
+
+        uint256 ustPart = amountA / 2;
+        uint256 busdPart = amountA - ustPart;
+
+        Exchange exchange = strategyRouter.exchange();
+        bsw.transfer(address(exchange), ustPart);
+        receivedUst = exchange.swapRouted(ustPart, bsw, ust, address(this));
+
+        bsw.transfer(address(exchange), busdPart);
+        receivedBusd = exchange.swapRouted(busdPart, bsw, busd, address(this));
+    }
+
+    function withdrawAll()
+        external
+        override
+        onlyOwner
+        returns (uint256 amountWithdrawn)
+    {
+        console.log("--- withdrawAll call");
+
+        (uint256 amount, ) = farm.userInfo(poolId, address(this));
+        console.log("withdraw amount LPs %s", amount);
+        if(amount > 0) {
+            farm.withdraw(poolId, amount);
+            uint256 lpAmount = lpToken.balanceOf(address(this));
+            lpToken.approve(address(biswapRouter), lpAmount);
+            (uint256 amountA, uint256 amountB) = biswapRouter.removeLiquidity(
+                address(ust),
+                address(busd),
+                lpToken.balanceOf(address(this)),
+                0,
+                0,
+                address(this),
+                block.timestamp
+            );
+        }
+
+        uint256 amountUst = ust.balanceOf(address(this));
+        uint256 amountBusd = busd.balanceOf(address(this));
+
+        console.log("ust balance %s busd %s", amountUst, amountBusd);
+        if(amountBusd > 0) {
+            Exchange exchange = strategyRouter.exchange();
+            busd.transfer(address(exchange), amountBusd);
+            amountUst += exchange.swapRouted(amountBusd, busd, ust, address(this));
+        }
+        // console.log("amountA %s amountB %s", amountA, amountB);
+        if(amountUst > 0) {
+            ust.transfer(msg.sender, amountUst);
+            amountWithdrawn = amountUst;
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.5.0) (token/ERC20/IERC20.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20 {
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `to`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `from` to `to` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (access/Ownable.sol)
+
+pragma solidity ^0.8.0;
+
+import "../utils/Context.sol";
+
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owner.
+     */
+    constructor() {
+        _transferOwnership(_msgSender());
+    }
+
+    /**
+     * @dev Returns the address of the current owner.
+     */
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    /**
+     * @dev Throws if called by any account other than the owner.
+     */
+    modifier onlyOwner() {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    /**
+     * @dev Leaves the contract without owner. It will not be possible to call
+     * `onlyOwner` functions anymore. Can only be called by the current owner.
+     *
+     * NOTE: Renouncing ownership will leave the contract without an owner,
+     * thereby removing any functionality that is only available to the owner.
+     */
+    function renounceOwnership() public virtual onlyOwner {
+        _transferOwnership(address(0));
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Can only be called by the current owner.
+     */
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _transferOwnership(newOwner);
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Internal function without access restriction.
+     */
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
+
+pragma solidity >=0.6.2;
+
+import './IUniswapV2Router01.sol';
+
+interface IUniswapV2Router02 is IUniswapV2Router01 {
+    function removeLiquidityETHSupportingFeeOnTransferTokens(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountETH);
+    function removeLiquidityETHWithPermitSupportingFeeOnTransferTokens(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amountETH);
+
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+    function swapExactETHForTokensSupportingFeeOnTransferTokens(
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external payable;
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+}
+
+pragma solidity >=0.5.0;
+
+interface IUniswapV2Pair {
+    event Approval(address indexed owner, address indexed spender, uint value);
+    event Transfer(address indexed from, address indexed to, uint value);
+
+    function name() external pure returns (string memory);
+    function symbol() external pure returns (string memory);
+    function decimals() external pure returns (uint8);
+    function totalSupply() external view returns (uint);
+    function balanceOf(address owner) external view returns (uint);
+    function allowance(address owner, address spender) external view returns (uint);
+
+    function approve(address spender, uint value) external returns (bool);
+    function transfer(address to, uint value) external returns (bool);
+    function transferFrom(address from, address to, uint value) external returns (bool);
+
+    function DOMAIN_SEPARATOR() external view returns (bytes32);
+    function PERMIT_TYPEHASH() external pure returns (bytes32);
+    function nonces(address owner) external view returns (uint);
+
+    function permit(address owner, address spender, uint value, uint deadline, uint8 v, bytes32 r, bytes32 s) external;
+
+    event Mint(address indexed sender, uint amount0, uint amount1);
+    event Burn(address indexed sender, uint amount0, uint amount1, address indexed to);
+    event Swap(
+        address indexed sender,
+        uint amount0In,
+        uint amount1In,
+        uint amount0Out,
+        uint amount1Out,
+        address indexed to
+    );
+    event Sync(uint112 reserve0, uint112 reserve1);
+
+    function MINIMUM_LIQUIDITY() external pure returns (uint);
+    function factory() external view returns (address);
+    function token0() external view returns (address);
+    function token1() external view returns (address);
+    function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
+    function price0CumulativeLast() external view returns (uint);
+    function price1CumulativeLast() external view returns (uint);
+    function kLast() external view returns (uint);
+
+    function mint(address to) external returns (uint liquidity);
+    function burn(address to) external returns (uint amount0, uint amount1);
+    function swap(uint amount0Out, uint amount1Out, address to, bytes calldata data) external;
+    function skim(address to) external;
+    function sync() external;
+
+    function initialize(address, address) external;
+}
+
+//SPDX-License-Identifier: Unlicense
+pragma solidity ^0.8.0;
+
+interface IZapDepositer {
+  function add_liquidity ( uint256[5] calldata amounts, uint256 min_mint_amount ) external returns ( uint256 );
+  function remove_liquidity ( uint256 _amount, uint256[5] calldata min_amounts ) external returns ( uint256[5] memory );
+  function remove_liquidity_one_coin ( uint256 _token_amount, int128 i, uint256 _min_amount ) external returns ( uint256 );
+  function remove_liquidity_imbalance ( uint256[5] calldata amounts, uint256 max_burn_amount ) external returns ( uint256 );
+  function calc_withdraw_one_coin ( uint256 _token_amount, int128 i ) external view returns ( uint256 );
+  function calc_token_amount ( uint256[5] calldata amounts, bool is_deposit ) external view returns ( uint256 );
+  function pool (  ) external view returns ( address );
+  function token (  ) external view returns ( address );
+  function base_pool (  ) external view returns ( address );
+  function coins ( uint256 arg0 ) external view returns ( address );
+  function base_coins ( uint256 arg0 ) external view returns ( address );
+}
+
+//SPDX-License-Identifier: Unlicense
+pragma solidity ^0.8.0;
+
+
+interface IStrategy {
+
+
+    /// @notice Deposit token to strategy.
+    function deposit(uint256 amount) external;
+
+    /// @notice Withdraw tokens from strategy.
+    /// @dev Max withdrawable amount is returned by totalTokens.
+    function withdraw(uint256 amount) external returns (uint256 amountWithdrawn);
+
+    /// @notice Harvest rewards and reinvest them.
+    function compound() external;
+
+    /// @notice Approximated amount of token on the strategy.
+    function totalTokens() external view returns (uint256);
+
+    /// @notice Withdraw all tokens from strategy.
+    function withdrawAll() external returns (uint256 amountWithdrawn);
+}
+
+//SPDX-License-Identifier: Unlicense
+pragma solidity ^0.8.0;
+
+interface IBiswapFarm {
+  function BONUS_MULTIPLIER (  ) external view returns ( uint256 );
+  function BSW (  ) external view returns ( address );
+  function BSWPerBlock (  ) external view returns ( uint256 );
+  function add ( uint256 _allocPoint, address _lpToken, bool _withUpdate ) external;
+  function deposit ( uint256 _pid, uint256 _amount ) external;
+  function depositedBsw (  ) external view returns ( uint256 );
+  function devPercent (  ) external view returns ( uint256 );
+  function devaddr (  ) external view returns ( address );
+  function emergencyWithdraw ( uint256 _pid ) external;
+  function enterStaking ( uint256 _amount ) external;
+  function getMultiplier ( uint256 _from, uint256 _to ) external view returns ( uint256 );
+  function lastBlockDevWithdraw (  ) external view returns ( uint256 );
+  function leaveStaking ( uint256 _amount ) external;
+  function massUpdatePools (  ) external;
+  function migrate ( uint256 _pid ) external;
+  function migrator (  ) external view returns ( address );
+  function owner (  ) external view returns ( address );
+  function pendingBSW ( uint256 _pid, address _user ) external view returns ( uint256 );
+  function percentDec (  ) external view returns ( uint256 );
+  function poolInfo ( uint256 ) external view returns ( address lpToken, uint256 allocPoint, uint256 lastRewardBlock, uint256 accBSWPerShare );
+  function poolLength (  ) external view returns ( uint256 );
+  function refAddr (  ) external view returns ( address );
+  function refPercent (  ) external view returns ( uint256 );
+  function renounceOwnership (  ) external;
+  function safuPercent (  ) external view returns ( uint256 );
+  function safuaddr (  ) external view returns ( address );
+  function set ( uint256 _pid, uint256 _allocPoint, bool _withUpdate ) external;
+  function setDevAddress ( address _devaddr ) external;
+  function setMigrator ( address _migrator ) external;
+  function setRefAddress ( address _refaddr ) external;
+  function setSafuAddress ( address _safuaddr ) external;
+  function stakingPercent (  ) external view returns ( uint256 );
+  function startBlock (  ) external view returns ( uint256 );
+  function totalAllocPoint (  ) external view returns ( uint256 );
+  function transferOwnership ( address newOwner ) external;
+  function updateBswPerBlock ( uint256 newAmount ) external;
+  function updateMultiplier ( uint256 multiplierNumber ) external;
+  function updatePool ( uint256 _pid ) external;
+  function userInfo ( uint256, address ) external view returns ( uint256 amount, uint256 rewardDebt );
+  function withdraw ( uint256 _pid, uint256 _amount ) external;
+  function withdrawDevAndRefFee (  ) external;
+}
+
+//SPDX-License-Identifier: Unlicense
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+import "./interfaces/IStrategy.sol";
+import "./ReceiptNFT.sol";
+import "./Exchange.sol";
+import "./SharesToken.sol";
+
+import "hardhat/console.sol";
+
+contract StrategyRouter is Ownable {
+    error AlreadyAddedStablecoin();
+    error UnsupportedStablecoin();
+    error NotReceiptOwner();
+    error CycleNotClosed();
+    error CycleClosed();
+    error InsufficientShares();
+    error DuplicateStrategy();
+    error NotCallableByContracts();
+    error TooEarly(uint256 cycleEndAt);
+    error NotEnoughInBatching(uint256 amountInBatching);
+    error BadPercent();
+    error InitialSharesAreUnwithdrawable();
+
+    modifier OnlyEOW() {
+        if (msg.sender != tx.origin) revert NotCallableByContracts();
+        _;
+    }
+
+    struct StrategyInfo {
+        address strategyAddress;
+        address depositAssetAddress;
+        uint256 weight;
+        uint256 batchingBalance;
+    }
+
+    struct Cycle {
+        uint256 startAt;
+        uint256 pricePerShare;
+        uint256 totalInBatch;
+        uint256 receivedByStrats;
+        uint256 totalDepositUniform;
+    }
+
+    uint8 public constant UNIFORM_DECIMALS = 18;
+    uint256 public constant INITIAL_SHARES = 1e12;
+    address private constant DEAD_ADDRESS =
+        0x000000000000000000000000000000000000dEaD;
+
+    uint256 public cycleDuration = 1 days;
+    uint256 public currentCycleId;
+    uint256 public minUsdPerCycle;
+
+    ReceiptNFT public receiptContract;
+    Exchange public exchange;
+    SharesToken public sharesToken;
+
+    StrategyInfo[] public strategies;
+    address[] private stablecoins;
+    // address[] private stablecoinsArray;
+    mapping(address => bool) private stablecoinsMap;
+    mapping(uint256 => Cycle) public cycles;
+
+    constructor() {
+        receiptContract = new ReceiptNFT();
+        sharesToken = new SharesToken();
+        cycles[currentCycleId].startAt = block.timestamp;
+    }
+
+    // Universal Functions
+
+    /// @notice Deposit money collected in the batching into strategies.
+    /// @notice Callable by anyone when `cycleDuration` seconds has been passed and 
+    ///         batch has reached `minUsdPerCycle` amount of coins.
+    /// @dev Only callable by user wallets.
+    function depositToStrategies() external OnlyEOW {
+        if (cycles[currentCycleId].startAt + cycleDuration > block.timestamp)
+            revert TooEarly(cycles[currentCycleId].startAt + cycleDuration);
+        if (cycles[currentCycleId].totalInBatch < minUsdPerCycle)
+            revert NotEnoughInBatching(cycles[currentCycleId].totalInBatch);
+
+        console.log("~~~~~~~~~~~~~ depositToStrategies ~~~~~~~~~~~~~");
+
+        uint256 len = strategies.length;
+        for (uint256 i; i < len; i++) {
+            // trigger compound on strategy
+            IStrategy(strategies[i].strategyAddress).compound();
+        }
+
+        // get total strategies balance after compound
+        (uint256 balanceAfterCompound, ) = viewStrategiesBalance();
+        uint256 totalDepositUniform;
+        for (uint256 i; i < len; i++) {
+            // deposit to strategy
+            IERC20 strategyAssetAddress = IERC20(
+                strategies[i].depositAssetAddress
+            );
+
+            uint256 depositAmount = strategies[i].batchingBalance;
+            strategyAssetAddress.transfer(
+                strategies[i].strategyAddress,
+                depositAmount
+            );
+            IStrategy(strategies[i].strategyAddress).deposit(depositAmount);
+            totalDepositUniform += toUniform(
+                depositAmount,
+                address(strategyAssetAddress)
+            );
+            console.log("depositAmount %s leftoverAmount %s", depositAmount);
+            strategies[i].batchingBalance = 0;
+        }
+
+        // get total strategies balance after deposit
+        (uint256 balanceAfterDeposit, ) = viewStrategiesBalance();
+        uint256 receivedByStrats = balanceAfterDeposit - balanceAfterCompound;
+
+        // console.log(
+        //     "balanceAfterDeposit %s, balanceAfterCompound %s, pps before math",
+        //     balanceAfterDeposit,
+        //     balanceAfterCompound,
+        //     cycles[currentCycleId].pricePerShare
+        // );
+
+        uint256 totalShares = sharesToken.totalSupply();
+        if (totalShares == 0) {
+            sharesToken.mint(DEAD_ADDRESS, INITIAL_SHARES);
+            cycles[currentCycleId].pricePerShare =
+                balanceAfterDeposit /
+                sharesToken.totalSupply();
+            console.log(
+                "initial pps %s, shares %s",
+                cycles[currentCycleId].pricePerShare,
+                sharesToken.totalSupply()
+            );
+        } else {
+            cycles[currentCycleId].pricePerShare =
+                balanceAfterCompound /
+                totalShares;
+
+            console.log(
+                "cycle %s, pps %s, shares %s",
+                currentCycleId,
+                cycles[currentCycleId].pricePerShare,
+                sharesToken.totalSupply()
+            );
+
+            console.log(
+                "totalDepositUniform %s totalDepositUniform/pps %s",
+                totalDepositUniform,
+                totalDepositUniform / cycles[currentCycleId].pricePerShare
+            );
+            uint256 newShares = receivedByStrats /
+                cycles[currentCycleId].pricePerShare;
+            sharesToken.mint(address(this), newShares);
+        }
+
+        // start new cycle
+        cycles[currentCycleId].receivedByStrats = receivedByStrats;
+        cycles[currentCycleId].totalDepositUniform = totalDepositUniform;
+        currentCycleId++;
+        cycles[currentCycleId].startAt = block.timestamp;
+    }
+
+    /// @notice Compound all strategies and update price per share.
+    function compoundAll() external OnlyEOW {
+        if (sharesToken.totalSupply() == 0) revert();
+
+        uint256 len = strategies.length;
+        for (uint256 i; i < len; i++) {
+            IStrategy(strategies[i].strategyAddress).compound();
+        }
+    }
+
+    /// @dev Returns list of supported stablecoins.
+    function viewStablecoins() public view returns (address[] memory) {
+        return stablecoins;
+    }
+
+    /// @dev Returns strategy weight as percent of weight of all strategies.
+    function viewStrategyPercentWeight(uint256 _strategyId)
+        public
+        view
+        returns (uint256 strategyPercentAllocation)
+    {
+        uint256 totalStrategyWeight;
+        uint256 len = strategies.length;
+        for (uint256 i; i < len; i++) {
+            totalStrategyWeight += strategies[i].weight;
+        }
+        strategyPercentAllocation =
+            (strategies[_strategyId].weight * 1e4) /
+            totalStrategyWeight;
+
+        return strategyPercentAllocation;
+    }
+
+    /// @notice Returns count of strategies.
+    function viewStrategiesCount() public view returns (uint256 count) {
+        return strategies.length;
+    }
+
+    /// @notice Returns amount of usd in strategies.
+    /// @notice All returned numbers have `UNIFORM_DECIMALS` decimals.
+    /// @return totalBalance Total amount of usd in strategies.
+    /// @return balances Array of usd amount in each strategy.
+    function viewStrategiesBalance()
+        public
+        view
+        returns (uint256 totalBalance, uint256[] memory balances)
+    {
+        balances = new uint256[](strategies.length);
+        for (uint256 i; i < balances.length; i++) {
+            address strategyAssetAddress = strategies[i].depositAssetAddress;
+            uint256 balance = IStrategy(strategies[i].strategyAddress)
+                .totalTokens();
+            balance = toUniform(balance, strategyAssetAddress);
+            balances[i] = balance;
+            totalBalance += balance;
+        }
+    }
+
+    /// @notice Returns amount of usd to be deposited into strategies.
+    /// @notice All returned numbers have `UNIFORM_DECIMALS` decimals.
+    /// @return totalBalance Total amount of usd to be deposited into strategies.
+    /// @return balances Array of usd amount to be deposited into each strategy.
+    function viewBatchingBalance()
+        public
+        view
+        returns (uint256 totalBalance, uint256[] memory balances)
+    {
+        balances = new uint256[](strategies.length);
+        for (uint256 i; i < balances.length; i++) {
+            address strategyAssetAddress = strategies[i].depositAssetAddress;
+            // uint256 balance = ERC20(strategyAssetAddress).balanceOf(
+            //     address(this)
+            // );
+            // batchingBalance is in token decimals
+            uint256 balance = strategies[i].batchingBalance;
+            balance = toUniform(balance, strategyAssetAddress);
+            balances[i] = balance;
+            totalBalance += balance;
+        }
+    }
+
+    // User Functions
+
+    /// @notice Convert receipt NFT into share tokens.
+    ///         Cycle noted in receipt should be closed.
+    function unlockSharesFromNFT(uint256 receiptId)
+        public
+        OnlyEOW
+        returns (uint256 receivedShares)
+    {
+        if (receiptId == 0) revert InitialSharesAreUnwithdrawable();
+        if (receiptContract.ownerOf(receiptId) != msg.sender)
+            revert NotReceiptOwner();
+
+        console.log("~~~~~~~~~~~~~ unlockSharesFromNFT ~~~~~~~~~~~~~");
+
+        ReceiptNFT.ReceiptData memory receipt = receiptContract.viewReceipt(
+            receiptId
+        );
+        if (receipt.cycleId == currentCycleId) revert CycleNotClosed();
+
+        receiptContract.burn(receiptId);
+
+        receipt.amount = 
+            receipt.amount * 
+            cycles[receipt.cycleId].receivedByStrats /
+            cycles[receipt.cycleId].totalDepositUniform;
+        uint256 userShares = receipt.amount /
+            cycles[receipt.cycleId].pricePerShare;
+        console.log(
+            "receipt.amount %s, receipt pps %s, userShares %s",
+            receipt.amount,
+            cycles[receipt.cycleId].pricePerShare,
+            userShares
+        );
+        sharesToken.transfer(msg.sender, userShares);
+        return userShares;
+    }
+
+    /// @notice User withdraw usd from strategies via receipt NFT.
+    /// @notice On partial withdraw leftover shares transfered to user.
+    /// @notice Receipt is burned.
+    /// @param receiptId Receipt NFT id.
+    /// @param withdrawToken Supported stablecoin that user wish to receive.
+    /// @param percent Percent of shares from receipt to withdraw.
+    /// @dev Cycle noted in receipt must be closed.
+    /// @dev Only callable by user wallets.  
+    // TODO: percent param maybe need to be changed, for example to token amount or shares amount
+    function withdrawByReceipt(
+        uint256 receiptId,
+        address withdrawToken,
+        uint256 percent
+    ) external OnlyEOW {
+        if (receiptId == 0) revert InitialSharesAreUnwithdrawable();
+        if (receiptContract.ownerOf(receiptId) != msg.sender)
+            revert NotReceiptOwner();
+        if (supportsCoin(withdrawToken) == false)
+            revert UnsupportedStablecoin();
+        if (percent > 1e4 || percent == 0) revert BadPercent();
+
+        console.log("~~~~~~~~~~~~~ withdrawByReceipt ~~~~~~~~~~~~~");
+
+        uint256 amountWithdrawShares;
+        {
+            ReceiptNFT.ReceiptData memory receipt = receiptContract.viewReceipt(
+                receiptId
+            );
+            if (receipt.cycleId == currentCycleId) revert CycleNotClosed();
+            receiptContract.burn(receiptId);
+
+            receipt.amount = 
+                receipt.amount * 
+                cycles[receipt.cycleId].receivedByStrats /
+                cycles[receipt.cycleId].totalDepositUniform;
+            console.log(
+                "receipt.amount %s, receivedByStrats %s, totalDepositUniform %s",
+                receipt.amount,
+                cycles[receipt.cycleId].receivedByStrats,
+                cycles[receipt.cycleId].totalDepositUniform
+            );
+            uint256 userShares = receipt.amount /
+                cycles[receipt.cycleId].pricePerShare;
+            amountWithdrawShares = (userShares * percent) / 1e4;
+            console.log(
+                "receipt.cycleId %s, userShares %s, receipt.pps %s",
+                receipt.cycleId,
+                userShares,
+                cycles[receipt.cycleId].pricePerShare
+            );
+            console.log(
+                "amountWithdrawShares %s, total shares: %s, router shares %s",
+                amountWithdrawShares,
+                sharesToken.totalSupply(),
+                sharesToken.balanceOf(address(this))
+            );
+            // all shares are minted to this contract, transfer to user his part
+            // because he had only NFT, not shares token
+            sharesToken.transfer(msg.sender, userShares - amountWithdrawShares);
+        }
+
+        (
+            uint256 strategiesBalance,
+            uint256[] memory balances
+        ) = viewStrategiesBalance();
+        uint256 withdrawAmountTotal;
+        {
+            uint256 currentPricePerShare = strategiesBalance /
+                sharesToken.totalSupply();
+            withdrawAmountTotal = amountWithdrawShares * currentPricePerShare;
+        }
+
+        console.log(
+            "withdrawAmountTotal %s, strategiesBalance %s",
+            withdrawAmountTotal,
+            strategiesBalance
+        );
+
+        uint256 amountToTransfer = _withdrawByReceipt(
+            withdrawAmountTotal,
+            strategiesBalance,
+            balances,
+            withdrawToken
+        );
+
+        (strategiesBalance, ) = viewStrategiesBalance();
+        sharesToken.burn(address(this), amountWithdrawShares);
+        // if (sharesToken.totalSupply() == 0)
+        //     cycles[currentCycleId].pricePerShare = 0;
+        // else
+        //     cycles[currentCycleId].pricePerShare =
+        //         strategiesBalance /
+        //         sharesToken.totalSupply();
+
+        console.log(
+            "withdraw token balance %s, total withdraw %s",
+            IERC20(withdrawToken).balanceOf(address(this)),
+            amountToTransfer
+        );
+        IERC20(withdrawToken).transfer(msg.sender, amountToTransfer);
+    }
+
+    // this function is needed to avoid 'stack too deep' error
+    function _withdrawByReceipt(
+        uint256 withdrawAmountTotal,
+        uint256 strategiesBalance,
+        uint256[] memory balances,
+        address withdrawToken
+    ) private returns (uint256 amountToTransfer) {
+        console.log("~~~~~~~~~~~~~ _withdrawByReceipt ~~~~~~~~~~~~~");
+        uint256 len = strategies.length;
+        for (uint256 i; i < len; i++) {
+            address strategyAssetAddress = strategies[i].depositAssetAddress;
+            uint256 withdrawAmount = (withdrawAmountTotal * balances[i]) /
+                strategiesBalance;
+            console.log("withdrawAmount", withdrawAmount);
+            withdrawAmount = fromUniform(withdrawAmount, strategyAssetAddress);
+            console.log("withdrawAmount", withdrawAmount);
+            withdrawAmount = IStrategy(strategies[i].strategyAddress).withdraw(
+                withdrawAmount
+            );
+            console.log("withdrawAmount", withdrawAmount);
+
+            console.log(
+                "iterate strategy",
+                ERC20(strategyAssetAddress).name(),
+                ERC20(strategyAssetAddress).decimals()
+            );
+            console.log(
+                "balances[i] %s strategiesBalance %s",
+                balances[i],
+                strategiesBalance
+            );
+            if (strategyAssetAddress != withdrawToken) {
+                IERC20(strategyAssetAddress).transfer(
+                    address(exchange),
+                    withdrawAmount
+                );
+                withdrawAmount = exchange.swapRouted(
+                    withdrawAmount,
+                    IERC20(strategyAssetAddress),
+                    IERC20(withdrawToken),
+                    address(this)
+                );
+            }
+            amountToTransfer += withdrawAmount;
+        }
+    }
+
+    /// @notice User withdraw usd from batching.
+    /// @notice On partial withdraw amount noted in receipt is updated.
+    /// @notice Receipt is burned when withdrawing whole amount.
+    /// @param receiptId Receipt NFT id.
+    /// @param withdrawToken Supported stablecoin that user wish to receive.
+    /// @param amount Amount to withdraw. Max amount to withdraw is noted in NFT, 
+    ///        passing greater than that or 0 will choose maximum noted in NFT.
+    /// @dev Cycle noted in receipt must match current cycle (i.e. not closed).
+    /// @dev Only callable by user wallets.
+    function withdrawFromBatching(
+        uint256 receiptId,
+        address withdrawToken,
+        uint256 amount
+    ) external OnlyEOW {
+        if (receiptContract.ownerOf(receiptId) != msg.sender)
+            revert NotReceiptOwner();
+        if (supportsCoin(withdrawToken) == false)
+            revert UnsupportedStablecoin();
+
+        console.log("~~~~~~~~~~~~~ withdrawFromBatching ~~~~~~~~~~~~~");
+
+        {
+            ReceiptNFT.ReceiptData memory receipt = receiptContract.viewReceipt(
+                receiptId
+            );
+            if (receipt.cycleId != currentCycleId) revert CycleClosed();
+
+            if (amount == 0 || receipt.amount < amount) amount = receipt.amount;
+
+            if (amount == receipt.amount) receiptContract.burn(receiptId);
+            else receiptContract.setAmount(receiptId, receipt.amount - amount);
+        }
+
+        (
+            uint256 totalBalance,
+            uint256[] memory balances
+        ) = viewBatchingBalance();
+        console.log("batchingBalance %s, amount %s", totalBalance, amount);
+
+        uint256 amountToTransfer;
+        // uint256 len = strategies.length;
+        for (uint256 i; i < strategies.length; i++) {
+            address strategyAssetAddress = strategies[i].depositAssetAddress;
+            // split withdraw amount proportionally between strategies
+            uint256 amountWithdraw = (amount * balances[i]) / totalBalance;
+            amountWithdraw = fromUniform(amountWithdraw, strategyAssetAddress);
+
+            console.log(
+                "strategyAssetAddress balance: %s, amountWithdraw: %s, balances[i] %s",
+                IERC20(strategyAssetAddress).balanceOf(address(this)),
+                amountWithdraw,
+                balances[i]
+            );
+            strategies[i].batchingBalance -= amountWithdraw;
+            // swap strategies tokens to withdraw token
+            if (strategyAssetAddress != withdrawToken) {
+                IERC20(strategyAssetAddress).transfer(
+                    address(exchange),
+                    amountWithdraw
+                );
+                amountWithdraw = exchange.swapRouted(
+                    amountWithdraw,
+                    IERC20(strategyAssetAddress),
+                    IERC20(withdrawToken),
+                    address(this)
+                );
+            }
+            amountToTransfer += amountWithdraw;
+        }
+        cycles[currentCycleId].totalInBatch -= amount;
+
+        console.log(
+            "withdraw token balance %s, total withdraw %s",
+            IERC20(withdrawToken).balanceOf(address(this)),
+            amountToTransfer
+        );
+        IERC20(withdrawToken).transfer(msg.sender, amountToTransfer);
+    }
+
+    /// @notice User withdraw usd from strategies using his shares.
+    /// @notice Use withdrawByReceipt function to withdraw using receipt NFT.
+    /// @param amountWithdrawShares Amount of shares to withdraw.
+    /// @param withdrawToken Supported stablecoin that user wish to receive.
+    function withdrawShares(uint256 amountWithdrawShares, address withdrawToken)
+        external
+        OnlyEOW
+    {
+        if (sharesToken.balanceOf(msg.sender) < amountWithdrawShares)
+            revert InsufficientShares();
+        if (supportsCoin(withdrawToken) == false)
+            revert UnsupportedStablecoin();
+
+        (
+            uint256 strategiesBalance,
+            uint256[] memory balances
+        ) = viewStrategiesBalance();
+
+        uint256 withdrawAmountTotal;
+        {
+            // calculate current pps (based on totalTokens function)
+            uint256 currentPricePerShare = strategiesBalance /
+                sharesToken.totalSupply();
+            // withdraw amount based on pps
+            withdrawAmountTotal = amountWithdrawShares * currentPricePerShare;
+            console.log("PPS %s", currentPricePerShare);
+        }
+
+        console.log("~~~~~~~~~~~~~ withdrawShares ~~~~~~~~~~~~~");
+
+        // console.log("amountWithdrawShares %s, currentPricePerShare %s, withdrawAmountTotal %s", amountWithdrawShares, currentPricePerShare, withdrawAmountTotal);
+        console.log(
+            "total shares: %s, router shares %s",
+            sharesToken.totalSupply(),
+            sharesToken.balanceOf(address(this))
+        );
+
+        uint256 len = strategies.length;
+        uint256 amountToTransfer;
+        for (uint256 i; i < len; i++) {
+            address strategyAssetAddress = strategies[i].depositAssetAddress;
+            uint256 amountWithdraw = (withdrawAmountTotal * balances[i]) /
+                strategiesBalance;
+
+            amountWithdraw = fromUniform(amountWithdraw, strategyAssetAddress);
+
+            amountWithdraw = IStrategy(strategies[i].strategyAddress).withdraw(
+                amountWithdraw
+            );
+            console.log(
+                "iterate strategy %s, amountWithdraw %s, withdrawn %s",
+                ERC20(strategyAssetAddress).name(),
+                amountWithdraw
+            );
+            if (strategyAssetAddress != withdrawToken) {
+                IERC20(strategyAssetAddress).transfer(
+                    address(exchange),
+                    amountWithdraw
+                );
+                amountWithdraw = exchange.swapRouted(
+                    amountWithdraw,
+                    IERC20(strategyAssetAddress),
+                    IERC20(withdrawToken),
+                    address(this)
+                );
+            }
+            amountToTransfer += amountWithdraw;
+        }
+
+        (strategiesBalance, ) = viewStrategiesBalance();
+        sharesToken.burn(msg.sender, amountWithdrawShares);
+        // if (sharesToken.totalSupply() == 0)
+        //     cycles[currentCycleId].pricePerShare = 0;
+        // else
+        //     cycles[currentCycleId].pricePerShare =
+        //         strategiesBalance /
+        //         sharesToken.totalSupply();
+
+        console.log(
+            "withdraw token balance %s, total withdraw %s",
+            IERC20(withdrawToken).balanceOf(address(this)),
+            amountToTransfer
+        );
+        IERC20(withdrawToken).transfer(msg.sender, amountToTransfer);
+    }
+
+    /// @notice Deposit stablecoin into batching.
+    /// @notice Tokens immediately swapped to stablecoins required by strategies
+    ///         according to their weights, but not deposited into strategies.
+    /// @param _depositTokenAddress Supported stablecoin to deposit.
+    /// @param _amount Amount to deposit.
+    /// @dev User should approve `_amount` of `_depositTokenAddress` to this contract.
+    /// @dev Only callable by user wallets.
+    function depositToBatch(address _depositTokenAddress, uint256 _amount)
+        external
+        OnlyEOW
+    {
+        if (!supportsCoin(_depositTokenAddress)) revert UnsupportedStablecoin();
+
+        console.log("~~~~~~~~~~~~~ depositToBatch ~~~~~~~~~~~~~");
+        IERC20(_depositTokenAddress).transferFrom(
+            msg.sender,
+            address(this),
+            _amount
+        );
+
+        uint256 len = strategies.length;
+        uint256 totalDepositAmount;
+        for (uint256 i; i < len; i++) {
+            // split deposited amount between strats proportionally
+            uint256 depositAmount = (_amount * viewStrategyPercentWeight(i)) /
+                10000;
+            address strategyAssetAddress = strategies[i].depositAssetAddress;
+
+            // swap deposited token to strategy token
+            if (strategyAssetAddress != _depositTokenAddress) {
+                IERC20(_depositTokenAddress).transfer(
+                    address(exchange),
+                    depositAmount
+                );
+
+                console.log(
+                    "depositAmount: %s, token: %s",
+                    depositAmount,
+                    ERC20(strategyAssetAddress).name()
+                );
+                depositAmount = exchange.swapRouted(
+                    depositAmount,
+                    IERC20(_depositTokenAddress),
+                    IERC20(strategyAssetAddress),
+                    address(this)
+                );
+            }
+
+            strategies[i].batchingBalance += depositAmount;
+            totalDepositAmount += changeDecimals(
+                depositAmount,
+                ERC20(strategyAssetAddress).decimals(),
+                UNIFORM_DECIMALS
+            );
+
+            console.log(
+                "totalDepositAmount: %s, depositAmount: %s, token: %s",
+                totalDepositAmount,
+                depositAmount,
+                ERC20(strategyAssetAddress).name()
+            );
+        }
+        // console.log(depositAmount , oracle.scalePrice(price, priceDecimals, 18) , ERC20(strategyAssetAddress).decimals());
+        // console.log(depositAmount * oracle.scalePrice(price, priceDecimals, 18) / 10**ERC20(strategyAssetAddress).decimals());
+        console.log("totalDepositAmount: %s", totalDepositAmount);
+        cycles[currentCycleId].totalInBatch += totalDepositAmount;
+
+        receiptContract.mint(currentCycleId, totalDepositAmount, msg.sender);
+    }
+
+    // Admin functions
+
+    /// @notice Set address of exchange contract.
+    /// @dev Admin function.
+    function setExchange(Exchange newExchange) external onlyOwner {
+        exchange = newExchange;
+    }
+
+    /// @notice Minimum usd needed to be able to close the cycle.
+    /// @param amount Amount of usd must have `UNIFORM_DECIMALS` decimals.
+    /// @dev Admin function.
+    function setMinUsdPerCycle(uint256 amount) external onlyOwner {
+        minUsdPerCycle = amount;
+    }
+
+    /// @notice Minimum time needed to be able to close the cycle.
+    /// @param duration Duration of cycle in seconds.
+    /// @dev Admin function.
+    function setCycleDuration(uint256 duration) external onlyOwner {
+        cycleDuration = duration;
+    }
+
+    /// @notice Add strategy.
+    /// @param _strategyAddress Address of the strategy.
+    /// @param _depositAssetAddress Asset to be deposited into strategy.
+    /// @param _weight Weight of the strategy. Used to split user deposit between strategies.
+    /// @dev Admin function.
+    /// @dev Deposit asset must be supported by the router.
+    function addStrategy(
+        address _strategyAddress,
+        address _depositAssetAddress,
+        uint256 _weight
+    ) external onlyOwner {
+        if (!supportsCoin(_depositAssetAddress)) revert UnsupportedStablecoin();
+        uint256 len = strategies.length;
+        for (uint256 i = 0; i < len; i++) {
+            if (strategies[i].strategyAddress == _strategyAddress)
+                revert DuplicateStrategy();
+        }
+        strategies.push(
+            StrategyInfo({
+                strategyAddress: _strategyAddress,
+                depositAssetAddress: _depositAssetAddress,
+                weight: _weight,
+                batchingBalance: 0
+            })
+        );
+    }
+
+    /// @notice Update strategy weight.
+    /// @param _strategyId Id of the strategy.
+    /// @param _weight Weight of the strategy.
+    /// @dev Admin function.
+    function updateStrategy(uint256 _strategyId, uint256 _weight)
+        external
+        onlyOwner
+    {
+        strategies[_strategyId].weight = _weight;
+    }
+
+    /// @notice Remove strategy.
+    /// @param _strategyId Id of the strategy.
+    /// @dev Admin function.
+    function removeStrategy(uint256 _strategyId) external onlyOwner {
+        console.log("~~~~~~~~~~~~~ removeStrategy ~~~~~~~~~~~~~");
+
+        StrategyInfo memory removedStrategyInfo = strategies[_strategyId];
+        IStrategy removedStrategy = IStrategy(
+            removedStrategyInfo.strategyAddress
+        );
+        address _depositTokenAddress = removedStrategyInfo.depositAssetAddress;
+
+        uint256 len = strategies.length - 1;
+        strategies[_strategyId] = strategies[len];
+        strategies.pop();
+
+        // compound removed strategy
+        removedStrategy.compound();
+        console.log(
+            "totalTokens %s, balance %s",
+            removedStrategy.totalTokens(),
+            IERC20(_depositTokenAddress).balanceOf(
+                removedStrategyInfo.strategyAddress
+            )
+        );
+
+        // withdraw all from removed strategy
+        uint256 withdrawnAmount = removedStrategy.withdrawAll();
+
+        // compound all strategies
+        for (uint256 i; i < len; i++) {
+            IStrategy(strategies[i].strategyAddress).compound();
+        }
+
+        // get total strategies balance after compound
+        // (uint256 balanceAfterCompound, ) = viewStrategiesBalance();
+
+        // deposit withdrawn funds into other strategies
+        for (uint256 i; i < len; i++) {
+            uint256 depositAmount = (withdrawnAmount *
+                viewStrategyPercentWeight(i)) / 10000;
+            address strategyAssetAddress = strategies[i].depositAssetAddress;
+
+            if (strategyAssetAddress != _depositTokenAddress) {
+                IERC20(_depositTokenAddress).transfer(
+                    address(exchange),
+                    depositAmount
+                );
+
+                depositAmount = exchange.swapRouted(
+                    depositAmount,
+                    IERC20(_depositTokenAddress),
+                    IERC20(strategyAssetAddress),
+                    address(this)
+                );
+            }
+
+            IERC20(strategyAssetAddress).transfer(
+                strategies[i].strategyAddress,
+                depositAmount
+            );
+            IStrategy(strategies[i].strategyAddress).deposit(depositAmount);
+            // console.log("deposit price: %s, amount: %s, token: %s", totalDepositAmount, depositAmount, ERC20(strategyAssetAddress).name());
+        }
+        // console.log("balanceAfterDeposit %s, balanceAfterCompound %s, pps before math", balanceAfterDeposit, balanceAfterCompound, cycles[currentCycleId].pricePerShare);
+        // console.log("final pps %s, shares %s", cycles[currentCycleId].pricePerShare, sharesToken.totalSupply());
+    }
+
+    /// @notice Rebalance strategies.
+    /// @param tempAsset Strategies assets will be swapped to this intermediary asset
+    ///                  which then will be swapped back into strategies assets according to their weights.
+    /// @dev Admin function.
+    // TODO: need to rebalance batching also
+    function rebalance(address tempAsset) external onlyOwner {
+        console.log("~~~~~~~~~~~~~ rebalance ~~~~~~~~~~~~~");
+        uint256 len = strategies.length;
+
+        (
+            uint256 totalBalance,
+            uint256[] memory balances
+        ) = viewStrategiesBalance();
+        uint256[] memory toAdd = new uint256[](len);
+        uint256 totalSold;
+        uint256 totalToAdd;
+
+        for (uint256 i; i < len; i++) {
+            uint256 desiredBalance = (totalBalance *
+                viewStrategyPercentWeight(i)) / 10000;
+            if (desiredBalance > balances[i]) {
+                toAdd[i] = desiredBalance - balances[i];
+                totalToAdd += toAdd[i];
+            } else if (desiredBalance < balances[i]) {
+                address strategyAssetAddress = strategies[i]
+                    .depositAssetAddress;
+                uint256 amountSell = balances[i] - desiredBalance;
+                amountSell = fromUniform(amountSell, strategyAssetAddress);
+                amountSell = IStrategy(strategies[i].strategyAddress).withdraw(
+                    amountSell
+                );
+                if (strategyAssetAddress != tempAsset) {
+                    IERC20(strategyAssetAddress).transfer(
+                        address(exchange),
+                        amountSell
+                    );
+                    amountSell = exchange.swapRouted(
+                        amountSell,
+                        IERC20(strategyAssetAddress),
+                        IERC20(tempAsset),
+                        address(this)
+                    );
+                }
+                totalSold += amountSell;
+            }
+        }
+
+        for (uint256 i; i < len; i++) {
+            // TODO: probably need check that toAdd is greater than some value (such as 1 ust)
+            // similar should be in first loop, because swaps may fail due to too low amounts
+            if(toAdd[i] == 0) continue;
+            uint256 curAdd = (totalSold * toAdd[i]) / totalToAdd;
+            console.log(
+                "curAdd: %s totalSold: %s toAdd[i]: %s",
+                totalToAdd,
+                totalSold,
+                toAdd[i]
+            );
+            address strategyAssetAddress = strategies[i].depositAssetAddress;
+
+            if (strategyAssetAddress != tempAsset) {
+                IERC20(tempAsset).transfer(address(exchange), curAdd);
+
+                console.log("before swap: %s,", curAdd);
+                curAdd = exchange.swapRouted(
+                    curAdd,
+                    IERC20(tempAsset),
+                    IERC20(strategyAssetAddress),
+                    address(this)
+                );
+                console.log("after swap: %s,", curAdd);
+            }
+
+            IERC20(strategyAssetAddress).transfer(
+                strategies[i].strategyAddress,
+                curAdd
+            );
+            console.log("token: %s", ERC20(strategyAssetAddress).name());
+            console.log(
+                "balance: %s, weight %s",
+                ERC20(strategyAssetAddress).balanceOf(address(this)),
+                viewStrategyPercentWeight(i)
+            );
+            IStrategy(strategies[i].strategyAddress).deposit(curAdd);
+        }
+        // console.log("balanceAfterDeposit %s, balanceAfterCompound %s, pps before math", balanceAfterDeposit, balanceAfterCompound, cycles[currentCycleId].pricePerShare);
+        console.log(
+            "temp token at the end %s",
+            ERC20(tempAsset).balanceOf(address(this))
+        );
+    }
+
+    // function withdrawFromStrategy(uint256 _strategyId) external onlyOwner {}
+
+    /// @notice Add supported stablecoind for deposits.
+    /// @dev Admin function.
+    function setSupportedStablecoin(address stablecoinAddress, bool supported)
+        external
+        onlyOwner
+    {
+        if (supported && supportsCoin(stablecoinAddress))
+            revert AlreadyAddedStablecoin();
+
+        stablecoinsMap[stablecoinAddress] = supported;
+        if (supported) {
+            stablecoins.push(stablecoinAddress);
+        } else {
+            for (uint256 i = 0; i < stablecoins.length; i++) {
+                if (stablecoins[i] == stablecoinAddress) {
+                    stablecoins[i] = stablecoins[stablecoins.length - 1];
+                    stablecoins.pop();
+                    break;
+                }
+            }
+        }
+    }
+
+    // Internals
+
+    /// @dev Change decimal places from `oldDecimals` to `newDecimals`.
+    function changeDecimals(
+        uint256 amount,
+        uint8 oldDecimals,
+        uint8 newDecimals
+    ) private pure returns (uint256) {
+        if (oldDecimals < newDecimals) {
+            return amount * (10**(newDecimals - oldDecimals));
+        } else if (oldDecimals > newDecimals) {
+            return amount / (10**(oldDecimals - newDecimals));
+        }
+        return amount;
+    }
+
+    /// @dev Change decimal places to `UNIFORM_DECIMALS`.
+    function toUniform(uint256 amount, address token)
+        private
+        view
+        returns (uint256)
+    {
+        return
+            changeDecimals(amount, ERC20(token).decimals(), UNIFORM_DECIMALS);
+    }
+
+    /// @dev Convert decimal places from `UNIFORM_DECIMALS` to token decimals.
+    function fromUniform(uint256 amount, address token)
+        private
+        view
+        returns (uint256)
+    {
+        return
+            changeDecimals(amount, UNIFORM_DECIMALS, ERC20(token).decimals());
+    }
+
+    /// @notice Returns whether provided stablecoin is supported.
+    /// @param stablecoinAddress Address to lookup.
+    function supportsCoin(address stablecoinAddress)
+        private
+        view
+        returns (bool isSupported)
+    {
+        return stablecoinsMap[stablecoinAddress];
+    }
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity >= 0.4.22 <0.9.0;
+
+library console {
+	address constant CONSOLE_ADDRESS = address(0x000000000000000000636F6e736F6c652e6c6f67);
+
+	function _sendLogPayload(bytes memory payload) private view {
+		uint256 payloadLength = payload.length;
+		address consoleAddress = CONSOLE_ADDRESS;
+		assembly {
+			let payloadStart := add(payload, 32)
+			let r := staticcall(gas(), consoleAddress, payloadStart, payloadLength, 0, 0)
+		}
+	}
+
+	function log() internal view {
+		_sendLogPayload(abi.encodeWithSignature("log()"));
+	}
+
+	function logInt(int p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(int)", p0));
+	}
+
+	function logUint(uint p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint)", p0));
+	}
+
+	function logString(string memory p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string)", p0));
+	}
+
+	function logBool(bool p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool)", p0));
+	}
+
+	function logAddress(address p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address)", p0));
+	}
+
+	function logBytes(bytes memory p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes)", p0));
+	}
+
+	function logBytes1(bytes1 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes1)", p0));
+	}
+
+	function logBytes2(bytes2 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes2)", p0));
+	}
+
+	function logBytes3(bytes3 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes3)", p0));
+	}
+
+	function logBytes4(bytes4 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes4)", p0));
+	}
+
+	function logBytes5(bytes5 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes5)", p0));
+	}
+
+	function logBytes6(bytes6 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes6)", p0));
+	}
+
+	function logBytes7(bytes7 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes7)", p0));
+	}
+
+	function logBytes8(bytes8 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes8)", p0));
+	}
+
+	function logBytes9(bytes9 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes9)", p0));
+	}
+
+	function logBytes10(bytes10 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes10)", p0));
+	}
+
+	function logBytes11(bytes11 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes11)", p0));
+	}
+
+	function logBytes12(bytes12 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes12)", p0));
+	}
+
+	function logBytes13(bytes13 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes13)", p0));
+	}
+
+	function logBytes14(bytes14 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes14)", p0));
+	}
+
+	function logBytes15(bytes15 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes15)", p0));
+	}
+
+	function logBytes16(bytes16 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes16)", p0));
+	}
+
+	function logBytes17(bytes17 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes17)", p0));
+	}
+
+	function logBytes18(bytes18 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes18)", p0));
+	}
+
+	function logBytes19(bytes19 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes19)", p0));
+	}
+
+	function logBytes20(bytes20 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes20)", p0));
+	}
+
+	function logBytes21(bytes21 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes21)", p0));
+	}
+
+	function logBytes22(bytes22 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes22)", p0));
+	}
+
+	function logBytes23(bytes23 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes23)", p0));
+	}
+
+	function logBytes24(bytes24 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes24)", p0));
+	}
+
+	function logBytes25(bytes25 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes25)", p0));
+	}
+
+	function logBytes26(bytes26 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes26)", p0));
+	}
+
+	function logBytes27(bytes27 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes27)", p0));
+	}
+
+	function logBytes28(bytes28 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes28)", p0));
+	}
+
+	function logBytes29(bytes29 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes29)", p0));
+	}
+
+	function logBytes30(bytes30 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes30)", p0));
+	}
+
+	function logBytes31(bytes31 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes31)", p0));
+	}
+
+	function logBytes32(bytes32 p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bytes32)", p0));
+	}
+
+	function log(uint p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint)", p0));
+	}
+
+	function log(string memory p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string)", p0));
+	}
+
+	function log(bool p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool)", p0));
+	}
+
+	function log(address p0) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address)", p0));
+	}
+
+	function log(uint p0, uint p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint)", p0, p1));
+	}
+
+	function log(uint p0, string memory p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string)", p0, p1));
+	}
+
+	function log(uint p0, bool p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool)", p0, p1));
+	}
+
+	function log(uint p0, address p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address)", p0, p1));
+	}
+
+	function log(string memory p0, uint p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint)", p0, p1));
+	}
+
+	function log(string memory p0, string memory p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string)", p0, p1));
+	}
+
+	function log(string memory p0, bool p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool)", p0, p1));
+	}
+
+	function log(string memory p0, address p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address)", p0, p1));
+	}
+
+	function log(bool p0, uint p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint)", p0, p1));
+	}
+
+	function log(bool p0, string memory p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string)", p0, p1));
+	}
+
+	function log(bool p0, bool p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool)", p0, p1));
+	}
+
+	function log(bool p0, address p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address)", p0, p1));
+	}
+
+	function log(address p0, uint p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint)", p0, p1));
+	}
+
+	function log(address p0, string memory p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string)", p0, p1));
+	}
+
+	function log(address p0, bool p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool)", p0, p1));
+	}
+
+	function log(address p0, address p1) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address)", p0, p1));
+	}
+
+	function log(uint p0, uint p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,uint)", p0, p1, p2));
+	}
+
+	function log(uint p0, uint p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,string)", p0, p1, p2));
+	}
+
+	function log(uint p0, uint p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,bool)", p0, p1, p2));
+	}
+
+	function log(uint p0, uint p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,address)", p0, p1, p2));
+	}
+
+	function log(uint p0, string memory p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,uint)", p0, p1, p2));
+	}
+
+	function log(uint p0, string memory p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,string)", p0, p1, p2));
+	}
+
+	function log(uint p0, string memory p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,bool)", p0, p1, p2));
+	}
+
+	function log(uint p0, string memory p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,address)", p0, p1, p2));
+	}
+
+	function log(uint p0, bool p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,uint)", p0, p1, p2));
+	}
+
+	function log(uint p0, bool p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,string)", p0, p1, p2));
+	}
+
+	function log(uint p0, bool p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,bool)", p0, p1, p2));
+	}
+
+	function log(uint p0, bool p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,address)", p0, p1, p2));
+	}
+
+	function log(uint p0, address p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,uint)", p0, p1, p2));
+	}
+
+	function log(uint p0, address p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,string)", p0, p1, p2));
+	}
+
+	function log(uint p0, address p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,bool)", p0, p1, p2));
+	}
+
+	function log(uint p0, address p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,address)", p0, p1, p2));
+	}
+
+	function log(string memory p0, uint p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,uint)", p0, p1, p2));
+	}
+
+	function log(string memory p0, uint p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,string)", p0, p1, p2));
+	}
+
+	function log(string memory p0, uint p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,bool)", p0, p1, p2));
+	}
+
+	function log(string memory p0, uint p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,address)", p0, p1, p2));
+	}
+
+	function log(string memory p0, string memory p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,uint)", p0, p1, p2));
+	}
+
+	function log(string memory p0, string memory p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,string)", p0, p1, p2));
+	}
+
+	function log(string memory p0, string memory p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,bool)", p0, p1, p2));
+	}
+
+	function log(string memory p0, string memory p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,address)", p0, p1, p2));
+	}
+
+	function log(string memory p0, bool p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,uint)", p0, p1, p2));
+	}
+
+	function log(string memory p0, bool p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,string)", p0, p1, p2));
+	}
+
+	function log(string memory p0, bool p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,bool)", p0, p1, p2));
+	}
+
+	function log(string memory p0, bool p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,address)", p0, p1, p2));
+	}
+
+	function log(string memory p0, address p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,uint)", p0, p1, p2));
+	}
+
+	function log(string memory p0, address p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,string)", p0, p1, p2));
+	}
+
+	function log(string memory p0, address p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,bool)", p0, p1, p2));
+	}
+
+	function log(string memory p0, address p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,address)", p0, p1, p2));
+	}
+
+	function log(bool p0, uint p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,uint)", p0, p1, p2));
+	}
+
+	function log(bool p0, uint p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,string)", p0, p1, p2));
+	}
+
+	function log(bool p0, uint p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,bool)", p0, p1, p2));
+	}
+
+	function log(bool p0, uint p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,address)", p0, p1, p2));
+	}
+
+	function log(bool p0, string memory p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,uint)", p0, p1, p2));
+	}
+
+	function log(bool p0, string memory p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,string)", p0, p1, p2));
+	}
+
+	function log(bool p0, string memory p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,bool)", p0, p1, p2));
+	}
+
+	function log(bool p0, string memory p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,address)", p0, p1, p2));
+	}
+
+	function log(bool p0, bool p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,uint)", p0, p1, p2));
+	}
+
+	function log(bool p0, bool p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,string)", p0, p1, p2));
+	}
+
+	function log(bool p0, bool p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,bool)", p0, p1, p2));
+	}
+
+	function log(bool p0, bool p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,address)", p0, p1, p2));
+	}
+
+	function log(bool p0, address p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,uint)", p0, p1, p2));
+	}
+
+	function log(bool p0, address p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,string)", p0, p1, p2));
+	}
+
+	function log(bool p0, address p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,bool)", p0, p1, p2));
+	}
+
+	function log(bool p0, address p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,address)", p0, p1, p2));
+	}
+
+	function log(address p0, uint p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,uint)", p0, p1, p2));
+	}
+
+	function log(address p0, uint p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,string)", p0, p1, p2));
+	}
+
+	function log(address p0, uint p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,bool)", p0, p1, p2));
+	}
+
+	function log(address p0, uint p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,address)", p0, p1, p2));
+	}
+
+	function log(address p0, string memory p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,uint)", p0, p1, p2));
+	}
+
+	function log(address p0, string memory p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,string)", p0, p1, p2));
+	}
+
+	function log(address p0, string memory p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,bool)", p0, p1, p2));
+	}
+
+	function log(address p0, string memory p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,address)", p0, p1, p2));
+	}
+
+	function log(address p0, bool p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,uint)", p0, p1, p2));
+	}
+
+	function log(address p0, bool p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,string)", p0, p1, p2));
+	}
+
+	function log(address p0, bool p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,bool)", p0, p1, p2));
+	}
+
+	function log(address p0, bool p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,address)", p0, p1, p2));
+	}
+
+	function log(address p0, address p1, uint p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,uint)", p0, p1, p2));
+	}
+
+	function log(address p0, address p1, string memory p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,string)", p0, p1, p2));
+	}
+
+	function log(address p0, address p1, bool p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,bool)", p0, p1, p2));
+	}
+
+	function log(address p0, address p1, address p2) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,address)", p0, p1, p2));
+	}
+
+	function log(uint p0, uint p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, uint p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, uint p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, uint p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, uint p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, uint p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, uint p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, uint p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, uint p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, uint p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, uint p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, uint p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, uint p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, uint p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, uint p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, uint p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,uint,address,address)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, string memory p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,string,address,address)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, bool p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,bool,address,address)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(uint p0, address p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(uint,address,address,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, uint p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,uint,address,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, string memory p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,string,address,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, bool p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,bool,address,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(string memory p0, address p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(string,address,address,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, uint p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,uint,address,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, string memory p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,string,address,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, bool p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,bool,address,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(bool p0, address p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(bool,address,address,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, uint p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,uint,address,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, string memory p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,string,address,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, bool p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,bool,address,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, uint p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,uint,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, uint p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,uint,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, uint p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,uint,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, uint p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,uint,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, string memory p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,string,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, string memory p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,string,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, string memory p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,string,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, string memory p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,string,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, bool p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,bool,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, bool p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,bool,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, bool p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,bool,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, bool p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,bool,address)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, address p2, uint p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,address,uint)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, address p2, string memory p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,address,string)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, address p2, bool p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,address,bool)", p0, p1, p2, p3));
+	}
+
+	function log(address p0, address p1, address p2, address p3) internal view {
+		_sendLogPayload(abi.encodeWithSignature("log(address,address,address,address)", p0, p1, p2, p3));
+	}
+
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+
+pragma solidity >=0.6.2;
+
+interface IUniswapV2Router01 {
+    function factory() external pure returns (address);
+    function WETH() external pure returns (address);
+
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint amountADesired,
+        uint amountBDesired,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountA, uint amountB, uint liquidity);
+    function addLiquidityETH(
+        address token,
+        uint amountTokenDesired,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
+    function removeLiquidity(
+        address tokenA,
+        address tokenB,
+        uint liquidity,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountA, uint amountB);
+    function removeLiquidityETH(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountToken, uint amountETH);
+    function removeLiquidityWithPermit(
+        address tokenA,
+        address tokenB,
+        uint liquidity,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amountA, uint amountB);
+    function removeLiquidityETHWithPermit(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amountToken, uint amountETH);
+    function swapExactTokensForTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external returns (uint[] memory amounts);
+    function swapTokensForExactTokens(
+        uint amountOut,
+        uint amountInMax,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external returns (uint[] memory amounts);
+    function swapExactETHForTokens(uint amountOutMin, address[] calldata path, address to, uint deadline)
+        external
+        payable
+        returns (uint[] memory amounts);
+    function swapTokensForExactETH(uint amountOut, uint amountInMax, address[] calldata path, address to, uint deadline)
+        external
+        returns (uint[] memory amounts);
+    function swapExactTokensForETH(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline)
+        external
+        returns (uint[] memory amounts);
+    function swapETHForExactTokens(uint amountOut, address[] calldata path, address to, uint deadline)
+        external
+        payable
+        returns (uint[] memory amounts);
+
+    function quote(uint amountA, uint reserveA, uint reserveB) external pure returns (uint amountB);
+    function getAmountOut(uint amountIn, uint reserveIn, uint reserveOut) external pure returns (uint amountOut);
+    function getAmountIn(uint amountOut, uint reserveIn, uint reserveOut) external pure returns (uint amountIn);
+    function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts);
+    function getAmountsIn(uint amountOut, address[] calldata path) external view returns (uint[] memory amounts);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.5.0) (token/ERC20/ERC20.sol)
+
+pragma solidity ^0.8.0;
+
+import "./IERC20.sol";
+import "./extensions/IERC20Metadata.sol";
+import "../../utils/Context.sol";
+
+/**
+ * @dev Implementation of the {IERC20} interface.
+ *
+ * This implementation is agnostic to the way tokens are created. This means
+ * that a supply mechanism has to be added in a derived contract using {_mint}.
+ * For a generic mechanism see {ERC20PresetMinterPauser}.
+ *
+ * TIP: For a detailed writeup see our guide
+ * https://forum.zeppelin.solutions/t/how-to-implement-erc20-supply-mechanisms/226[How
+ * to implement supply mechanisms].
+ *
+ * We have followed general OpenZeppelin Contracts guidelines: functions revert
+ * instead returning `false` on failure. This behavior is nonetheless
+ * conventional and does not conflict with the expectations of ERC20
+ * applications.
+ *
+ * Additionally, an {Approval} event is emitted on calls to {transferFrom}.
+ * This allows applications to reconstruct the allowance for all accounts just
+ * by listening to said events. Other implementations of the EIP may not emit
+ * these events, as it isn't required by the specification.
+ *
+ * Finally, the non-standard {decreaseAllowance} and {increaseAllowance}
+ * functions have been added to mitigate the well-known issues around setting
+ * allowances. See {IERC20-approve}.
+ */
+contract ERC20 is Context, IERC20, IERC20Metadata {
+    mapping(address => uint256) private _balances;
+
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    uint256 private _totalSupply;
+
+    string private _name;
+    string private _symbol;
+
+    /**
+     * @dev Sets the values for {name} and {symbol}.
+     *
+     * The default value of {decimals} is 18. To select a different value for
+     * {decimals} you should overload it.
+     *
+     * All two of these values are immutable: they can only be set once during
+     * construction.
+     */
+    constructor(string memory name_, string memory symbol_) {
+        _name = name_;
+        _symbol = symbol_;
+    }
+
+    /**
+     * @dev Returns the name of the token.
+     */
+    function name() public view virtual override returns (string memory) {
+        return _name;
+    }
+
+    /**
+     * @dev Returns the symbol of the token, usually a shorter version of the
+     * name.
+     */
+    function symbol() public view virtual override returns (string memory) {
+        return _symbol;
+    }
+
+    /**
+     * @dev Returns the number of decimals used to get its user representation.
+     * For example, if `decimals` equals `2`, a balance of `505` tokens should
+     * be displayed to a user as `5.05` (`505 / 10 ** 2`).
+     *
+     * Tokens usually opt for a value of 18, imitating the relationship between
+     * Ether and Wei. This is the value {ERC20} uses, unless this function is
+     * overridden;
+     *
+     * NOTE: This information is only used for _display_ purposes: it in
+     * no way affects any of the arithmetic of the contract, including
+     * {IERC20-balanceOf} and {IERC20-transfer}.
+     */
+    function decimals() public view virtual override returns (uint8) {
+        return 18;
+    }
+
+    /**
+     * @dev See {IERC20-totalSupply}.
+     */
+    function totalSupply() public view virtual override returns (uint256) {
+        return _totalSupply;
+    }
+
+    /**
+     * @dev See {IERC20-balanceOf}.
+     */
+    function balanceOf(address account) public view virtual override returns (uint256) {
+        return _balances[account];
+    }
+
+    /**
+     * @dev See {IERC20-transfer}.
+     *
+     * Requirements:
+     *
+     * - `to` cannot be the zero address.
+     * - the caller must have a balance of at least `amount`.
+     */
+    function transfer(address to, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        _transfer(owner, to, amount);
+        return true;
+    }
+
+    /**
+     * @dev See {IERC20-allowance}.
+     */
+    function allowance(address owner, address spender) public view virtual override returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    /**
+     * @dev See {IERC20-approve}.
+     *
+     * NOTE: If `amount` is the maximum `uint256`, the allowance is not updated on
+     * `transferFrom`. This is semantically equivalent to an infinite approval.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     */
+    function approve(address spender, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, amount);
+        return true;
+    }
+
+    /**
+     * @dev See {IERC20-transferFrom}.
+     *
+     * Emits an {Approval} event indicating the updated allowance. This is not
+     * required by the EIP. See the note at the beginning of {ERC20}.
+     *
+     * NOTE: Does not update the allowance if the current allowance
+     * is the maximum `uint256`.
+     *
+     * Requirements:
+     *
+     * - `from` and `to` cannot be the zero address.
+     * - `from` must have a balance of at least `amount`.
+     * - the caller must have allowance for ``from``'s tokens of at least
+     * `amount`.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) public virtual override returns (bool) {
+        address spender = _msgSender();
+        _spendAllowance(from, spender, amount);
+        _transfer(from, to, amount);
+        return true;
+    }
+
+    /**
+     * @dev Atomically increases the allowance granted to `spender` by the caller.
+     *
+     * This is an alternative to {approve} that can be used as a mitigation for
+     * problems described in {IERC20-approve}.
+     *
+     * Emits an {Approval} event indicating the updated allowance.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     */
+    function increaseAllowance(address spender, uint256 addedValue) public virtual returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, _allowances[owner][spender] + addedValue);
+        return true;
+    }
+
+    /**
+     * @dev Atomically decreases the allowance granted to `spender` by the caller.
+     *
+     * This is an alternative to {approve} that can be used as a mitigation for
+     * problems described in {IERC20-approve}.
+     *
+     * Emits an {Approval} event indicating the updated allowance.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     * - `spender` must have allowance for the caller of at least
+     * `subtractedValue`.
+     */
+    function decreaseAllowance(address spender, uint256 subtractedValue) public virtual returns (bool) {
+        address owner = _msgSender();
+        uint256 currentAllowance = _allowances[owner][spender];
+        require(currentAllowance >= subtractedValue, "ERC20: decreased allowance below zero");
+        unchecked {
+            _approve(owner, spender, currentAllowance - subtractedValue);
+        }
+
+        return true;
+    }
+
+    /**
+     * @dev Moves `amount` of tokens from `sender` to `recipient`.
+     *
+     * This internal function is equivalent to {transfer}, and can be used to
+     * e.g. implement automatic token fees, slashing mechanisms, etc.
+     *
+     * Emits a {Transfer} event.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `from` must have a balance of at least `amount`.
+     */
+    function _transfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(to != address(0), "ERC20: transfer to the zero address");
+
+        _beforeTokenTransfer(from, to, amount);
+
+        uint256 fromBalance = _balances[from];
+        require(fromBalance >= amount, "ERC20: transfer amount exceeds balance");
+        unchecked {
+            _balances[from] = fromBalance - amount;
+        }
+        _balances[to] += amount;
+
+        emit Transfer(from, to, amount);
+
+        _afterTokenTransfer(from, to, amount);
+    }
+
+    /** @dev Creates `amount` tokens and assigns them to `account`, increasing
+     * the total supply.
+     *
+     * Emits a {Transfer} event with `from` set to the zero address.
+     *
+     * Requirements:
+     *
+     * - `account` cannot be the zero address.
+     */
+    function _mint(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: mint to the zero address");
+
+        _beforeTokenTransfer(address(0), account, amount);
+
+        _totalSupply += amount;
+        _balances[account] += amount;
+        emit Transfer(address(0), account, amount);
+
+        _afterTokenTransfer(address(0), account, amount);
+    }
+
+    /**
+     * @dev Destroys `amount` tokens from `account`, reducing the
+     * total supply.
+     *
+     * Emits a {Transfer} event with `to` set to the zero address.
+     *
+     * Requirements:
+     *
+     * - `account` cannot be the zero address.
+     * - `account` must have at least `amount` tokens.
+     */
+    function _burn(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: burn from the zero address");
+
+        _beforeTokenTransfer(account, address(0), amount);
+
+        uint256 accountBalance = _balances[account];
+        require(accountBalance >= amount, "ERC20: burn amount exceeds balance");
+        unchecked {
+            _balances[account] = accountBalance - amount;
+        }
+        _totalSupply -= amount;
+
+        emit Transfer(account, address(0), amount);
+
+        _afterTokenTransfer(account, address(0), amount);
+    }
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the `owner` s tokens.
+     *
+     * This internal function is equivalent to `approve`, and can be used to
+     * e.g. set automatic allowances for certain subsystems, etc.
+     *
+     * Emits an {Approval} event.
+     *
+     * Requirements:
+     *
+     * - `owner` cannot be the zero address.
+     * - `spender` cannot be the zero address.
+     */
+    function _approve(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        require(owner != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    /**
+     * @dev Spend `amount` form the allowance of `owner` toward `spender`.
+     *
+     * Does not update the allowance amount in case of infinite allowance.
+     * Revert if not enough allowance is available.
+     *
+     * Might emit an {Approval} event.
+     */
+    function _spendAllowance(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        uint256 currentAllowance = allowance(owner, spender);
+        if (currentAllowance != type(uint256).max) {
+            require(currentAllowance >= amount, "ERC20: insufficient allowance");
+            unchecked {
+                _approve(owner, spender, currentAllowance - amount);
+            }
+        }
+    }
+
+    /**
+     * @dev Hook that is called before any transfer of tokens. This includes
+     * minting and burning.
+     *
+     * Calling conditions:
+     *
+     * - when `from` and `to` are both non-zero, `amount` of ``from``'s tokens
+     * will be transferred to `to`.
+     * - when `from` is zero, `amount` tokens will be minted for `to`.
+     * - when `to` is zero, `amount` of ``from``'s tokens will be burned.
+     * - `from` and `to` are never both zero.
+     *
+     * To learn more about hooks, head to xref:ROOT:extending-contracts.adoc#using-hooks[Using Hooks].
+     */
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+
+    /**
+     * @dev Hook that is called after any transfer of tokens. This includes
+     * minting and burning.
+     *
+     * Calling conditions:
+     *
+     * - when `from` and `to` are both non-zero, `amount` of ``from``'s tokens
+     * has been transferred to `to`.
+     * - when `from` is zero, `amount` tokens have been minted for `to`.
+     * - when `to` is zero, `amount` of ``from``'s tokens have been burned.
+     * - `from` and `to` are never both zero.
+     *
+     * To learn more about hooks, head to xref:ROOT:extending-contracts.adoc#using-hooks[Using Hooks].
+     */
+    function _afterTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+}
+
+//SPDX-License-Identifier: Unlicense
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+import "hardhat/console.sol";
+
+contract ReceiptNFT is ERC721("Receipt NFT", "RECEIPT"), Ownable {
+
+    error NonexistenToken();
+    
+    struct ReceiptData {
+        uint256 cycleId;
+        uint256 amount;
+    }
+
+    uint256 private _tokenIdCounter;
+
+    mapping(uint256 => ReceiptData) public receipts;
+
+    constructor () { }
+
+
+    function viewReceipt(uint256 tokenId) 
+        external 
+        view 
+        returns (ReceiptData memory) 
+    {
+        if(_exists(tokenId) == false) revert NonexistenToken();
+        return receipts[tokenId];
+    }
+    
+    /// @notice Get all tokens owned by user, to be used off-chain.
+    function walletOfOwner(address ownerAddr) 
+        public 
+        view 
+        returns (uint256[] memory tokens) 
+    {
+        uint256 balance = balanceOf(ownerAddr);
+        tokens = new uint256[](balance);
+        uint256 tokenId;
+
+        while(balance > 0) {
+            if (_exists(tokenId) && ownerOf(tokenId) == ownerAddr) {
+                tokens[--balance] = tokenId; 
+            }
+            tokenId++;
+        }
+    }
+
+    function setAmount(uint256 tokenId, uint256 amount) external onlyOwner {
+        if (_exists(tokenId) == false) revert NonexistenToken();
+        receipts[tokenId].amount = amount;
+    } 
+
+    function mint(
+        uint256 cycleId, 
+        uint256 amount, 
+        address wallet
+    ) external onlyOwner {
+        uint256 _tokenId = _tokenIdCounter;
+        receipts[_tokenId] = ReceiptData({
+            cycleId: cycleId,
+            amount: amount
+        });
+        _mint(wallet, _tokenId);
+        _tokenIdCounter++;
+    }
+
+    function burn(uint256 tokenId) external onlyOwner {
+        _burn(tokenId);
+        delete receipts[tokenId];
+    } 
+
+}
+
+//SPDX-License-Identifier: Unlicense
+pragma solidity ^0.8.0;
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+import "./interfaces/IMainRegistry.sol";
+import "./interfaces/IExchangeRegistry.sol";
+import "./interfaces/IAcryptoSPool.sol";
+import "./StrategyRouter.sol";
+
+import "hardhat/console.sol";
+
+enum DexType {
+    // pancakeswap with WETH as intermediary, default option
+    pancakeSwapThroughWETH,
+    // tokenA to tokenB direct swap on pancake
+    pancakeDirectSwap,
+    // ACS4UST metapool
+    acryptosACS4UST
+}
+
+contract Exchange is Ownable {
+    
+    // acryptos ACS meta pool token ids
+    int128 public constant UST_ID = 0;
+    int128 public constant BUSD_ID = 1;
+    int128 public constant BUSDT_ID = 2;
+    int128 public constant DAI_ID = 3;
+    int128 public constant USDC_ID = 4;
+
+    address public constant UST = 0x23396cF899Ca06c4472205fC903bDB4de249D6fC;
+    address public constant BUSD = 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56;
+    address public constant BUSDT = 0x55d398326f99059fF775485246999027B3197955;
+    address public constant DAI = 0x1AF3F329e8BE154074D8769D1FFa4eE058B1DBc3;
+    address public constant USDC = 0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d;
+
+    // in dexTypes tokens addresses should be sorted in ascending order
+    // tokenA -> tokenB -> DexType
+    mapping(address => mapping(address => DexType)) dexTypes;
+    // poolACS4UST -> token -> coin id from pool
+    mapping(address => mapping(address => int128)) coinIds;
+
+    IUniswapV2Router02 public pancakeRouter =
+        IUniswapV2Router02(0x10ED43C718714eb63d5aA57B78B54704E256024E);
+    // for now we only support one metapool: UST-BUSD-USDT-DAI-USDC
+    IAcryptoSPool public poolACS4UST =
+        IAcryptoSPool(0x99c92765EfC472a9709Ced86310D64C4573c4b77);
+
+    constructor() {
+        _setDexType(UST, BUSD, DexType.acryptosACS4UST);
+        _setCoinId(address(poolACS4UST), UST, UST_ID);
+        _setCoinId(address(poolACS4UST), BUSD, BUSD_ID);
+        // coinIds[address(poolACS4UST)][BUSDT] = BUSDT_ID;
+        // coinIds[address(poolACS4UST)][DAI] = DAI_ID;
+        // coinIds[address(poolACS4UST)][USDC] = USDC_ID;
+    }
+
+    function sortTokens(address tokenA, address tokenB)
+        internal
+        pure
+        returns (address token0, address token1)
+    {
+        (token0, token1) = tokenA < tokenB
+            ? (tokenA, tokenB)
+            : (tokenB, tokenA);
+    }
+
+    /// @notice Choose how pair of tokens should be swapped.
+    /// @notice Order of tokens doesn't matter.
+    function setDexType(
+        address tokenA,
+        address tokenB,
+        DexType _type
+    ) external onlyOwner {
+        _setDexType(tokenA, tokenB, _type);
+    }
+
+    function _setDexType(
+        address tokenA,
+        address tokenB,
+        DexType _type
+    ) private {
+        (address token0, address token1) = sortTokens(tokenA, tokenB);
+        dexTypes[token0][token1] = _type;
+    }
+
+    /// @notice Save coin ids of tokens from acryptos pool.
+    function setCoinId(
+        address _poolACS4UST,
+        address token,
+        int128 coinId
+    ) external onlyOwner {
+        _setCoinId(_poolACS4UST, token, coinId);
+    }
+
+    function _setCoinId(
+        address _poolACS4UST,
+        address token,
+        int128 coinId
+    ) private {
+        coinIds[address(_poolACS4UST)][token] = coinId;
+    }
+
+    function getDexType(address tokenA, address tokenB)
+        internal
+        view
+        returns (DexType)
+    {
+        (address token0, address token1) = sortTokens(tokenA, tokenB);
+        return dexTypes[token0][token1];
+    }
+
+    function swapRouted(
+        uint256 amountA,
+        IERC20 tokenA,
+        IERC20 tokenB,
+        address to
+    ) public returns (uint256 amountReceivedTokenB) {
+        DexType _dexType = getDexType(address(tokenA), address(tokenB));
+        return swap(amountA, tokenA, tokenB, _dexType, to);
+    }
+
+    function swap(
+        uint256 amountA,
+        IERC20 tokenA,
+        IERC20 tokenB,
+        DexType _dexType,
+        address to
+    ) public returns (uint256 amountReceivedTokenB) {
+        if (_dexType == DexType.pancakeSwapThroughWETH) {
+            return _swapOnPancakeWithWETH(amountA, tokenA, tokenB, to);
+        } else if (_dexType == DexType.pancakeDirectSwap) {
+            return _swapDirect(amountA, tokenA, tokenB, to);
+        } else if (_dexType == DexType.acryptosACS4UST) {
+            return _swapOnAcryptosUST(amountA, tokenA, tokenB, to);
+        }
+
+        revert("No swap route");
+    }
+
+    function _swapOnPancakeWithWETH(
+        uint256 amountA,
+        IERC20 tokenA,
+        IERC20 tokenB,
+        address to
+    ) private returns (uint256 amountReceivedTokenB) {
+        tokenA.approve(address(pancakeRouter), amountA);
+
+        address[] memory path = new address[](3);
+        path[0] = address(tokenA);
+        path[1] = pancakeRouter.WETH();
+        path[2] = address(tokenB);
+
+        uint256 received = pancakeRouter.swapExactTokensForTokens(
+            amountA,
+            0,
+            path,
+            address(this),
+            block.timestamp
+        )[path.length - 1];
+
+        tokenB.transfer(to, received);
+
+        return received;
+    }    
+    
+    function _swapDirect(
+        uint256 amountA,
+        IERC20 tokenA,
+        IERC20 tokenB,
+        address to
+    ) private returns (uint256 amountReceivedTokenB) {
+        tokenA.approve(address(pancakeRouter), amountA);
+
+        address[] memory path = new address[](2);
+        path[0] = address(tokenA);
+        path[1] = address(tokenB);
+
+        uint256 received = pancakeRouter.swapExactTokensForTokens(
+            amountA,
+            0,
+            path,
+            address(this),
+            block.timestamp
+        )[path.length - 1];
+
+        tokenB.transfer(to, received);
+
+        return received;
+    }
+
+    function _swapOnAcryptosUST(
+        uint256 amountA,
+        IERC20 tokenA,
+        IERC20 tokenB,
+        address to
+    ) private returns (uint256 amountReceivedTokenB) {
+        tokenA.approve(address(poolACS4UST), amountA);
+
+        int128 _tokenAIndex = coinIds[address(poolACS4UST)][address(tokenA)];
+        int128 _tokenBIndex = coinIds[address(poolACS4UST)][address(tokenB)];
+
+        console.log("_tokenAIndex %s _tokenBIndex %s amountA %s", uint128(_tokenAIndex), uint128(_tokenBIndex), amountA);
+        uint256 received = poolACS4UST.exchange_underlying(
+            _tokenAIndex,
+            _tokenBIndex,
+            amountA,
+            0
+        );
+
+        tokenB.transfer(to, received);
+
+        return received;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+contract SharesToken is Ownable, ERC20 {
+
+  constructor() 
+    ERC20("Clip-Finance Shares", "CF") 
+  {
+  }
+
+  function mint(address to, uint256 amount) external onlyOwner {
+    _mint(to, amount);
+  }
+
+  function burn(address from, uint256 amount) external onlyOwner {
+    _burn(from, amount);
+  }
+
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (token/ERC20/extensions/IERC20Metadata.sol)
+
+pragma solidity ^0.8.0;
+
+import "../IERC20.sol";
+
+/**
+ * @dev Interface for the optional metadata functions from the ERC20 standard.
+ *
+ * _Available since v4.1._
+ */
+interface IERC20Metadata is IERC20 {
+    /**
+     * @dev Returns the name of the token.
+     */
+    function name() external view returns (string memory);
+
+    /**
+     * @dev Returns the symbol of the token.
+     */
+    function symbol() external view returns (string memory);
+
+    /**
+     * @dev Returns the decimals places of the token.
+     */
+    function decimals() external view returns (uint8);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.5.0) (token/ERC721/ERC721.sol)
+
+pragma solidity ^0.8.0;
+
+import "./IERC721.sol";
+import "./IERC721Receiver.sol";
+import "./extensions/IERC721Metadata.sol";
+import "../../utils/Address.sol";
+import "../../utils/Context.sol";
+import "../../utils/Strings.sol";
+import "../../utils/introspection/ERC165.sol";
+
+/**
+ * @dev Implementation of https://eips.ethereum.org/EIPS/eip-721[ERC721] Non-Fungible Token Standard, including
+ * the Metadata extension, but not including the Enumerable extension, which is available separately as
+ * {ERC721Enumerable}.
+ */
+contract ERC721 is Context, ERC165, IERC721, IERC721Metadata {
+    using Address for address;
+    using Strings for uint256;
+
+    // Token name
+    string private _name;
+
+    // Token symbol
+    string private _symbol;
+
+    // Mapping from token ID to owner address
+    mapping(uint256 => address) private _owners;
+
+    // Mapping owner address to token count
+    mapping(address => uint256) private _balances;
+
+    // Mapping from token ID to approved address
+    mapping(uint256 => address) private _tokenApprovals;
+
+    // Mapping from owner to operator approvals
+    mapping(address => mapping(address => bool)) private _operatorApprovals;
+
+    /**
+     * @dev Initializes the contract by setting a `name` and a `symbol` to the token collection.
+     */
+    constructor(string memory name_, string memory symbol_) {
+        _name = name_;
+        _symbol = symbol_;
+    }
+
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
+        return
+            interfaceId == type(IERC721).interfaceId ||
+            interfaceId == type(IERC721Metadata).interfaceId ||
+            super.supportsInterface(interfaceId);
+    }
+
+    /**
+     * @dev See {IERC721-balanceOf}.
+     */
+    function balanceOf(address owner) public view virtual override returns (uint256) {
+        require(owner != address(0), "ERC721: balance query for the zero address");
+        return _balances[owner];
+    }
+
+    /**
+     * @dev See {IERC721-ownerOf}.
+     */
+    function ownerOf(uint256 tokenId) public view virtual override returns (address) {
+        address owner = _owners[tokenId];
+        require(owner != address(0), "ERC721: owner query for nonexistent token");
+        return owner;
+    }
+
+    /**
+     * @dev See {IERC721Metadata-name}.
+     */
+    function name() public view virtual override returns (string memory) {
+        return _name;
+    }
+
+    /**
+     * @dev See {IERC721Metadata-symbol}.
+     */
+    function symbol() public view virtual override returns (string memory) {
+        return _symbol;
+    }
+
+    /**
+     * @dev See {IERC721Metadata-tokenURI}.
+     */
+    function tokenURI(uint256 tokenId) public view virtual override returns (string memory) {
+        require(_exists(tokenId), "ERC721Metadata: URI query for nonexistent token");
+
+        string memory baseURI = _baseURI();
+        return bytes(baseURI).length > 0 ? string(abi.encodePacked(baseURI, tokenId.toString())) : "";
+    }
+
+    /**
+     * @dev Base URI for computing {tokenURI}. If set, the resulting URI for each
+     * token will be the concatenation of the `baseURI` and the `tokenId`. Empty
+     * by default, can be overriden in child contracts.
+     */
+    function _baseURI() internal view virtual returns (string memory) {
+        return "";
+    }
+
+    /**
+     * @dev See {IERC721-approve}.
+     */
+    function approve(address to, uint256 tokenId) public virtual override {
+        address owner = ERC721.ownerOf(tokenId);
+        require(to != owner, "ERC721: approval to current owner");
+
+        require(
+            _msgSender() == owner || isApprovedForAll(owner, _msgSender()),
+            "ERC721: approve caller is not owner nor approved for all"
+        );
+
+        _approve(to, tokenId);
+    }
+
+    /**
+     * @dev See {IERC721-getApproved}.
+     */
+    function getApproved(uint256 tokenId) public view virtual override returns (address) {
+        require(_exists(tokenId), "ERC721: approved query for nonexistent token");
+
+        return _tokenApprovals[tokenId];
+    }
+
+    /**
+     * @dev See {IERC721-setApprovalForAll}.
+     */
+    function setApprovalForAll(address operator, bool approved) public virtual override {
+        _setApprovalForAll(_msgSender(), operator, approved);
+    }
+
+    /**
+     * @dev See {IERC721-isApprovedForAll}.
+     */
+    function isApprovedForAll(address owner, address operator) public view virtual override returns (bool) {
+        return _operatorApprovals[owner][operator];
+    }
+
+    /**
+     * @dev See {IERC721-transferFrom}.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 tokenId
+    ) public virtual override {
+        //solhint-disable-next-line max-line-length
+        require(_isApprovedOrOwner(_msgSender(), tokenId), "ERC721: transfer caller is not owner nor approved");
+
+        _transfer(from, to, tokenId);
+    }
+
+    /**
+     * @dev See {IERC721-safeTransferFrom}.
+     */
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 tokenId
+    ) public virtual override {
+        safeTransferFrom(from, to, tokenId, "");
+    }
+
+    /**
+     * @dev See {IERC721-safeTransferFrom}.
+     */
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 tokenId,
+        bytes memory _data
+    ) public virtual override {
+        require(_isApprovedOrOwner(_msgSender(), tokenId), "ERC721: transfer caller is not owner nor approved");
+        _safeTransfer(from, to, tokenId, _data);
+    }
+
+    /**
+     * @dev Safely transfers `tokenId` token from `from` to `to`, checking first that contract recipients
+     * are aware of the ERC721 protocol to prevent tokens from being forever locked.
+     *
+     * `_data` is additional data, it has no specified format and it is sent in call to `to`.
+     *
+     * This internal function is equivalent to {safeTransferFrom}, and can be used to e.g.
+     * implement alternative mechanisms to perform token transfer, such as signature-based.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `tokenId` token must exist and be owned by `from`.
+     * - If `to` refers to a smart contract, it must implement {IERC721Receiver-onERC721Received}, which is called upon a safe transfer.
+     *
+     * Emits a {Transfer} event.
+     */
+    function _safeTransfer(
+        address from,
+        address to,
+        uint256 tokenId,
+        bytes memory _data
+    ) internal virtual {
+        _transfer(from, to, tokenId);
+        require(_checkOnERC721Received(from, to, tokenId, _data), "ERC721: transfer to non ERC721Receiver implementer");
+    }
+
+    /**
+     * @dev Returns whether `tokenId` exists.
+     *
+     * Tokens can be managed by their owner or approved accounts via {approve} or {setApprovalForAll}.
+     *
+     * Tokens start existing when they are minted (`_mint`),
+     * and stop existing when they are burned (`_burn`).
+     */
+    function _exists(uint256 tokenId) internal view virtual returns (bool) {
+        return _owners[tokenId] != address(0);
+    }
+
+    /**
+     * @dev Returns whether `spender` is allowed to manage `tokenId`.
+     *
+     * Requirements:
+     *
+     * - `tokenId` must exist.
+     */
+    function _isApprovedOrOwner(address spender, uint256 tokenId) internal view virtual returns (bool) {
+        require(_exists(tokenId), "ERC721: operator query for nonexistent token");
+        address owner = ERC721.ownerOf(tokenId);
+        return (spender == owner || getApproved(tokenId) == spender || isApprovedForAll(owner, spender));
+    }
+
+    /**
+     * @dev Safely mints `tokenId` and transfers it to `to`.
+     *
+     * Requirements:
+     *
+     * - `tokenId` must not exist.
+     * - If `to` refers to a smart contract, it must implement {IERC721Receiver-onERC721Received}, which is called upon a safe transfer.
+     *
+     * Emits a {Transfer} event.
+     */
+    function _safeMint(address to, uint256 tokenId) internal virtual {
+        _safeMint(to, tokenId, "");
+    }
+
+    /**
+     * @dev Same as {xref-ERC721-_safeMint-address-uint256-}[`_safeMint`], with an additional `data` parameter which is
+     * forwarded in {IERC721Receiver-onERC721Received} to contract recipients.
+     */
+    function _safeMint(
+        address to,
+        uint256 tokenId,
+        bytes memory _data
+    ) internal virtual {
+        _mint(to, tokenId);
+        require(
+            _checkOnERC721Received(address(0), to, tokenId, _data),
+            "ERC721: transfer to non ERC721Receiver implementer"
+        );
+    }
+
+    /**
+     * @dev Mints `tokenId` and transfers it to `to`.
+     *
+     * WARNING: Usage of this method is discouraged, use {_safeMint} whenever possible
+     *
+     * Requirements:
+     *
+     * - `tokenId` must not exist.
+     * - `to` cannot be the zero address.
+     *
+     * Emits a {Transfer} event.
+     */
+    function _mint(address to, uint256 tokenId) internal virtual {
+        require(to != address(0), "ERC721: mint to the zero address");
+        require(!_exists(tokenId), "ERC721: token already minted");
+
+        _beforeTokenTransfer(address(0), to, tokenId);
+
+        _balances[to] += 1;
+        _owners[tokenId] = to;
+
+        emit Transfer(address(0), to, tokenId);
+
+        _afterTokenTransfer(address(0), to, tokenId);
+    }
+
+    /**
+     * @dev Destroys `tokenId`.
+     * The approval is cleared when the token is burned.
+     *
+     * Requirements:
+     *
+     * - `tokenId` must exist.
+     *
+     * Emits a {Transfer} event.
+     */
+    function _burn(uint256 tokenId) internal virtual {
+        address owner = ERC721.ownerOf(tokenId);
+
+        _beforeTokenTransfer(owner, address(0), tokenId);
+
+        // Clear approvals
+        _approve(address(0), tokenId);
+
+        _balances[owner] -= 1;
+        delete _owners[tokenId];
+
+        emit Transfer(owner, address(0), tokenId);
+
+        _afterTokenTransfer(owner, address(0), tokenId);
+    }
+
+    /**
+     * @dev Transfers `tokenId` from `from` to `to`.
+     *  As opposed to {transferFrom}, this imposes no restrictions on msg.sender.
+     *
+     * Requirements:
+     *
+     * - `to` cannot be the zero address.
+     * - `tokenId` token must be owned by `from`.
+     *
+     * Emits a {Transfer} event.
+     */
+    function _transfer(
+        address from,
+        address to,
+        uint256 tokenId
+    ) internal virtual {
+        require(ERC721.ownerOf(tokenId) == from, "ERC721: transfer from incorrect owner");
+        require(to != address(0), "ERC721: transfer to the zero address");
+
+        _beforeTokenTransfer(from, to, tokenId);
+
+        // Clear approvals from the previous owner
+        _approve(address(0), tokenId);
+
+        _balances[from] -= 1;
+        _balances[to] += 1;
+        _owners[tokenId] = to;
+
+        emit Transfer(from, to, tokenId);
+
+        _afterTokenTransfer(from, to, tokenId);
+    }
+
+    /**
+     * @dev Approve `to` to operate on `tokenId`
+     *
+     * Emits a {Approval} event.
+     */
+    function _approve(address to, uint256 tokenId) internal virtual {
+        _tokenApprovals[tokenId] = to;
+        emit Approval(ERC721.ownerOf(tokenId), to, tokenId);
+    }
+
+    /**
+     * @dev Approve `operator` to operate on all of `owner` tokens
+     *
+     * Emits a {ApprovalForAll} event.
+     */
+    function _setApprovalForAll(
+        address owner,
+        address operator,
+        bool approved
+    ) internal virtual {
+        require(owner != operator, "ERC721: approve to caller");
+        _operatorApprovals[owner][operator] = approved;
+        emit ApprovalForAll(owner, operator, approved);
+    }
+
+    /**
+     * @dev Internal function to invoke {IERC721Receiver-onERC721Received} on a target address.
+     * The call is not executed if the target address is not a contract.
+     *
+     * @param from address representing the previous owner of the given token ID
+     * @param to target address that will receive the tokens
+     * @param tokenId uint256 ID of the token to be transferred
+     * @param _data bytes optional data to send along with the call
+     * @return bool whether the call correctly returned the expected magic value
+     */
+    function _checkOnERC721Received(
+        address from,
+        address to,
+        uint256 tokenId,
+        bytes memory _data
+    ) private returns (bool) {
+        if (to.isContract()) {
+            try IERC721Receiver(to).onERC721Received(_msgSender(), from, tokenId, _data) returns (bytes4 retval) {
+                return retval == IERC721Receiver.onERC721Received.selector;
+            } catch (bytes memory reason) {
+                if (reason.length == 0) {
+                    revert("ERC721: transfer to non ERC721Receiver implementer");
+                } else {
+                    assembly {
+                        revert(add(32, reason), mload(reason))
+                    }
+                }
+            }
+        } else {
+            return true;
+        }
+    }
+
+    /**
+     * @dev Hook that is called before any token transfer. This includes minting
+     * and burning.
+     *
+     * Calling conditions:
+     *
+     * - When `from` and `to` are both non-zero, ``from``'s `tokenId` will be
+     * transferred to `to`.
+     * - When `from` is zero, `tokenId` will be minted for `to`.
+     * - When `to` is zero, ``from``'s `tokenId` will be burned.
+     * - `from` and `to` are never both zero.
+     *
+     * To learn more about hooks, head to xref:ROOT:extending-contracts.adoc#using-hooks[Using Hooks].
+     */
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 tokenId
+    ) internal virtual {}
+
+    /**
+     * @dev Hook that is called after any transfer of tokens. This includes
+     * minting and burning.
+     *
+     * Calling conditions:
+     *
+     * - when `from` and `to` are both non-zero.
+     * - `from` and `to` are never both zero.
+     *
+     * To learn more about hooks, head to xref:ROOT:extending-contracts.adoc#using-hooks[Using Hooks].
+     */
+    function _afterTokenTransfer(
+        address from,
+        address to,
+        uint256 tokenId
+    ) internal virtual {}
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (token/ERC721/IERC721.sol)
+
+pragma solidity ^0.8.0;
+
+import "../../utils/introspection/IERC165.sol";
+
+/**
+ * @dev Required interface of an ERC721 compliant contract.
+ */
+interface IERC721 is IERC165 {
+    /**
+     * @dev Emitted when `tokenId` token is transferred from `from` to `to`.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+
+    /**
+     * @dev Emitted when `owner` enables `approved` to manage the `tokenId` token.
+     */
+    event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId);
+
+    /**
+     * @dev Emitted when `owner` enables or disables (`approved`) `operator` to manage all of its assets.
+     */
+    event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
+
+    /**
+     * @dev Returns the number of tokens in ``owner``'s account.
+     */
+    function balanceOf(address owner) external view returns (uint256 balance);
+
+    /**
+     * @dev Returns the owner of the `tokenId` token.
+     *
+     * Requirements:
+     *
+     * - `tokenId` must exist.
+     */
+    function ownerOf(uint256 tokenId) external view returns (address owner);
+
+    /**
+     * @dev Safely transfers `tokenId` token from `from` to `to`, checking first that contract recipients
+     * are aware of the ERC721 protocol to prevent tokens from being forever locked.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `tokenId` token must exist and be owned by `from`.
+     * - If the caller is not `from`, it must be have been allowed to move this token by either {approve} or {setApprovalForAll}.
+     * - If `to` refers to a smart contract, it must implement {IERC721Receiver-onERC721Received}, which is called upon a safe transfer.
+     *
+     * Emits a {Transfer} event.
+     */
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 tokenId
+    ) external;
+
+    /**
+     * @dev Transfers `tokenId` token from `from` to `to`.
+     *
+     * WARNING: Usage of this method is discouraged, use {safeTransferFrom} whenever possible.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `tokenId` token must be owned by `from`.
+     * - If the caller is not `from`, it must be approved to move this token by either {approve} or {setApprovalForAll}.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 tokenId
+    ) external;
+
+    /**
+     * @dev Gives permission to `to` to transfer `tokenId` token to another account.
+     * The approval is cleared when the token is transferred.
+     *
+     * Only a single account can be approved at a time, so approving the zero address clears previous approvals.
+     *
+     * Requirements:
+     *
+     * - The caller must own the token or be an approved operator.
+     * - `tokenId` must exist.
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address to, uint256 tokenId) external;
+
+    /**
+     * @dev Returns the account approved for `tokenId` token.
+     *
+     * Requirements:
+     *
+     * - `tokenId` must exist.
+     */
+    function getApproved(uint256 tokenId) external view returns (address operator);
+
+    /**
+     * @dev Approve or remove `operator` as an operator for the caller.
+     * Operators can call {transferFrom} or {safeTransferFrom} for any token owned by the caller.
+     *
+     * Requirements:
+     *
+     * - The `operator` cannot be the caller.
+     *
+     * Emits an {ApprovalForAll} event.
+     */
+    function setApprovalForAll(address operator, bool _approved) external;
+
+    /**
+     * @dev Returns if the `operator` is allowed to manage all of the assets of `owner`.
+     *
+     * See {setApprovalForAll}
+     */
+    function isApprovedForAll(address owner, address operator) external view returns (bool);
+
+    /**
+     * @dev Safely transfers `tokenId` token from `from` to `to`.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `tokenId` token must exist and be owned by `from`.
+     * - If the caller is not `from`, it must be approved to move this token by either {approve} or {setApprovalForAll}.
+     * - If `to` refers to a smart contract, it must implement {IERC721Receiver-onERC721Received}, which is called upon a safe transfer.
+     *
+     * Emits a {Transfer} event.
+     */
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 tokenId,
+        bytes calldata data
+    ) external;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (token/ERC721/IERC721Receiver.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @title ERC721 token receiver interface
+ * @dev Interface for any contract that wants to support safeTransfers
+ * from ERC721 asset contracts.
+ */
+interface IERC721Receiver {
+    /**
+     * @dev Whenever an {IERC721} `tokenId` token is transferred to this contract via {IERC721-safeTransferFrom}
+     * by `operator` from `from`, this function is called.
+     *
+     * It must return its Solidity selector to confirm the token transfer.
+     * If any other value is returned or the interface is not implemented by the recipient, the transfer will be reverted.
+     *
+     * The selector can be obtained in Solidity with `IERC721.onERC721Received.selector`.
+     */
+    function onERC721Received(
+        address operator,
+        address from,
+        uint256 tokenId,
+        bytes calldata data
+    ) external returns (bytes4);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (token/ERC721/extensions/IERC721Metadata.sol)
+
+pragma solidity ^0.8.0;
+
+import "../IERC721.sol";
+
+/**
+ * @title ERC-721 Non-Fungible Token Standard, optional metadata extension
+ * @dev See https://eips.ethereum.org/EIPS/eip-721
+ */
+interface IERC721Metadata is IERC721 {
+    /**
+     * @dev Returns the token collection name.
+     */
+    function name() external view returns (string memory);
+
+    /**
+     * @dev Returns the token collection symbol.
+     */
+    function symbol() external view returns (string memory);
+
+    /**
+     * @dev Returns the Uniform Resource Identifier (URI) for `tokenId` token.
+     */
+    function tokenURI(uint256 tokenId) external view returns (string memory);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.5.0) (utils/Address.sol)
+
+pragma solidity ^0.8.1;
+
+/**
+ * @dev Collection of functions related to the address type
+ */
+library Address {
+    /**
+     * @dev Returns true if `account` is a contract.
+     *
+     * [IMPORTANT]
+     * ====
+     * It is unsafe to assume that an address for which this function returns
+     * false is an externally-owned account (EOA) and not a contract.
+     *
+     * Among others, `isContract` will return false for the following
+     * types of addresses:
+     *
+     *  - an externally-owned account
+     *  - a contract in construction
+     *  - an address where a contract will be created
+     *  - an address where a contract lived, but was destroyed
+     * ====
+     *
+     * [IMPORTANT]
+     * ====
+     * You shouldn't rely on `isContract` to protect against flash loan attacks!
+     *
+     * Preventing calls from contracts is highly discouraged. It breaks composability, breaks support for smart wallets
+     * like Gnosis Safe, and does not provide security since it can be circumvented by calling from a contract
+     * constructor.
+     * ====
+     */
+    function isContract(address account) internal view returns (bool) {
+        // This method relies on extcodesize/address.code.length, which returns 0
+        // for contracts in construction, since the code is only stored at the end
+        // of the constructor execution.
+
+        return account.code.length > 0;
+    }
+
+    /**
+     * @dev Replacement for Solidity's `transfer`: sends `amount` wei to
+     * `recipient`, forwarding all available gas and reverting on errors.
+     *
+     * https://eips.ethereum.org/EIPS/eip-1884[EIP1884] increases the gas cost
+     * of certain opcodes, possibly making contracts go over the 2300 gas limit
+     * imposed by `transfer`, making them unable to receive funds via
+     * `transfer`. {sendValue} removes this limitation.
+     *
+     * https://diligence.consensys.net/posts/2019/09/stop-using-soliditys-transfer-now/[Learn more].
+     *
+     * IMPORTANT: because control is transferred to `recipient`, care must be
+     * taken to not create reentrancy vulnerabilities. Consider using
+     * {ReentrancyGuard} or the
+     * https://solidity.readthedocs.io/en/v0.5.11/security-considerations.html#use-the-checks-effects-interactions-pattern[checks-effects-interactions pattern].
+     */
+    function sendValue(address payable recipient, uint256 amount) internal {
+        require(address(this).balance >= amount, "Address: insufficient balance");
+
+        (bool success, ) = recipient.call{value: amount}("");
+        require(success, "Address: unable to send value, recipient may have reverted");
+    }
+
+    /**
+     * @dev Performs a Solidity function call using a low level `call`. A
+     * plain `call` is an unsafe replacement for a function call: use this
+     * function instead.
+     *
+     * If `target` reverts with a revert reason, it is bubbled up by this
+     * function (like regular Solidity function calls).
+     *
+     * Returns the raw returned data. To convert to the expected return value,
+     * use https://solidity.readthedocs.io/en/latest/units-and-global-variables.html?highlight=abi.decode#abi-encoding-and-decoding-functions[`abi.decode`].
+     *
+     * Requirements:
+     *
+     * - `target` must be a contract.
+     * - calling `target` with `data` must not revert.
+     *
+     * _Available since v3.1._
+     */
+    function functionCall(address target, bytes memory data) internal returns (bytes memory) {
+        return functionCall(target, data, "Address: low-level call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`], but with
+     * `errorMessage` as a fallback revert reason when `target` reverts.
+     *
+     * _Available since v3.1._
+     */
+    function functionCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, 0, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but also transferring `value` wei to `target`.
+     *
+     * Requirements:
+     *
+     * - the calling contract must have an ETH balance of at least `value`.
+     * - the called Solidity function must be `payable`.
+     *
+     * _Available since v3.1._
+     */
+    function functionCallWithValue(
+        address target,
+        bytes memory data,
+        uint256 value
+    ) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, value, "Address: low-level call with value failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCallWithValue-address-bytes-uint256-}[`functionCallWithValue`], but
+     * with `errorMessage` as a fallback revert reason when `target` reverts.
+     *
+     * _Available since v3.1._
+     */
+    function functionCallWithValue(
+        address target,
+        bytes memory data,
+        uint256 value,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        require(address(this).balance >= value, "Address: insufficient balance for call");
+        require(isContract(target), "Address: call to non-contract");
+
+        (bool success, bytes memory returndata) = target.call{value: value}(data);
+        return verifyCallResult(success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but performing a static call.
+     *
+     * _Available since v3.3._
+     */
+    function functionStaticCall(address target, bytes memory data) internal view returns (bytes memory) {
+        return functionStaticCall(target, data, "Address: low-level static call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-string-}[`functionCall`],
+     * but performing a static call.
+     *
+     * _Available since v3.3._
+     */
+    function functionStaticCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal view returns (bytes memory) {
+        require(isContract(target), "Address: static call to non-contract");
+
+        (bool success, bytes memory returndata) = target.staticcall(data);
+        return verifyCallResult(success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but performing a delegate call.
+     *
+     * _Available since v3.4._
+     */
+    function functionDelegateCall(address target, bytes memory data) internal returns (bytes memory) {
+        return functionDelegateCall(target, data, "Address: low-level delegate call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-string-}[`functionCall`],
+     * but performing a delegate call.
+     *
+     * _Available since v3.4._
+     */
+    function functionDelegateCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        require(isContract(target), "Address: delegate call to non-contract");
+
+        (bool success, bytes memory returndata) = target.delegatecall(data);
+        return verifyCallResult(success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Tool to verifies that a low level call was successful, and revert if it wasn't, either by bubbling the
+     * revert reason using the provided one.
+     *
+     * _Available since v4.3._
+     */
+    function verifyCallResult(
+        bool success,
+        bytes memory returndata,
+        string memory errorMessage
+    ) internal pure returns (bytes memory) {
+        if (success) {
+            return returndata;
+        } else {
+            // Look for revert reason and bubble it up if present
+            if (returndata.length > 0) {
+                // The easiest way to bubble the revert reason is using memory via assembly
+
+                assembly {
+                    let returndata_size := mload(returndata)
+                    revert(add(32, returndata), returndata_size)
+                }
+            } else {
+                revert(errorMessage);
+            }
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Strings.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev String operations.
+ */
+library Strings {
+    bytes16 private constant _HEX_SYMBOLS = "0123456789abcdef";
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` decimal representation.
+     */
+    function toString(uint256 value) internal pure returns (string memory) {
+        // Inspired by OraclizeAPI's implementation - MIT licence
+        // https://github.com/oraclize/ethereum-api/blob/b42146b063c7d6ee1358846c198246239e9360e8/oraclizeAPI_0.4.25.sol
+
+        if (value == 0) {
+            return "0";
+        }
+        uint256 temp = value;
+        uint256 digits;
+        while (temp != 0) {
+            digits++;
+            temp /= 10;
+        }
+        bytes memory buffer = new bytes(digits);
+        while (value != 0) {
+            digits -= 1;
+            buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
+            value /= 10;
+        }
+        return string(buffer);
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation.
+     */
+    function toHexString(uint256 value) internal pure returns (string memory) {
+        if (value == 0) {
+            return "0x00";
+        }
+        uint256 temp = value;
+        uint256 length = 0;
+        while (temp != 0) {
+            length++;
+            temp >>= 8;
+        }
+        return toHexString(value, length);
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation with fixed length.
+     */
+    function toHexString(uint256 value, uint256 length) internal pure returns (string memory) {
+        bytes memory buffer = new bytes(2 * length + 2);
+        buffer[0] = "0";
+        buffer[1] = "x";
+        for (uint256 i = 2 * length + 1; i > 1; --i) {
+            buffer[i] = _HEX_SYMBOLS[value & 0xf];
+            value >>= 4;
+        }
+        require(value == 0, "Strings: hex length insufficient");
+        return string(buffer);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/ERC165.sol)
+
+pragma solidity ^0.8.0;
+
+import "./IERC165.sol";
+
+/**
+ * @dev Implementation of the {IERC165} interface.
+ *
+ * Contracts that want to implement ERC165 should inherit from this contract and override {supportsInterface} to check
+ * for the additional interface id that will be supported. For example:
+ *
+ * ```solidity
+ * function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+ *     return interfaceId == type(MyInterface).interfaceId || super.supportsInterface(interfaceId);
+ * }
+ * ```
+ *
+ * Alternatively, {ERC165Storage} provides an easier to use but more expensive implementation.
+ */
+abstract contract ERC165 is IERC165 {
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        return interfaceId == type(IERC165).interfaceId;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/IERC165.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC165 standard, as defined in the
+ * https://eips.ethereum.org/EIPS/eip-165[EIP].
+ *
+ * Implementers can declare support of contract interfaces, which can then be
+ * queried by others ({ERC165Checker}).
+ *
+ * For an implementation, see {ERC165}.
+ */
+interface IERC165 {
+    /**
+     * @dev Returns true if this contract implements the interface defined by
+     * `interfaceId`. See the corresponding
+     * https://eips.ethereum.org/EIPS/eip-165#how-interfaces-are-identified[EIP section]
+     * to learn more about how these ids are created.
+     *
+     * This function call must use less than 30 000 gas.
+     */
+    function supportsInterface(bytes4 interfaceId) external view returns (bool);
+}
+
+//SPDX-License-Identifier: Unlicense
+pragma solidity ^0.8.0;
+
+interface IMainRegistry {
+  function get_registry (  ) external view returns ( address );
+  function max_id (  ) external view returns ( uint256 );
+  function get_address ( uint256 _id ) external view returns ( address );
+  function add_new_id ( address _address, string memory _description ) external returns ( uint256 );
+  function set_address ( uint256 _id, address _address ) external returns ( bool );
+  function unset_address ( uint256 _id ) external returns ( bool );
+  function commit_transfer_ownership ( address _new_admin ) external returns ( bool );
+  function apply_transfer_ownership (  ) external returns ( bool );
+  function revert_transfer_ownership (  ) external returns ( bool );
+  function admin (  ) external view returns ( address );
+  function transfer_ownership_deadline (  ) external view returns ( uint256 );
+  function future_admin (  ) external view returns ( address );
+  function get_id_info ( uint256 arg0 ) external view returns ( address addr, bool is_active, uint256 version, uint256 last_modified, string memory description );
+}
+
+//SPDX-License-Identifier: Unlicense
+pragma solidity ^0.8.0;
+
+interface IExchangeRegistry {
+  function exchange_with_best_rate ( address _from, address _to, uint256 _amount, uint256 _expected ) external returns ( uint256 );
+  function exchange_with_best_rate ( address _from, address _to, uint256 _amount, uint256 _expected, address _receiver ) external returns ( uint256 );
+  function exchange ( address _pool, address _from, address _to, uint256 _amount, uint256 _expected ) external returns ( uint256 );
+  function exchange ( address _pool, address _from, address _to, uint256 _amount, uint256 _expected, address _receiver ) external returns ( uint256 );
+  function exchange_multiple ( address[9] memory _route, uint256[3][4] memory _swap_params, uint256 _amount, uint256 _expected ) external returns ( uint256 );
+  function exchange_multiple ( address[9] memory _route, uint256[3][4] memory _swap_params, uint256 _amount, uint256 _expected, address _receiver ) external returns ( uint256 );
+  function get_best_rate ( address _from, address _to, uint256 _amount ) external view returns ( address, uint256 );
+  function get_best_rate ( address _from, address _to, uint256 _amount, address[8] memory _exclude_pools ) external view returns ( address, uint256 );
+  function get_exchange_amount ( address _pool, address _from, address _to, uint256 _amount ) external view returns ( uint256 );
+  function get_input_amount ( address _pool, address _from, address _to, uint256 _amount ) external view returns ( uint256 );
+  function get_exchange_amounts ( address _pool, address _from, address _to, uint256[100] memory _amounts ) external view returns ( uint256[100] memory );
+  function get_calculator ( address _pool ) external view returns ( address );
+  function update_registry_address (  ) external returns ( bool );
+  function set_calculator ( address _pool, address _calculator ) external returns ( bool );
+  function set_default_calculator ( address _calculator ) external returns ( bool );
+  function claim_balance ( address _token ) external returns ( bool );
+  function set_killed ( bool _is_killed ) external returns ( bool );
+  function registry (  ) external view returns ( address );
+  function factory_registry (  ) external view returns ( address );
+  function crypto_registry (  ) external view returns ( address );
+  function default_calculator (  ) external view returns ( address );
+  function is_killed (  ) external view returns ( bool );
+}
+
+//SPDX-License-Identifier: Unlicense
+pragma solidity ^0.8.0;
+
+interface IAcryptoSPool {
+  function A (  ) external view returns ( uint256 );
+  function A_precise (  ) external view returns ( uint256 );
+  function get_virtual_price (  ) external view returns ( uint256 );
+  function calc_token_amount ( uint256[2] memory amounts, bool is_deposit ) external view returns ( uint256 );
+  function add_liquidity ( uint256[2] memory amounts, uint256 min_mint_amount ) external returns ( uint256 );
+  function get_dy ( int128 i, int128 j, uint256 dx ) external view returns ( uint256 );
+  function get_dy_underlying ( int128 i, int128 j, uint256 dx ) external view returns ( uint256 );
+  function exchange ( int128 i, int128 j, uint256 dx, uint256 min_dy ) external returns ( uint256 );
+  function exchange_underlying ( int128 i, int128 j, uint256 dx, uint256 min_dy ) external returns ( uint256 );
+  function remove_liquidity ( uint256 _amount, uint256[2] memory min_amounts ) external returns ( uint256[2] memory );
+  function remove_liquidity_imbalance ( uint256[2] memory amounts, uint256 max_burn_amount ) external returns ( uint256 );
+  function calc_withdraw_one_coin ( uint256 _token_amount, int128 i ) external view returns ( uint256 );
+  function remove_liquidity_one_coin ( uint256 _token_amount, int128 i, uint256 _min_amount ) external returns ( uint256 );
+  function ramp_A ( uint256 _future_A, uint256 _future_time ) external;
+  function stop_ramp_A (  ) external;
+  function commit_new_fee ( uint256 new_fee, uint256 new_admin_fee ) external;
+  function apply_new_fee (  ) external;
+  function revert_new_parameters (  ) external;
+  function commit_transfer_ownership ( address _owner ) external;
+  function apply_transfer_ownership (  ) external;
+  function revert_transfer_ownership (  ) external;
+  function admin_balances ( uint256 i ) external view returns ( uint256 );
+  function withdraw_admin_fees (  ) external;
+  function donate_admin_fees (  ) external;
+  function kill_me (  ) external;
+  function unkill_me (  ) external;
+  function set_admin_fee_address ( address _admin_fee_address ) external;
+  function coins ( uint256 arg0 ) external view returns ( address );
+  function balances ( uint256 arg0 ) external view returns ( uint256 );
+  function fee (  ) external view returns ( uint256 );
+  function admin_fee (  ) external view returns ( uint256 );
+  function admin_fee_address (  ) external view returns ( address );
+  function owner (  ) external view returns ( address );
+  function token (  ) external view returns ( address );
+  function base_pool (  ) external view returns ( address );
+  function base_virtual_price (  ) external view returns ( uint256 );
+  function base_cache_updated (  ) external view returns ( uint256 );
+  function base_coins ( uint256 arg0 ) external view returns ( address );
+  function initial_A (  ) external view returns ( uint256 );
+  function future_A (  ) external view returns ( uint256 );
+  function initial_A_time (  ) external view returns ( uint256 );
+  function future_A_time (  ) external view returns ( uint256 );
+  function admin_actions_deadline (  ) external view returns ( uint256 );
+  function transfer_ownership_deadline (  ) external view returns ( uint256 );
+  function future_fee (  ) external view returns ( uint256 );
+  function future_admin_fee (  ) external view returns ( uint256 );
+  function future_owner (  ) external view returns ( address );
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/math/SafeMath.sol)
+
+pragma solidity ^0.8.0;
+
+// CAUTION
+// This version of SafeMath should only be used with Solidity 0.8 or later,
+// because it relies on the compiler's built in overflow checks.
+
+/**
+ * @dev Wrappers over Solidity's arithmetic operations.
+ *
+ * NOTE: `SafeMath` is generally not needed starting with Solidity 0.8, since the compiler
+ * now has built in overflow checking.
+ */
+library SafeMath {
+    /**
+     * @dev Returns the addition of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryAdd(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            uint256 c = a + b;
+            if (c < a) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the substraction of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function trySub(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b > a) return (false, 0);
+            return (true, a - b);
+        }
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMul(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            // Gas optimization: this is cheaper than requiring 'a' not being zero, but the
+            // benefit is lost if 'b' is also tested.
+            // See: https://github.com/OpenZeppelin/openzeppelin-contracts/pull/522
+            if (a == 0) return (true, 0);
+            uint256 c = a * b;
+            if (c / a != b) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the division of two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryDiv(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a / b);
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMod(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a % b);
+        }
+    }
+
+    /**
+     * @dev Returns the addition of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `+` operator.
+     *
+     * Requirements:
+     *
+     * - Addition cannot overflow.
+     */
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting on
+     * overflow (when the result is negative).
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a - b;
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `*` operator.
+     *
+     * Requirements:
+     *
+     * - Multiplication cannot overflow.
+     */
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a * b;
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator.
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a / b;
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting when dividing by zero.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a % b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting with custom message on
+     * overflow (when the result is negative).
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {trySub}.
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b <= a, errorMessage);
+            return a - b;
+        }
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting with custom message on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator. Note: this function uses a
+     * `revert` opcode (which leaves remaining gas untouched) while Solidity
+     * uses an invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a / b;
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting with custom message when dividing by zero.
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {tryMod}.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a % b;
+        }
+    }
+}
