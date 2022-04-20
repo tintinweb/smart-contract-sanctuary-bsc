@@ -1,0 +1,1351 @@
+// SPDX-License-Identifier: MIT
+ 
+pragma solidity >=0.8.0 <0.9.0;
+ 
+import "Ownable.sol";
+import "Strings.sol";
+import "ChainEstateToken.sol";
+
+/**
+ * @title Chain Estate DAO Air Drop
+ * @dev Contract responsible for the Chain Estate DAO air drop mechanism
+ */
+contract ChainEstateAirDrop is Ownable {
+
+    // References the deployed Chain Estate token.
+    ChainEstateToken public CHES;
+
+    // Determines if the air drop is active for users to collect rewards.
+    bool public airDropActive = false;
+
+    // The minimum amount of CHES a user needs to have invested to receive air drop rewards.
+    uint256 public airDropMinimumToInvest = 10000 * 10 ** 18;
+
+    // Initial percentage gained from claiming air drop before invest time calculations.
+    uint256 public airDropInitialPercent = 10;
+
+    // How long users have to hold their CHES tokens before they can participate in airdrops.
+    uint256 public minimumInvestTime = 14 days;
+
+    // Mapping that determines if each user has already claimed their air drop rewards - resets every new air drop
+    mapping(address => bool) public userClaimedAirDrop;
+
+    // List of all users who participated in the air drop - resets every new air drop
+    address[] public airDropUsers;
+
+    // Event to emit when someone claims an air drop.
+    event AirDropClaimed(address indexed claimAddress, uint256 timeStamp, uint256 amount);
+ 
+    /**
+    * @dev Once the CHES token contract is deployed, this function is used to set a reference to that token in this contract.
+    * @param CHESTokenAddress address of the ChainEstate token.
+     */
+    function setToken(address payable CHESTokenAddress) public onlyOwner {
+        CHES = ChainEstateToken(CHESTokenAddress);
+    }
+ 
+    /**
+    * @dev Gets the amount of CHES the sender owns.
+    * @return the CHES balance of the sender
+    */
+    function getUserBalance() public view returns (uint256) {
+        return CHES.balanceOf(msg.sender);
+    }
+ 
+     /**
+     * @dev Returns the contract address
+     * @return contract address
+     */
+    function getContractAddress() public view returns (address) {
+        return address(this);
+    }
+ 
+    /**
+     * @dev Returns the CHES token address
+     * @return CHES token contract address
+     */
+    function getTokenAddress() public view returns (address) {
+        return CHES.getContractAddress();
+    }
+ 
+    /**
+    * @dev Only owner function to change the minimum amount of CHES a user needs to have to participate in air drops.
+    * @param newMinimum the new minimum amount of CHES
+     */
+    function changeAirDropMinimumToInvest(uint256 newMinimum) public onlyOwner {
+        airDropMinimumToInvest = newMinimum;
+    }
+
+    /**
+    * @dev Only owner function to change the initial percentage gained from air drop rewards before invest time calculation.
+    * @param amount the new air drop initial percent reward (percent of user's current holdings).
+     */
+    function changeAirDropInitialPercent(uint256 amount) public onlyOwner {
+        airDropInitialPercent = amount;
+    }
+
+    /**
+    * @dev Only owner function to change how long users need to hold their CHES tokens before being able to claim airdrop rewards.
+    * @param newMinimumTime the new minimum amount of time users need to have held their CHES tokens for.
+    * @param convertToDays boolean to determine if the number provided should be treated as a number of days (true) or seconds (false).
+     */
+    function changeMinimumInvestTime(uint256 newMinimumTime, bool convertToDays) public onlyOwner {
+        if (convertToDays) {
+            minimumInvestTime = newMinimumTime * 24 * 60 * 60;
+        }
+        else {
+            minimumInvestTime = newMinimumTime;
+        }
+    }
+ 
+    /**
+    * @dev Only owner function to open the air drop so users can claim their rewards.
+     */
+    function openAirDrop() public onlyOwner {
+        airDropActive = true;
+ 
+        for (uint i=0; i< airDropUsers.length ; i++){
+            userClaimedAirDrop[airDropUsers[i]] = false;
+        }
+ 
+        delete airDropUsers;
+    }
+ 
+    /**
+    * @dev Only owner function to close the current airdrop.
+    * Airdrops by default are never closed, this is just here in case it's needed at some point.
+     */
+    function closeAirDrop() public onlyOwner {
+        require(airDropActive, "There currently isn't an air drop to close.");
+        airDropActive = false;
+    }
+
+    /**
+    * @dev Allows a user to claim their air drop rewards.
+    * Sends 10% of user's current balance + more depending how long they have been holding their CHES.
+     */
+    function claimAirDrop() public {
+        address claimAddress = msg.sender;
+        require(CHES.balanceOf(claimAddress) >= airDropMinimumToInvest, "You need to have more invested to receive rewards from air drops!");
+        require(airDropActive, "The air drop is not currently active. You can claim your air drop rewards when an air drop is ongoing.");
+        require(!userClaimedAirDrop[claimAddress], "You've already claimed your rewards from this air drop!");
+        require(CHES.airDropInvestTime(claimAddress) > 0, "Your investing time needs to be greater than 0.");
+ 
+        // The user's investments can't be too recent or people would be encouraged to buy CHES,
+        // claim the air drop, and then sell the CHES for quick profits.
+        uint256 currTimeStamp = block.timestamp;
+        uint256 userTimeStamp = CHES.airDropInvestTime(claimAddress);
+        string memory canClaimRewardsIn = "1";
+        if (userTimeStamp + minimumInvestTime >= currTimeStamp && (userTimeStamp + minimumInvestTime - currTimeStamp) / 60 / 60 / 24 > 0) {
+            canClaimRewardsIn = Strings.toString((userTimeStamp + minimumInvestTime - currTimeStamp) / 60 / 60 / 24);
+        }
+
+        require(userTimeStamp <= currTimeStamp - minimumInvestTime, string(abi.encodePacked("Too many of your recent investments were made too close to the air drop time. You can claim your rewards in ", canClaimRewardsIn, " day(s). The air drop will still be open then.")));
+
+        // Initial percentage gained from claiming air drop.
+        uint256 initialAmount = (CHES.balanceOf(claimAddress) / 100) * airDropInitialPercent;
+
+        // Determines how much is added on to initial percentage based length tokens were held.
+        // If you invest super early, your rewards approaches 2 * intial percent of your current holdings.
+        // If you invest super late (close to the current time), your rewards approaches the initial percent of your current holdings but will be slightly greater.
+        uint256 finalAmount = initialAmount + (initialAmount * (1 + (((currTimeStamp - userTimeStamp) * currTimeStamp) / (currTimeStamp - CHES.initialTimeStamp())))) / currTimeStamp;
+
+        // The airdrop needs to have the required funds to give to the user.
+        // The airdrop funds will be monitored heavily so this should never prevent airdrop reward claiming.
+        require(CHES.balanceOf(address(this)) >= finalAmount, "Air drop doesn't have enough funds for this air drop claim.");
+
+        // Add the user as one of the users who has claimed the air drop.
+        airDropUsers.push(claimAddress);
+        userClaimedAirDrop[claimAddress] = true;
+
+        // Transfers the CHES tokens to the user claiming them.
+        CHES.transfer(claimAddress, finalAmount);
+
+        emit AirDropClaimed(claimAddress, currTimeStamp, finalAmount);
+   }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (access/Ownable.sol)
+
+pragma solidity ^0.8.0;
+
+import "Context.sol";
+
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owner.
+     */
+    constructor() {
+        _transferOwnership(_msgSender());
+    }
+
+    /**
+     * @dev Returns the address of the current owner.
+     */
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    /**
+     * @dev Throws if called by any account other than the owner.
+     */
+    modifier onlyOwner() {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    /**
+     * @dev Leaves the contract without owner. It will not be possible to call
+     * `onlyOwner` functions anymore. Can only be called by the current owner.
+     *
+     * NOTE: Renouncing ownership will leave the contract without an owner,
+     * thereby removing any functionality that is only available to the owner.
+     */
+    function renounceOwnership() public virtual onlyOwner {
+        _transferOwnership(address(0));
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Can only be called by the current owner.
+     */
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _transferOwnership(newOwner);
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Internal function without access restriction.
+     */
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Strings.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev String operations.
+ */
+library Strings {
+    bytes16 private constant _HEX_SYMBOLS = "0123456789abcdef";
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` decimal representation.
+     */
+    function toString(uint256 value) internal pure returns (string memory) {
+        // Inspired by OraclizeAPI's implementation - MIT licence
+        // https://github.com/oraclize/ethereum-api/blob/b42146b063c7d6ee1358846c198246239e9360e8/oraclizeAPI_0.4.25.sol
+
+        if (value == 0) {
+            return "0";
+        }
+        uint256 temp = value;
+        uint256 digits;
+        while (temp != 0) {
+            digits++;
+            temp /= 10;
+        }
+        bytes memory buffer = new bytes(digits);
+        while (value != 0) {
+            digits -= 1;
+            buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
+            value /= 10;
+        }
+        return string(buffer);
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation.
+     */
+    function toHexString(uint256 value) internal pure returns (string memory) {
+        if (value == 0) {
+            return "0x00";
+        }
+        uint256 temp = value;
+        uint256 length = 0;
+        while (temp != 0) {
+            length++;
+            temp >>= 8;
+        }
+        return toHexString(value, length);
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation with fixed length.
+     */
+    function toHexString(uint256 value, uint256 length) internal pure returns (string memory) {
+        bytes memory buffer = new bytes(2 * length + 2);
+        buffer[0] = "0";
+        buffer[1] = "x";
+        for (uint256 i = 2 * length + 1; i > 1; --i) {
+            buffer[i] = _HEX_SYMBOLS[value & 0xf];
+            value >>= 4;
+        }
+        require(value == 0, "Strings: hex length insufficient");
+        return string(buffer);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+ 
+pragma solidity >=0.8.0 <0.9.0;
+ 
+import "ERC20.sol";
+import "Ownable.sol";
+import "Uniswap.sol";
+
+/**
+ * @title Chain Estate DAO Token
+ * @dev Main contract for Chain Estate DAO
+ * TODO - Limit how many tokens users can purchase from PancakeSwap
+ * TODO - Will possibly create the BNB to CHES token PankcakeSwap pair in the constructor.
+ */
+contract ChainEstateToken is ERC20, Ownable {
+
+    // Mapping to exclude some contracts from fees. Transfers are excluded from fees if address in this mapping is recipient or sender.
+    mapping (address => bool) public excludedFromFees;
+
+    // Mapping to determine the timestamp of each address' investment. Earlier average investment = better air drop rewards.
+    mapping (address => uint256) public airDropInvestTime;
+
+    // Blacklist mapping to prevent addresses from trading if necessary (i.e. flagged for malicious activity).
+    mapping (address => bool) public blacklist;
+
+    // Mapping to determine which addresses can mint Chain Estate tokens for bridging.
+    mapping (address => bool) public minters;
+
+    // Address of the contract responsible for the air dropping mechanism.
+    address public airDropContractAddress;
+
+    // Address of the contract for burning CHES tokens.
+    address public burnWalletAddress;
+
+    // Real estate wallet address used to collect funds to purchase real estate.
+    address payable public realEstateWalletAddress;
+
+    // Liquidity wallet address used to hold the 30% of CHES tokens for the liquidity pool.
+    // After these coins are moved to the DEX, this address will no longer be used.
+    address public liquidityWalletAddress;
+
+    // Marketing wallet address used for funding marketing.
+    address payable public marketingWalletAddress;
+
+    // Developer wallet address used for funding the team.
+    address payable public developerWalletAddress;
+
+    // The PancakeSwap router address for swapping CHES tokens for WBNB.
+    address public uniswapRouterAddress;
+
+    // The initial block timestamp of the token contract.
+    uint256 public initialTimeStamp;
+
+    // Real estate transaction fee - deployed at 3%.
+    uint256 public realEstateTransactionFeePercent = 3;
+
+    // Developer team transaction fee - deployed at 1%.
+    uint256 public developerFeePercent = 1;
+
+    // Marketing transaction fee - deployed at 1%.
+    uint256 public marketingFeePercent = 1;
+
+    // PancakeSwap router interface.
+    IUniswapV2Router02 private uniswapRouter;
+
+    // Address of the WBNB to CHES token pair on PancakeSwap.
+    address public uniswapPair;
+
+    // Address of the token claim contract.
+    address public tokenClaimContractAddress;
+
+    // Determines how many CHES tokens this contract needs before it swaps for WBNB to pay fee wallets.
+    uint256 public contractCHESDivisor = 1000;
+
+    // Events to emit when the transaction fees are updated
+    event realEstateTransactionFeeUpdated(uint256 indexed transactionFeeAmount);
+    event marketingTransactionFeeUpdated(uint256 indexed transactionFeeAmount);
+    event developerTransactionFeeUpdated(uint256 indexed transactionFeeAmount);
+
+    // Initial token distribution:
+    // 35% - Air drop contract
+    // 30% - Liquidity pool (6 month lockup period)
+    // 20% - Burn
+    // 10% - Developer coins (6 month lockup period)
+    // 5% - Marketing
+    constructor(
+        uint256 initialSupply, 
+        address _airDropContractAddress, 
+        address _burnWalletAddress,
+        address _liquidityWalletAddress,
+        address payable _realEstateWalletAddress,
+        address payable _marketingWalletAddress,
+        address payable _developerWalletAddress,
+        address _uniswapRouterAddress) ERC20("ChainEstateTokenV2", "CHES") {
+            initialTimeStamp = block.timestamp;
+            airDropContractAddress = _airDropContractAddress;
+            realEstateWalletAddress = _realEstateWalletAddress;
+            burnWalletAddress = _burnWalletAddress;
+            liquidityWalletAddress = _liquidityWalletAddress;
+            marketingWalletAddress = _marketingWalletAddress;
+            developerWalletAddress = _developerWalletAddress;
+            uniswapRouterAddress = _uniswapRouterAddress;
+
+            excludedFromFees[_msgSender()] = true;
+            excludedFromFees[realEstateWalletAddress] = true;
+            excludedFromFees[developerWalletAddress] = true;
+            excludedFromFees[marketingWalletAddress] = true;
+            excludedFromFees[liquidityWalletAddress] = true;
+            excludedFromFees[airDropContractAddress] = true;    // No transaction fees for claiming air drop rewards
+
+            // The number of tokens claimed in the first airdrop for the v1 CHES token
+            uint256 firstAirdropClaimAmount = 23366791 * 10 ** 18;
+
+            _mint(airDropContractAddress, ((initialSupply) * 35 / 100) - firstAirdropClaimAmount);
+            _mint(liquidityWalletAddress, ((initialSupply) * 3 / 10) + firstAirdropClaimAmount);
+            _mint(burnWalletAddress, initialSupply / 5);
+            _mint(marketingWalletAddress, initialSupply * 5 / 100);
+            _mint(developerWalletAddress, initialSupply / 10);
+
+            IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(uniswapRouterAddress);
+            uniswapRouter = _uniswapV2Router;
+            _approve(address(this), address(uniswapRouter), initialSupply);
+            uniswapPair = IUniswapV2Factory(_uniswapV2Router.factory()).createPair(address(this), _uniswapV2Router.WETH());
+            IERC20(uniswapPair).approve(address(uniswapRouter), type(uint256).max);
+    }
+
+    /**
+     * @dev Returns the contract address
+     * @return contract address
+     */
+    function getContractAddress() public view returns (address){
+        return address(this);
+    }
+
+    /**
+    * @dev Adds a user to be excluded from fees.
+    * @param user address of the user to be excluded from fees.
+     */
+    function excludeUserFromFees(address user) public onlyOwner {
+        excludedFromFees[user] = true;
+    }
+
+    /**
+    * @dev Gets the current timestamp, used for testing + verification
+    * @return the the timestamp of the current block
+     */
+    function getCurrentTimestamp() public view returns (uint256) {
+        return block.timestamp;
+    }
+
+    /**
+    * @dev Removes a user from the fee exclusion.
+    * @param user address of the user than will now have to pay transaction fees.
+     */
+    function includeUsersInFees(address user) public onlyOwner {
+        excludedFromFees[user] = false;
+    }
+
+    /**
+     * @dev Overrides the BEP20 transfer function to include transaction fees.
+     * @param recipient the recipient of the transfer
+     * @param amount the amount to be transfered
+     * @return bool representing if the transfer was successful
+     */
+    function transfer(address recipient, uint256 amount) public override returns (bool) {
+        // Ensure the sender isn't blacklisted.
+        require(!blacklist[_msgSender()], "You have been blacklisted from trading the CHES token. If you think this is an error, please contact the Chain Estate DAO team.");
+        // Ensure the recipient isn't blacklisted.
+        require(!blacklist[recipient], "The address you are trying to send CHES to has been blacklisted from trading the CHES token. If you think this is an error, please contact the Chain Estate DAO team.");
+
+        // Stops investors from owning more than 2% of the total supply from purchasing CHES from PancakeSwap.
+        if (_msgSender() == uniswapPair && !excludedFromFees[_msgSender()] && !excludedFromFees[recipient]) {
+            require((balanceOf(recipient) + amount) < (totalSupply() / 166), "You can't have more than 2% of the total CHES supply after a PancakeSwap swap.");
+        }
+
+        // If the sender or recipient is excluded from fees, perform the default transfer.
+        if (excludedFromFees[_msgSender()] || excludedFromFees[recipient]) {
+            _transfer(_msgSender(), recipient, amount);
+            return true;
+        }
+
+        // Real estate transaction fee.
+        uint256 realEstateFee = (amount * realEstateTransactionFeePercent) / 100;
+        // Marketing team transaction fee.
+        uint256 marketingFee = (amount * marketingFeePercent) / 100;
+        // Developer team transaction fee.
+        uint256 developerFee = (amount * developerFeePercent) / 100;
+
+        // The total fee to send to the contract address.
+        uint256 totalFee = realEstateFee + marketingFee + developerFee;
+ 
+        // Sends the transaction fees to the contract address
+        _transfer(_msgSender(), address(this), totalFee);
+
+        uint256 contractCHESBalance = balanceOf(address(this));
+
+        if (_msgSender() != uniswapPair) {
+            if (contractCHESBalance > balanceOf(uniswapPair) / contractCHESDivisor) {
+                swapCHESForBNB(contractCHESBalance);
+            }
+                
+            uint256 contractBNBBalance = address(this).balance;
+            if (contractBNBBalance > 0) {
+                sendFeesToWallets(address(this).balance);
+            }
+        }
+ 
+        // Sends [initial amount] - [fees] to the recipient
+        uint256 valueAfterFees = amount - totalFee;
+        _transfer(_msgSender(), recipient, valueAfterFees);
+        return true;
+    }
+
+    /**
+     * @dev Overrides the BEP20 transferFrom function to include transaction fees.
+     * @param from the address from where the tokens are coming from
+     * @param to the recipient of the transfer
+     * @param amount the amount to be transfered
+     * @return bool representing if the transfer was successful
+     */
+    function transferFrom(address from, address to, uint256 amount) public override returns (bool) {
+        // Ensure the sender isn't blacklisted.
+        require(!blacklist[_msgSender()], "You have been blacklisted from trading the CHES token. If you think this is an error, please contact the Chain Estate DAO team.");
+        // Ensure the address where the tokens are coming from isn't blacklisted.
+        require(!blacklist[from], "The address you're trying to spend the tokens from has been blacklisted from trading the CHES token. If you think this is an error, please contact the Chain Estate DAO team.");
+        // Ensure the recipient isn't blacklisted.
+        require(!blacklist[to], "The address you are trying to send tokens to has been blacklisted from trading the CHES token. If you think this is an error, please contact the Chain Estate DAO team.");
+
+        // If the from address or to address is excluded from fees, perform the default transferFrom.
+        if (excludedFromFees[from] || excludedFromFees[to] || excludedFromFees[_msgSender()]) {
+            _spendAllowance(from, _msgSender(), amount);
+            _transfer(from, to, amount);
+            return true;
+        }
+
+        // Real estate transaction fee.
+        uint256 realEstateFee = (amount * realEstateTransactionFeePercent) / 100;
+        // Marketing team transaction fee.
+        uint256 marketingFee = (amount * marketingFeePercent) / 100;
+        // Developer team transaction fee.
+        uint256 developerFee = (amount * developerFeePercent) / 100;
+
+        // The total fee to send to the contract address.
+        uint256 totalFee = realEstateFee + marketingFee + developerFee;
+ 
+        // Sends the transaction fees to the contract address
+        _spendAllowance(from, _msgSender(), amount);
+        _transfer(from, address(this), totalFee);
+
+        uint256 contractCHESBalance = balanceOf(address(this));
+
+        if (_msgSender() != uniswapPair) {
+            if (contractCHESBalance > balanceOf(uniswapPair) / contractCHESDivisor) {
+                swapCHESForBNB(contractCHESBalance);
+            }
+                
+            uint256 contractBNBBalance = address(this).balance;
+            if (contractBNBBalance > 0) {
+                sendFeesToWallets(address(this).balance);
+            }
+        }
+ 
+        // Sends [initial amount] - [fees] to the recipient
+        uint256 valueAfterFees = amount - totalFee;
+        _transfer(from, to, valueAfterFees);
+        return true;
+    }
+
+    /**
+     * @dev Swaps CHES tokens from transaction fees to BNB.
+     * @param amount the amount of CHES tokens to swap
+     */
+    function swapCHESForBNB(uint256 amount) private {
+        address[] memory path = new address[](2);
+        path[0] = address(this);
+        path[1] = uniswapRouter.WETH();
+        _approve(address(this), address(uniswapRouter), amount);
+        uniswapRouter.swapExactTokensForETHSupportingFeeOnTransferTokens(
+            amount,
+            0,
+            path,
+            address(this),
+            block.timestamp
+        );
+    }
+
+    /**
+     * @dev Sends BNB to transaction fee wallets after CHES swaps.
+     * @param amount the amount to be transfered
+     */
+    function sendFeesToWallets(uint256 amount) private {
+        uint256 totalFee = realEstateTransactionFeePercent + marketingFeePercent + developerFeePercent;
+        realEstateWalletAddress.transfer((amount * realEstateTransactionFeePercent) / totalFee);
+        marketingWalletAddress.transfer((amount * marketingFeePercent) / totalFee);
+        developerWalletAddress.transfer((amount * developerFeePercent) / totalFee);
+    }
+
+    /**
+     * @dev Sends BNB to transaction fee wallets manually as opposed to happening automatically after a certain level of volume
+     */
+    function disperseFeesManually() public onlyOwner {
+        uint256 contractBNBBalance = address(this).balance;
+        sendFeesToWallets(contractBNBBalance);
+    }
+
+    /**
+     * @dev Swaps all CHES tokens in the contract for BNB and then disperses those funds to the transaction fee wallets.
+     * @param amount the amount of CHES in the contract to swap for BNB
+     * @param useAmount boolean to determine if the amount sent in is swapped for BNB or if the entire contract balance is swapped.
+     */
+    function swapCHESForBNBManually(uint256 amount, bool useAmount) public onlyOwner {
+        if (useAmount) {
+            swapCHESForBNB(amount);
+        }
+        else {
+            uint256 contractCHESBalance = balanceOf(address(this));
+            swapCHESForBNB(contractCHESBalance);
+        }
+
+        uint256 contractBNBBalance = address(this).balance;
+        sendFeesToWallets(contractBNBBalance);
+    }
+
+    receive() external payable {}
+
+    /**
+     * @dev Sets the value that determines how many CHES tokens need to be in the contract before it's swapped for BNB.
+     * @param newDivisor the new divisor value to determine the swap threshold
+     */
+    function setContractCHESDivisor(uint256 newDivisor) public onlyOwner {
+        contractCHESDivisor = newDivisor;
+    }
+
+    /**
+     * @dev After a token transfer, update the recipient address's air drop invest time since they have a later investment now.
+     * @param from the sender's address
+     * @param to the recipient's address
+     * @param value the amount that was transferred
+     */
+    function _afterTokenTransfer(address from, address to, uint256 value) internal virtual override {
+        uint256 userBalance = balanceOf(to);
+        if (to != address(0)) {
+            airDropInvestTime[to] = (value * block.timestamp + (userBalance - value) * airDropInvestTime[to]) / userBalance;
+        }
+
+        super._afterTokenTransfer(from, to, value);
+    }
+
+    /**
+    * @dev Updates the blacklist mapping for a given address
+    * @param user the address that is being added or removed from the blacklist
+    * @param blacklisted a boolean that determines if the given address is being added or removed from the blacklist
+    */
+    function updateBlackList(address user, bool blacklisted) public onlyOwner {
+        blacklist[user] = blacklisted;
+    }
+
+    /**
+    * @dev Function to update the real estate transaction fee - can't be more than 20 percent
+    * @param newRealEstateTransactionFee the new real estate transaction fee
+    */
+    function updateRealEstateTransactionFee(uint256 newRealEstateTransactionFee) public onlyOwner {
+        require(newRealEstateTransactionFee <= 20, "The real estate transaction fee can't be more than 20%.");
+        realEstateTransactionFeePercent = newRealEstateTransactionFee;
+        emit realEstateTransactionFeeUpdated(newRealEstateTransactionFee);
+    }
+
+    /**
+    * @dev Function to update the marketing transaction fee - can't be more than 5 percent
+    * @param newMarketingTransactionFee the new marketing transaction fee
+    */
+    function updateMarketingTransactionFee(uint256 newMarketingTransactionFee) public onlyOwner {
+        require(newMarketingTransactionFee <= 5, "The marketing transaction fee can't be more than 5%.");
+        marketingFeePercent = newMarketingTransactionFee;
+        emit marketingTransactionFeeUpdated(newMarketingTransactionFee);
+    }
+
+    /**
+    * @dev Function to update the developer transaction fee - can't be more than 5 percent
+    * @param newDeveloperTransactionFee the new developer transaction fee
+    */
+    function updateDeveloperTransactionFee(uint256 newDeveloperTransactionFee) public onlyOwner {
+        require(newDeveloperTransactionFee <= 5, "The developer transaction fee can't be more than 5%.");
+        developerFeePercent = newDeveloperTransactionFee;
+        emit developerTransactionFeeUpdated(newDeveloperTransactionFee);
+    }
+
+    /**
+    * @dev Function to add or remove a CHES token minter
+    * @param user the address that will be added or removed as a minter
+    * @param isMinter boolean representing if the address provided will be added or removed as a minter
+    */
+    function updateMinter(address user, bool isMinter) public onlyOwner {
+        minters[user] = isMinter;
+    }
+
+    /**
+    * @dev Minter only function to mint new CHES tokens for bridging
+    * @param user the address that the tokens will be minted to
+    * @param amount the amount of tokens to be minted to the user
+    */
+    function mint(address user, uint256 amount) public {
+        require(minters[_msgSender()], "You are not authorized to mint CHES tokens.");
+        _mint(user, amount);
+    }
+
+    /**
+    * @dev Minter only function to burn CHES tokens for bridging
+    * @param user the address to burn the tokens from
+    * @param amount the amount of tokens to be burned
+    */
+    function burn(address user, uint256 amount) public {
+        require(minters[_msgSender()], "You are not authorized to burn CHES tokens.");
+        _burn(user, amount);
+    }
+
+    /**
+    * @dev Function that only the token claim contract can call to set the airdrop invest time for a user when claiming their V2 tokens.
+    * @param user the address to set the airdrop invest time for
+    * @param airDropInvestTimeVal the airdrop invest time for the user
+    */
+    function setAirDropInvestTime(address user, uint256 airDropInvestTimeVal) public {
+        require(msg.sender == tokenClaimContractAddress, "Only the token claim contract can call this function.");
+        airDropInvestTime[user] = airDropInvestTimeVal;
+    }
+
+    /**
+    * @dev Only owner function to set the token claim contract address.
+    * @param tokenClaimAddress the token claim contract address
+    */
+    function setTokenClaimContractAddress(address tokenClaimAddress) public onlyOwner {
+        tokenClaimContractAddress = tokenClaimAddress;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.5.0) (token/ERC20/ERC20.sol)
+
+pragma solidity ^0.8.0;
+
+import "IERC20.sol";
+import "IERC20Metadata.sol";
+import "Context.sol";
+
+/**
+ * @dev Implementation of the {IERC20} interface.
+ *
+ * This implementation is agnostic to the way tokens are created. This means
+ * that a supply mechanism has to be added in a derived contract using {_mint}.
+ * For a generic mechanism see {ERC20PresetMinterPauser}.
+ *
+ * TIP: For a detailed writeup see our guide
+ * https://forum.zeppelin.solutions/t/how-to-implement-erc20-supply-mechanisms/226[How
+ * to implement supply mechanisms].
+ *
+ * We have followed general OpenZeppelin Contracts guidelines: functions revert
+ * instead returning `false` on failure. This behavior is nonetheless
+ * conventional and does not conflict with the expectations of ERC20
+ * applications.
+ *
+ * Additionally, an {Approval} event is emitted on calls to {transferFrom}.
+ * This allows applications to reconstruct the allowance for all accounts just
+ * by listening to said events. Other implementations of the EIP may not emit
+ * these events, as it isn't required by the specification.
+ *
+ * Finally, the non-standard {decreaseAllowance} and {increaseAllowance}
+ * functions have been added to mitigate the well-known issues around setting
+ * allowances. See {IERC20-approve}.
+ */
+contract ERC20 is Context, IERC20, IERC20Metadata {
+    mapping(address => uint256) private _balances;
+
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    uint256 private _totalSupply;
+
+    string private _name;
+    string private _symbol;
+
+    /**
+     * @dev Sets the values for {name} and {symbol}.
+     *
+     * The default value of {decimals} is 18. To select a different value for
+     * {decimals} you should overload it.
+     *
+     * All two of these values are immutable: they can only be set once during
+     * construction.
+     */
+    constructor(string memory name_, string memory symbol_) {
+        _name = name_;
+        _symbol = symbol_;
+    }
+
+    /**
+     * @dev Returns the name of the token.
+     */
+    function name() public view virtual override returns (string memory) {
+        return _name;
+    }
+
+    /**
+     * @dev Returns the symbol of the token, usually a shorter version of the
+     * name.
+     */
+    function symbol() public view virtual override returns (string memory) {
+        return _symbol;
+    }
+
+    /**
+     * @dev Returns the number of decimals used to get its user representation.
+     * For example, if `decimals` equals `2`, a balance of `505` tokens should
+     * be displayed to a user as `5.05` (`505 / 10 ** 2`).
+     *
+     * Tokens usually opt for a value of 18, imitating the relationship between
+     * Ether and Wei. This is the value {ERC20} uses, unless this function is
+     * overridden;
+     *
+     * NOTE: This information is only used for _display_ purposes: it in
+     * no way affects any of the arithmetic of the contract, including
+     * {IERC20-balanceOf} and {IERC20-transfer}.
+     */
+    function decimals() public view virtual override returns (uint8) {
+        return 18;
+    }
+
+    /**
+     * @dev See {IERC20-totalSupply}.
+     */
+    function totalSupply() public view virtual override returns (uint256) {
+        return _totalSupply;
+    }
+
+    /**
+     * @dev See {IERC20-balanceOf}.
+     */
+    function balanceOf(address account) public view virtual override returns (uint256) {
+        return _balances[account];
+    }
+
+    /**
+     * @dev See {IERC20-transfer}.
+     *
+     * Requirements:
+     *
+     * - `to` cannot be the zero address.
+     * - the caller must have a balance of at least `amount`.
+     */
+    function transfer(address to, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        _transfer(owner, to, amount);
+        return true;
+    }
+
+    /**
+     * @dev See {IERC20-allowance}.
+     */
+    function allowance(address owner, address spender) public view virtual override returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    /**
+     * @dev See {IERC20-approve}.
+     *
+     * NOTE: If `amount` is the maximum `uint256`, the allowance is not updated on
+     * `transferFrom`. This is semantically equivalent to an infinite approval.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     */
+    function approve(address spender, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, amount);
+        return true;
+    }
+
+    /**
+     * @dev See {IERC20-transferFrom}.
+     *
+     * Emits an {Approval} event indicating the updated allowance. This is not
+     * required by the EIP. See the note at the beginning of {ERC20}.
+     *
+     * NOTE: Does not update the allowance if the current allowance
+     * is the maximum `uint256`.
+     *
+     * Requirements:
+     *
+     * - `from` and `to` cannot be the zero address.
+     * - `from` must have a balance of at least `amount`.
+     * - the caller must have allowance for ``from``'s tokens of at least
+     * `amount`.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) public virtual override returns (bool) {
+        address spender = _msgSender();
+        _spendAllowance(from, spender, amount);
+        _transfer(from, to, amount);
+        return true;
+    }
+
+    /**
+     * @dev Atomically increases the allowance granted to `spender` by the caller.
+     *
+     * This is an alternative to {approve} that can be used as a mitigation for
+     * problems described in {IERC20-approve}.
+     *
+     * Emits an {Approval} event indicating the updated allowance.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     */
+    function increaseAllowance(address spender, uint256 addedValue) public virtual returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, _allowances[owner][spender] + addedValue);
+        return true;
+    }
+
+    /**
+     * @dev Atomically decreases the allowance granted to `spender` by the caller.
+     *
+     * This is an alternative to {approve} that can be used as a mitigation for
+     * problems described in {IERC20-approve}.
+     *
+     * Emits an {Approval} event indicating the updated allowance.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     * - `spender` must have allowance for the caller of at least
+     * `subtractedValue`.
+     */
+    function decreaseAllowance(address spender, uint256 subtractedValue) public virtual returns (bool) {
+        address owner = _msgSender();
+        uint256 currentAllowance = _allowances[owner][spender];
+        require(currentAllowance >= subtractedValue, "ERC20: decreased allowance below zero");
+        unchecked {
+            _approve(owner, spender, currentAllowance - subtractedValue);
+        }
+
+        return true;
+    }
+
+    /**
+     * @dev Moves `amount` of tokens from `sender` to `recipient`.
+     *
+     * This internal function is equivalent to {transfer}, and can be used to
+     * e.g. implement automatic token fees, slashing mechanisms, etc.
+     *
+     * Emits a {Transfer} event.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `from` must have a balance of at least `amount`.
+     */
+    function _transfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(to != address(0), "ERC20: transfer to the zero address");
+
+        _beforeTokenTransfer(from, to, amount);
+
+        uint256 fromBalance = _balances[from];
+        require(fromBalance >= amount, "ERC20: transfer amount exceeds balance");
+        unchecked {
+            _balances[from] = fromBalance - amount;
+        }
+        _balances[to] += amount;
+
+        emit Transfer(from, to, amount);
+
+        _afterTokenTransfer(from, to, amount);
+    }
+
+    /** @dev Creates `amount` tokens and assigns them to `account`, increasing
+     * the total supply.
+     *
+     * Emits a {Transfer} event with `from` set to the zero address.
+     *
+     * Requirements:
+     *
+     * - `account` cannot be the zero address.
+     */
+    function _mint(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: mint to the zero address");
+
+        _beforeTokenTransfer(address(0), account, amount);
+
+        _totalSupply += amount;
+        _balances[account] += amount;
+        emit Transfer(address(0), account, amount);
+
+        _afterTokenTransfer(address(0), account, amount);
+    }
+
+    /**
+     * @dev Destroys `amount` tokens from `account`, reducing the
+     * total supply.
+     *
+     * Emits a {Transfer} event with `to` set to the zero address.
+     *
+     * Requirements:
+     *
+     * - `account` cannot be the zero address.
+     * - `account` must have at least `amount` tokens.
+     */
+    function _burn(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: burn from the zero address");
+
+        _beforeTokenTransfer(account, address(0), amount);
+
+        uint256 accountBalance = _balances[account];
+        require(accountBalance >= amount, "ERC20: burn amount exceeds balance");
+        unchecked {
+            _balances[account] = accountBalance - amount;
+        }
+        _totalSupply -= amount;
+
+        emit Transfer(account, address(0), amount);
+
+        _afterTokenTransfer(account, address(0), amount);
+    }
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the `owner` s tokens.
+     *
+     * This internal function is equivalent to `approve`, and can be used to
+     * e.g. set automatic allowances for certain subsystems, etc.
+     *
+     * Emits an {Approval} event.
+     *
+     * Requirements:
+     *
+     * - `owner` cannot be the zero address.
+     * - `spender` cannot be the zero address.
+     */
+    function _approve(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        require(owner != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    /**
+     * @dev Spend `amount` form the allowance of `owner` toward `spender`.
+     *
+     * Does not update the allowance amount in case of infinite allowance.
+     * Revert if not enough allowance is available.
+     *
+     * Might emit an {Approval} event.
+     */
+    function _spendAllowance(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        uint256 currentAllowance = allowance(owner, spender);
+        if (currentAllowance != type(uint256).max) {
+            require(currentAllowance >= amount, "ERC20: insufficient allowance");
+            unchecked {
+                _approve(owner, spender, currentAllowance - amount);
+            }
+        }
+    }
+
+    /**
+     * @dev Hook that is called before any transfer of tokens. This includes
+     * minting and burning.
+     *
+     * Calling conditions:
+     *
+     * - when `from` and `to` are both non-zero, `amount` of ``from``'s tokens
+     * will be transferred to `to`.
+     * - when `from` is zero, `amount` tokens will be minted for `to`.
+     * - when `to` is zero, `amount` of ``from``'s tokens will be burned.
+     * - `from` and `to` are never both zero.
+     *
+     * To learn more about hooks, head to xref:ROOT:extending-contracts.adoc#using-hooks[Using Hooks].
+     */
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+
+    /**
+     * @dev Hook that is called after any transfer of tokens. This includes
+     * minting and burning.
+     *
+     * Calling conditions:
+     *
+     * - when `from` and `to` are both non-zero, `amount` of ``from``'s tokens
+     * has been transferred to `to`.
+     * - when `from` is zero, `amount` tokens have been minted for `to`.
+     * - when `to` is zero, `amount` of ``from``'s tokens have been burned.
+     * - `from` and `to` are never both zero.
+     *
+     * To learn more about hooks, head to xref:ROOT:extending-contracts.adoc#using-hooks[Using Hooks].
+     */
+    function _afterTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.5.0) (token/ERC20/IERC20.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20 {
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `to`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `from` to `to` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (token/ERC20/extensions/IERC20Metadata.sol)
+
+pragma solidity ^0.8.0;
+
+import "IERC20.sol";
+
+/**
+ * @dev Interface for the optional metadata functions from the ERC20 standard.
+ *
+ * _Available since v4.1._
+ */
+interface IERC20Metadata is IERC20 {
+    /**
+     * @dev Returns the name of the token.
+     */
+    function name() external view returns (string memory);
+
+    /**
+     * @dev Returns the symbol of the token.
+     */
+    function symbol() external view returns (string memory);
+
+    /**
+     * @dev Returns the decimals places of the token.
+     */
+    function decimals() external view returns (uint8);
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity >=0.8.0 <0.9.0;
+
+interface IUniswapV2Factory {
+    function createPair(address tokenA, address tokenB) external returns (address pair);
+}
+
+interface IUniswapV2Pair {
+    function sync() external;
+}
+
+interface IUniswapV2Router01 {
+    function factory() external pure returns (address);
+
+    function WETH() external pure returns (address);
+
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 amountADesired,
+        uint256 amountBDesired,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address to,
+        uint256 deadline
+    )
+        external
+        returns (
+            uint256 amountA,
+            uint256 amountB,
+            uint256 liquidity
+        );
+
+    function addLiquidityETH(
+        address token,
+        uint256 amountTokenDesired,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
+        address to,
+        uint256 deadline
+    )
+        external
+        payable
+        returns (
+            uint256 amountToken,
+            uint256 amountETH,
+            uint256 liquidity
+        );
+}
+
+interface IUniswapV2Router02 is IUniswapV2Router01 {
+    function removeLiquidityETHSupportingFeeOnTransferTokens(
+        address token,
+        uint256 liquidity,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
+        address to,
+        uint256 deadline
+    ) external returns (uint256 amountETH);
+
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external;
+
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external;
+
+    function swapExactETHForTokensSupportingFeeOnTransferTokens(
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external payable;
+}
