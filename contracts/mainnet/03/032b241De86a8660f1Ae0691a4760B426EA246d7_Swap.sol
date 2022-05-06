@@ -1,0 +1,1385 @@
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity ^0.8.4;
+
+import "./base/base.sol";
+import "./core/interfaces/IiZiSwapCallback.sol";
+import "./core/interfaces/IiZiSwapFactory.sol";
+import "./core/interfaces/IiZiSwapPool.sol";
+import "./libraries/Path.sol";
+
+contract Swap is Base, IiZiSwapCallback {
+
+    uint256 private constant DEFAULT_PAYED_CACHED = type(uint256).max;
+    uint256 private payedCached = DEFAULT_PAYED_CACHED;
+
+    using Path for bytes;
+
+    struct SwapCallbackData {
+        bytes path;
+        address payer;
+    }
+
+    /// @notice constructor to create this contract
+    /// @param _factory address of iZiSwapFactory
+    /// @param _weth address of weth token
+    constructor(address _factory, address _weth) Base(_factory, _weth) {}
+
+    /// @notice callback for swapY2X and swapY2XDesireX, in order to pay tokenY from trader
+    /// @param x amount of tokenX trader acquired
+    /// @param y amount of tokenY need to pay from trader
+    /// @param data encoded SwapCallbackData
+    function swapY2XCallback(
+        uint256 x,
+        uint256 y,
+        bytes calldata data
+    ) external override {
+        SwapCallbackData memory dt = abi.decode(data, (SwapCallbackData));
+
+        (address token0, address token1, uint24 fee) = dt.path.decodeFirstPool();
+        verify(token0, token1, fee);
+        if (token0 < token1) {
+            // token1 is y, amount of token1 is calculated
+            // called from swapY2XDesireX(...)
+            if (dt.path.hasMultiplePools()) {
+                dt.path = dt.path.skipToken();
+                swapDesireInternal(y, msg.sender, dt);
+            } else {
+                pay(token1, dt.payer, msg.sender, y);
+                payedCached = y;
+            }
+        } else {
+            // token0 is y, amount of token0 is input param
+            // called from swapY2X(...)
+            pay(token0, dt.payer, msg.sender, y);
+        }
+    }
+
+    /// @notice callback for swapX2Y and swapX2YDesireY, in order to pay tokenX from trader
+    /// @param x amount of tokenX need to pay from trader
+    /// @param y amount of tokenY trader acquired
+    /// @param data encoded SwapCallbackData
+    function swapX2YCallback(
+        uint256 x,
+        uint256 y,
+        bytes calldata data
+    ) external override {
+        SwapCallbackData memory dt = abi.decode(data, (SwapCallbackData));
+        (address token0, address token1, uint24 fee) = dt.path.decodeFirstPool();
+        verify(token0, token1, fee);
+        if (token0 < token1) {
+            // token0 is x, amount of token0 is input param
+            // called from swapX2Y(...)
+            pay(token0, dt.payer, msg.sender, x);
+        } else {
+            // token1 is x, amount of token1 is calculated param
+            // called from swapX2YDesireY(...)
+            if (dt.path.hasMultiplePools()) {
+                dt.path = dt.path.skipToken();
+                swapDesireInternal(x, msg.sender, dt);
+            } else {
+                pay(token1, dt.payer, msg.sender, x);
+                payedCached = x;
+            }
+        }
+    }
+
+    function swapDesireInternal(
+        uint256 desire,
+        address recipient,
+        SwapCallbackData memory data
+    ) private returns (uint256 acquire) {
+        // allow swapping to the router address with address 0
+        if (recipient == address(0)) recipient = address(this);
+
+        (address tokenOut, address tokenIn, uint24 fee) = data.path.decodeFirstPool();
+
+        address poolAddr = pool(tokenOut, tokenIn, fee);
+        if (tokenOut < tokenIn) {
+            // tokenOut is tokenX, tokenIn is tokenY
+            // we should call y2XDesireX
+
+            (acquire, ) = IiZiSwapPool(poolAddr).swapY2XDesireX(
+                recipient, uint128(desire), 800001,
+                abi.encode(data)
+            );
+        } else {
+            // tokenOut is tokenY
+            // tokenIn is tokenX
+            (, acquire) = IiZiSwapPool(poolAddr).swapX2YDesireY(
+                recipient, uint128(desire), -800001,
+                abi.encode(data)
+            );
+        }
+    }
+
+    function swapAmountInternal(
+        uint128 amount,
+        address recipient,
+        SwapCallbackData memory data
+    ) private returns (uint256 cost, uint256 acquire) {
+        // allow swapping to the router address with address 0
+        if (recipient == address(0)) recipient = address(this);
+
+        address payer = msg.sender; // msg.sender pays for the first hop
+
+        bool firstHop = true;
+
+        while (true) {
+            bool hasMultiplePools = data.path.hasMultiplePools();
+            (address tokenIn, address tokenOut, uint24 fee) = data.path.decodeFirstPool();
+            address poolAddr = pool(tokenOut, tokenIn, fee);
+            if (tokenIn < tokenOut) {
+                // swapX2Y
+                uint256 costX;
+                (costX, acquire) = IiZiSwapPool(poolAddr).swapX2Y(
+                    hasMultiplePools? address(this): recipient, amount, -799999,
+                    abi.encode(SwapCallbackData({path: abi.encodePacked(tokenIn, fee, tokenOut), payer: payer}))
+                );
+                if (firstHop) {
+                    cost = costX;
+                }
+            } else {
+                // swapY2X
+                uint256 costY;
+                (acquire, costY) = IiZiSwapPool(poolAddr).swapY2X(
+                    hasMultiplePools? address(this): recipient, amount, 799999,
+                    abi.encode(SwapCallbackData({path: abi.encodePacked(tokenIn, fee, tokenOut), payer: payer}))
+                );
+                if (firstHop) {
+                    cost = costY;
+                }
+            }
+            firstHop = false;
+
+            // decide whether to continue or terminate
+            if (hasMultiplePools) {
+                payer = address(this); // at this point, the caller has paid
+                data.path = data.path.skipToken();
+                amount = uint128(acquire);
+            } else {
+                break;
+            }
+        }
+    }
+
+    struct SwapDesireParams {
+        bytes path;
+        address recipient;
+        uint128 desire;
+        uint256 maxPayed;
+
+        uint256 deadline;
+    }
+
+
+    /// @notice Swap given amount of target token, usually used in multi-hop case.
+    function swapDesire(SwapDesireParams calldata params)
+        external
+        payable
+        checkDeadline(params.deadline)
+        returns (uint256 cost, uint256 acquire)
+    {
+        
+        acquire = swapDesireInternal(
+            params.desire,
+            params.recipient,
+            SwapCallbackData({path: params.path, payer: msg.sender})
+        );
+        cost = payedCached;
+        require(cost <= params.maxPayed, 'Too much payed in swapDesire');
+        require(acquire >= params.desire, 'Too much requested in swapDesire');
+        payedCached = DEFAULT_PAYED_CACHED;
+    }
+
+    struct SwapAmountParams {
+        bytes path;
+        address recipient;
+        // uint256 deadline;
+        uint128 amount;
+        uint256 minAcquired;
+
+        uint256 deadline;
+    }
+
+    /// @notice Swap given amount of input token, usually used in multi-hop case.
+    function swapAmount(SwapAmountParams calldata params)
+        external
+        payable
+        checkDeadline(params.deadline)
+        returns (uint256 cost, uint256 acquire) 
+    {
+        (cost, acquire) = swapAmountInternal(
+            params.amount, 
+            params.recipient, 
+            SwapCallbackData({path: params.path, payer: msg.sender})
+        );
+        require(acquire >= params.minAcquired, 'Too much requested in swapAmount');
+    }
+
+    /// parameters when calling Swap.swap..., grouped together to avoid stake too deep
+    struct SwapParams {
+        // tokenX of swap pool
+        address tokenX;
+        // tokenY of swap pool
+        address tokenY;
+        // fee amount of swap pool
+        uint24 fee;
+        // highPt for y2x, lowPt for x2y
+        // here y2X is calling swapY2X or swapY2XDesireX
+        // in swapY2XDesireX, if boundaryPt is 800001, means user wants to get enough X
+        // in swapX2YDesireY, if boundaryPt is -800001, means user wants to get enough Y
+        int24 boundaryPt; 
+        // who will receive acquired token
+        address recipient;
+        // desired amount for desired mode, paid amount for non-desired mode
+        // here, desire mode is calling swapX2YDesireY or swapY2XDesireX
+        uint128 amount;
+        // max amount of payed token from trader, used in desire mode
+        uint256 maxPayed;
+        // min amount of received token trader wanted, used in undesire mode
+        uint256 minAcquired;
+
+        uint256 deadline;
+    }
+
+    // amount of exchanged tokens
+    struct ExchangeAmount {
+        // amount of tokenX paid or acquired
+        uint256 amountX;
+        // amount of tokenY acquired or paid
+        uint256 amountY;
+    }
+
+    /// @notice Swap tokenY for tokenX, given max amount of tokenY user willing to pay
+    /// @param swapParams params(for example: max amount in above line), see SwapParams for more
+    function swapY2X(
+        SwapParams calldata swapParams
+    ) external payable checkDeadline(swapParams.deadline) {
+        require(swapParams.tokenX < swapParams.tokenY, "x<y");
+        address poolAddr = pool(swapParams.tokenX, swapParams.tokenY, swapParams.fee);
+        address payer = msg.sender;
+        address recipient = (swapParams.recipient == address(0)) ? address(this): swapParams.recipient;
+        (uint256 amountX, ) = IiZiSwapPool(poolAddr).swapY2X(
+            recipient, swapParams.amount, swapParams.boundaryPt,
+            abi.encode(SwapCallbackData({path: abi.encodePacked(swapParams.tokenY, swapParams.fee, swapParams.tokenX), payer: payer}))
+        );
+        require(amountX >= swapParams.minAcquired, "XMIN");
+    }
+
+    /// @notice Swap tokenY for tokenX, given user's desired amount of tokenX
+    /// @param swapParams params(for example: desired amount in above line), see SwapParams for more
+    function swapY2XDesireX(
+        SwapParams calldata swapParams
+    ) external payable checkDeadline(swapParams.deadline) {
+        require(swapParams.tokenX < swapParams.tokenY, "x<y");
+        address poolAddr = pool(swapParams.tokenX, swapParams.tokenY, swapParams.fee);
+        address payer = msg.sender;
+        address recipient = (swapParams.recipient == address(0)) ? address(this): swapParams.recipient;
+        ExchangeAmount memory amount;
+        (amount.amountX, amount.amountY) = IiZiSwapPool(poolAddr).swapY2XDesireX(
+            recipient, swapParams.amount, swapParams.boundaryPt,
+            abi.encode(SwapCallbackData({path: abi.encodePacked(swapParams.tokenX, swapParams.fee, swapParams.tokenY), payer: payer}))
+        );
+        if (swapParams.boundaryPt == 800001) {
+            require(amount.amountX >= swapParams.amount, 'Too much requested in swapY2XDesireX');
+        }
+        require(amount.amountY <= swapParams.maxPayed, "YMAX");
+    }
+
+    /// @notice Swap tokenX for tokenY, given max amount of tokenX user willing to pay
+    /// @param swapParams params(for example: max amount in above line), see SwapParams for more
+    function swapX2Y(
+        SwapParams calldata swapParams
+    ) external payable checkDeadline(swapParams.deadline) {
+        require(swapParams.tokenX < swapParams.tokenY, "x<y");
+        address poolAddr = pool(swapParams.tokenX, swapParams.tokenY, swapParams.fee);
+        address payer = msg.sender;
+        address recipient = (swapParams.recipient == address(0)) ? address(this): swapParams.recipient;
+        (, uint256 amountY) = IiZiSwapPool(poolAddr).swapX2Y(
+            recipient, swapParams.amount, swapParams.boundaryPt,
+            abi.encode(SwapCallbackData({path: abi.encodePacked(swapParams.tokenX, swapParams.fee, swapParams.tokenY), payer: payer}))
+        );
+        require(amountY >= swapParams.minAcquired, "YMIN");
+    }
+
+    /// @notice Swap tokenX for tokenY, given amount of tokenY user desires
+    /// @param swapParams params(for example: desired amount in above line), see SwapParams for more
+    function swapX2YDesireY(
+        SwapParams calldata swapParams
+    ) external payable checkDeadline(swapParams.deadline) {
+        require(swapParams.tokenX < swapParams.tokenY, "x<y");
+        address poolAddr = pool(swapParams.tokenX, swapParams.tokenY, swapParams.fee);
+        address payer = msg.sender;
+        address recipient = (swapParams.recipient == address(0)) ? address(this): swapParams.recipient;
+        ExchangeAmount memory amount;
+        (amount.amountX, amount.amountY) = IiZiSwapPool(poolAddr).swapX2YDesireY(
+            recipient, swapParams.amount, swapParams.boundaryPt,
+            abi.encode(SwapCallbackData({path: abi.encodePacked(swapParams.tokenY, swapParams.fee, swapParams.tokenX), payer: payer}))
+        );
+        require(amount.amountX <= swapParams.maxPayed, "XMAX");
+        if (swapParams.boundaryPt == -800001) {
+            require(amount.amountY >= swapParams.amount, 'Too much requested in swapX2YDesireY');
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+
+import '@openzeppelin/contracts/token/ERC20/IERC20.sol';
+import '../core/interfaces/IiZiSwapFactory.sol';
+
+/// @title Interface for WETH9
+interface IWETH9 is IERC20 {
+    /// @notice Deposit ether to get wrapped ether
+    function deposit() external payable;
+
+    /// @notice Withdraw wrapped ether to get ether
+    function withdraw(uint256) external;
+}
+
+
+abstract contract Base {
+    /// @notice address of iZiSwapFactory
+    address public immutable factory;
+
+    /// @notice address of weth9 token
+    address public immutable WETH9;
+
+    /// @notice Make multiple function calls in this contract in a single transaction
+    ///     and return the data for each function call, revert if any function call fails
+    /// @param data The encoded function data for each function call
+    /// @return results result of each function call
+    function multicall(bytes[] calldata data) external payable returns (bytes[] memory results) {
+        results = new bytes[](data.length);
+        for (uint256 i = 0; i < data.length; i++) {
+            (bool success, bytes memory result) = address(this).delegatecall(data[i]);
+
+            if (!success) {
+                if (result.length < 68) revert();
+                assembly {
+                    result := add(result, 0x04)
+                }
+                revert(abi.decode(result, (string)));
+            }
+
+            results[i] = result;
+        }
+    }
+
+    receive() external payable {}
+
+    /// @notice Transfers tokens from the targeted address to the given destination
+    /// @notice Errors with 'STF' if transfer fails
+    /// @param token The contract address of the token to be transferred
+    /// @param from The originating address from which the tokens will be transferred
+    /// @param to The destination address of the transfer
+    /// @param value The amount to be transferred
+    function safeTransferFrom(
+        address token,
+        address from,
+        address to,
+        uint256 value
+    ) internal {
+        (bool success, bytes memory data) =
+            token.call(abi.encodeWithSelector(IERC20.transferFrom.selector, from, to, value));
+        require(success && (data.length == 0 || abi.decode(data, (bool))), 'STF');
+    }
+
+    /// @notice Transfers tokens from msg.sender to a recipient
+    /// @dev Errors with ST if transfer fails
+    /// @param token The contract address of the token which will be transferred
+    /// @param to The recipient of the transfer
+    /// @param value The value of the transfer
+    function safeTransfer(
+        address token,
+        address to,
+        uint256 value
+    ) internal {
+        (bool success, bytes memory data) = token.call(abi.encodeWithSelector(IERC20.transfer.selector, to, value));
+        require(success && (data.length == 0 || abi.decode(data, (bool))), 'ST');
+    }
+
+    /// @notice Approves the stipulated contract to spend the given allowance in the given token
+    /// @dev Errors with 'SA' if transfer fails
+    /// @param token The contract address of the token to be approved
+    /// @param to The target of the approval
+    /// @param value The amount of the given token the target will be allowed to spend
+    function safeApprove(
+        address token,
+        address to,
+        uint256 value
+    ) internal {
+        (bool success, bytes memory data) = token.call(abi.encodeWithSelector(IERC20.approve.selector, to, value));
+        require(success && (data.length == 0 || abi.decode(data, (bool))), 'SA');
+    }
+
+    /// @notice Transfers ETH to the recipient address
+    /// @dev Fails with `STE`
+    /// @param to The destination of the transfer
+    /// @param value The value to be transferred
+    function safeTransferETH(address to, uint256 value) internal {
+        (bool success, ) = to.call{value: value}(new bytes(0));
+        require(success, 'STE');
+    }
+
+    /// @notice Withdraw all weth9 token of this contract and send the withdrawed eth to recipient
+    ///    usually used in multicall when mint/swap/update limitorder with eth
+    ///    normally this contract has no any erc20 token or eth after or before a transaction
+    ///    we donot need to worry that some one can steal eth from this contract
+    /// @param minAmount The minimum amount of WETH9 to withdraw
+    /// @param recipient The address to receive all withdrawed eth from this contract
+    function unwrapWETH9(uint256 minAmount, address recipient) external payable {
+        uint256 all = IWETH9(WETH9).balanceOf(address(this));
+        require(all >= minAmount, 'WETH9 Not Enough');
+
+        if (all > 0) {
+            IWETH9(WETH9).withdraw(all);
+            safeTransferETH(recipient, all);
+        }
+    }
+
+    /// @notice send all balance of specified token in this contract to recipient
+    ///    usually used in multicall when mint/swap/update limitorder with eth
+    ///    normally this contract has no any erc20 token or eth after or before a transaction
+    ///    we donot need to worry that some one can steal some token from this contract
+    /// @param token address of the token
+    /// @param minAmount balance should >= minAmount
+    /// @param recipient the address to receive specified token from this contract
+    function sweepToken(
+        address token,
+        uint256 minAmount,
+        address recipient
+    ) external payable {
+        uint256 all = IERC20(token).balanceOf(address(this));
+        require(all >= minAmount, 'WETH9 Not Enough');
+
+        if (all > 0) {
+            safeTransfer(token, recipient, all);
+        }
+    }
+
+    /// @notice send all balance of eth in this contract to msg.sender
+    ///    usually used in multicall when mint/swap/update limitorder with eth
+    ///    normally this contract has no any erc20 token or eth after or before a transaction
+    ///    we donot need to worry that some one can steal some token from this contract
+    function refundETH() external payable {
+        if (address(this).balance > 0) safeTransferETH(msg.sender, address(this).balance);
+    }
+
+    /// @param token The token to pay
+    /// @param payer The entity that must pay
+    /// @param recipient The entity that will receive payment
+    /// @param value The amount to pay
+    function pay(
+        address token,
+        address payer,
+        address recipient,
+        uint256 value
+    ) internal {
+        if (token == WETH9 && address(this).balance >= value) {
+            // pay with WETH9
+            IWETH9(WETH9).deposit{value: value}(); // wrap only what is needed to pay
+            IWETH9(WETH9).transfer(recipient, value);
+        } else if (payer == address(this)) {
+            // pay with tokens already in the contract (for the exact input multihop case)
+            safeTransfer(token, recipient, value);
+        } else {
+            // pull payment
+            safeTransferFrom(token, payer, recipient, value);
+        }
+    }
+
+    /// @notice query pool address from factory by (tokenX, tokenY, fee)
+    /// @param tokenX tokenX of swap pool
+    /// @param tokenY tokenY of swap pool
+    /// @param fee fee amount of swap pool
+    function pool(address tokenX, address tokenY, uint24 fee) public view returns(address) {
+        return IiZiSwapFactory(factory).pool(tokenX, tokenY, fee);
+    }
+    function verify(address tokenX, address tokenY, uint24 fee) internal view {
+        require (msg.sender == pool(tokenX, tokenY, fee), "sp");
+    }
+
+
+    modifier checkDeadline(uint256 deadline) {
+        require(block.timestamp <= deadline, 'Out of time');
+        _;
+    }
+
+    /// @notice constructor of base
+    /// @param _factory address of iZiSwapFactory
+    /// @param _WETH9 address of weth9 token
+    constructor(address _factory, address _WETH9) {
+        factory = _factory;
+        WETH9 = _WETH9;
+    }
+}
+
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity ^0.8.4;
+
+interface IiZiSwapMintCallback {
+
+    /// @notice Called to msg.sender in iZiSwapPool#mint call
+    /// @param x Amount of tokenX need to pay from miner
+    /// @param y Amount of tokenY need to pay from miner
+    /// @param data Any data passed through by the msg.sender via the iZiSwapPool#mint call
+    function mintDepositCallback(
+        uint256 x,
+        uint256 y,
+        bytes calldata data
+    ) external;
+
+}
+
+interface IiZiSwapCallback {
+
+    /// @notice Called to msg.sender in iZiSwapPool#swapY2X(DesireX) call
+    /// @param x Amount of tokenX trader will acquire
+    /// @param y Amount of tokenY trader will pay
+    /// @param data Any dadta passed though by the msg.sender via the iZiSwapPool#swapY2X(DesireX) call
+    function swapY2XCallback(
+        uint256 x,
+        uint256 y,
+        bytes calldata data
+    ) external;
+
+    /// @notice Called to msg.sender in iZiSwapPool#swapX2Y(DesireY) call
+    /// @param x Amount of tokenX trader will pay
+    /// @param y Amount of tokenY trader will require
+    /// @param data Any dadta passed though by the msg.sender via the iZiSwapPool#swapX2Y(DesireY) call
+    function swapX2YCallback(
+        uint256 x,
+        uint256 y,
+        bytes calldata data
+    ) external;
+
+}
+
+interface IiZiSwapAddLimOrderCallback {
+
+    /// @notice Called to msg.sender in iZiSwapPool#addLimOrderWithX(Y) call
+    /// @param x Amount of tokenX seller will pay
+    /// @param y Amount of tokenY seller will pay
+    /// @param data Any dadta passed though by the msg.sender via the iZiSwapPool#addLimOrderWithX(Y) call
+    function payCallback(
+        uint256 x,
+        uint256 y,
+        bytes calldata data
+    ) external;
+
+}
+
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity ^0.8.4;
+
+interface IiZiSwapFactory {
+
+    /// @notice emit when successfuly create a new pool (calling iZiSwapFactory#newPool)
+    /// @param tokenX address of erc-20 tokenX
+    /// @param tokenY address of erc-20 tokenY
+    /// @param fee fee amount of swap (3000 means 0.3%)
+    /// @param pointDelta minimum number of distance between initialized or limitorder points
+    /// @param pool address of swap pool
+    event NewPool(
+        address indexed tokenX,
+        address indexed tokenY,
+        uint24 indexed fee,
+        uint24 pointDelta,
+        address pool
+    );
+
+    /// @notice module to support swap from tokenX to tokenY
+    /// @return swapX2YModule address
+    function swapX2YModule() external returns (address);
+
+    /// @notice module to support swap from tokenY to tokenX
+    /// @return swapY2XModule address
+    function swapY2XModule() external returns (address);
+
+    /// @notice module to support mint/burn/collect function of pool
+    /// @return liquidityModule address
+    function liquidityModule() external returns (address);
+
+    /// @notice address of module for user to manage limit orders
+    /// @return limitOrderModule address
+    function limitOrderModule() external returns (address);
+
+    /// @notice address of module for flash loan
+    /// @return flashModule address
+    function flashModule() external returns (address);
+
+    /// @notice Enables a fee amount with the given pointDelta
+    /// @dev Fee amounts may never be removed once enabled
+    /// @param fee fee amount (3000 means 0.3%)
+    /// @param pointDelta The spacing between points to be enforced for all pools created with the given fee amount
+    function enableFeeAmount(uint24 fee, uint24 pointDelta) external;
+
+    /// @notice create a new pool which not exists
+    /// @param tokenX address of tokenX
+    /// @param tokenY address of tokenY
+    /// @param fee fee amount
+    /// @param currentPoint initial point (log 1.0001 of price)
+    /// @return address of newly created pool
+    function newPool(
+        address tokenX,
+        address tokenY,
+        uint24 fee,
+        int24 currentPoint
+    ) external returns (address);
+
+    /// @notice charge receiver of all pools
+    /// @return address of charge receiver
+    function chargeReceiver() external view returns(address);
+
+    /// @notice get pool of (tokenX, tokenY, fee), address(0) for not exists
+    /// @param tokenX address of tokenX
+    /// @param tokenY address of tokenY
+    /// @param fee fee amount
+    /// @return address of pool
+    function pool(
+        address tokenX,
+        address tokenY,
+        uint24 fee
+    ) external view returns(address);
+
+    /// @notice get point delta of a given fee amount
+    /// @param fee fee amount
+    /// @return pointDelta the point delta
+    function fee2pointDelta(uint24 fee) external view returns (int24 pointDelta);
+
+    /// @notice change charge receiver, only owner of factory can call
+    /// @param _chargeReceiver address of new receiver
+    function modifyChargeReceiver(address _chargeReceiver) external;
+}
+
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity ^0.8.4;
+
+interface IiZiSwapPool {
+
+    /// @notice Emitted when miner successfully add liquidity (mint)
+    /// @param sender The address that minted the liquidity
+    /// @param owner The owner who will benefit from this liquidity
+    /// @param leftPoint left endpoint of the liquidity
+    /// @param rightPoint right endpoint of the liquidity
+    /// @param liquidity The amount of liquidity minted to the range [leftPoint, rightPoint)
+    /// @param amountX amount of tokenX deposit
+    /// @param amountY amount of tokenY deposit
+    event Mint(
+        address sender, 
+        address indexed owner, 
+        int24 indexed leftPoint, 
+        int24 indexed rightPoint, 
+        uint128 liquidity, 
+        uint256 amountX, 
+        uint256 amountY
+    );
+
+    /// @notice Emitted when miner successfully decrease liquidity (withdraw)
+    /// @param owner owner address of liquidity
+    /// @param leftPoint left endpoint of liquidity
+    /// @param rightPoint right endpoint of liquidity
+    /// @param liquidity amount of liquidity decreased
+    /// @param amountX amount of tokenX withdrawed
+    /// @param amountY amount of tokenY withdrawed
+    event Burn(
+        address indexed owner, 
+        int24 indexed leftPoint,
+        int24 indexed rightPoint,
+        uint128 liquidity,
+        uint256 amountX,
+        uint256 amountY
+    );
+
+    /// @notice Emitted when a trader successfully exchange
+    /// @param tokenX tokenX of pool
+    /// @param tokenY tokenY of pool
+    /// @param fee fee amount of pool
+    /// @param sellXEarnY true for selling tokenX, false for buying tokenX
+    /// @param amountX amount of tokenX in this exchange
+    /// @param amountY amount of tokenY in this exchange
+    event Swap(
+        address indexed tokenX,
+        address indexed tokenY,
+        uint24 indexed fee,
+        bool sellXEarnY,
+        uint256 amountX,
+        uint256 amountY
+    );
+
+    /// @notice Emitted by the pool for any flashes of tokenX/tokenY
+    /// @param sender The address that initiated the swap call, and that received the callback
+    /// @param recipient The address that received the tokens from flash
+    /// @param amountX The amount of tokenX that was flashed
+    /// @param amountY The amount of tokenY that was flashed
+    /// @param paidX The amount of tokenX paid for the flash, which can exceed the amountX plus the fee
+    /// @param paidY The amount of tokenY paid for the flash, which can exceed the amountY plus the fee
+    event Flash(
+        address indexed sender,
+        address indexed recipient,
+        uint256 amountX,
+        uint256 amountY,
+        uint256 paidX,
+        uint256 paidY
+    );
+
+    /// @notice Emitted when a seller successfully add a limit order
+    /// @param amount amount of token to sell the seller added
+    /// @param point point of limit order
+    /// @param sellXEarnY direction of limit order, etc. sell tokenX or sell tokenY
+    event AddLimitOrder(
+        uint256 amount,
+        int24 point,
+        bool sellXEarnY
+    );
+
+    /// @notice Emitted when a seller successfully decrease a limit order
+    /// @param amount amount of token to sell the seller decreased
+    /// @param point point of limit order
+    /// @param sellXEarnY direction of limit order, etc. sell tokenX or sell tokenY
+    event DecLimitOrder(
+        uint256 amount,
+        int24 point,
+        bool sellXEarnY
+    );
+
+    /// @notice Returns the information about a liquidity by the liquidity's key
+    /// @param key The liquidity's key is a hash of a preimage composed by the miner(owner), pointLeft and pointRight
+    /// @return liquidity The amount of liquidity,
+    /// @return lastFeeScaleX_128 fee growth of tokenX inside the range as of the last mint/burn/collect,
+    /// @return lastFeeScaleY_128 fee growth of tokenY inside the range as of the last mint/burn/collect,
+    /// @return tokenOwedX the computed amount of tokenX miner can collect as of the last mint/burn/collect,
+    /// @return tokenOwedY the computed amount of tokenY miner can collect as of the last mint/burn/collect
+    function liquidity(bytes32 key)
+        external
+        view
+        returns (
+            uint128 liquidity,
+            uint256 lastFeeScaleX_128,
+            uint256 lastFeeScaleY_128,
+            uint256 tokenOwedX,
+            uint256 tokenOwedY
+        );
+    
+    /// @notice Returns the information about a user's limit order (sell tokenY and earn tokenX)
+    /// @param key the limit order's key is a hash of a preimage composed by the seller, point
+    /// @return lastAccEarn total amount of tokenX earned by all users at this point as of the last add/dec/collect
+    /// @return sellingRemain amount of tokenY not selled in this limit order
+    /// @return sellingDec amount of tokenY decreased by seller from this limit order
+    /// @return earn amount of tokenX earned in this limit order not assigned
+    /// @return earnAssign assigned amount of tokenX earned in this limit order
+    function userEarnX(bytes32 key)
+        external
+        view
+        returns (
+            uint256 lastAccEarn,
+            uint128 sellingRemain,
+            uint128 sellingDec,
+            uint128 earn,
+            uint128 earnAssign
+        );
+    
+    /// @notice Returns the information about a user's limit order (sell tokenX and earn tokenY)
+    /// @param key the limit order's key is a hash of a preimage composed by the seller, point
+    /// @return lastAccEarn total amount of tokenY earned by all users at this point as of the last add/dec/collect
+    /// @return sellingRemain amount of tokenX not selled in this limit order
+    /// @return sellingDec amount of tokenX decreased by seller from this limit order
+    /// @return earn amount of tokenY earned in this limit order not assigned
+    /// @return earnAssign assigned amount of tokenY earned in this limit order
+    function userEarnY(bytes32 key)
+        external
+        view
+        returns (
+            uint256 lastAccEarn,
+            uint128 sellingRemain,
+            uint128 sellingDec,
+            uint128 earn,
+            uint128 earnAssign
+        );
+    
+    /// @notice Marks a given amount of tokenY in a limitorder(sellx and earn y) as assigned
+    /// @param point point (log Price) of seller's limit order,be sure to be times of pointDelta
+    /// @param assignY max amount of tokenY to mark assigned
+    /// @return actualAssignY actual amount of tokenY marked
+    function assignLimOrderEarnY(
+        int24 point,
+        uint128 assignY
+    ) external returns(uint128 actualAssignY);
+    
+    /// @notice Marks a given amount of tokenX in a limitorder(selly and earn x) as assigned
+    /// @param point point (log Price) of seller's limit order,be sure to be times of pointDelta
+    /// @param assignX max amount of tokenX to mark assigned
+    /// @return actualAssignX actual amount of tokenX marked
+    function assignLimOrderEarnX(
+        int24 point,
+        uint128 assignX
+    ) external returns(uint128 actualAssignX);
+
+    /// @notice Decrease limitorder of selling X
+    /// @param point point of seller's limit order, be sure to be times of pointDelta
+    /// @param deltaX max amount of tokenX seller wants to decrease
+    /// @return actualDeltaX actual amount of tokenX decreased
+    function decLimOrderWithX(
+        int24 point,
+        uint128 deltaX
+    ) external returns (uint128 actualDeltaX);
+    
+    /// @notice Decrease limitorder of selling Y
+    /// @param point point of seller's limit order, be sure to be times of pointDelta
+    /// @param deltaY max amount of tokenY seller wants to decrease
+    /// @return actualDeltaY actual amount of tokenY decreased
+    function decLimOrderWithY(
+        int24 point,
+        uint128 deltaY
+    ) external returns (uint128 actualDeltaY);
+    
+    /// @notice Add a limit order (selling x) in the pool
+    /// @param recipient owner of the limit order
+    /// @param point point of the order, be sure to be times of pointDelta
+    /// @param amountX amount of tokenX to sell
+    /// @param data Any data that should be passed through to the callback
+    /// @return orderX actual added amount of tokenX
+    /// @return acquireY amount of tokenY acquired if there is a limit order to sell y before adding
+    function addLimOrderWithX(
+        address recipient,
+        int24 point,
+        uint128 amountX,
+        bytes calldata data
+    ) external returns (uint128 orderX, uint128 acquireY);
+
+    /// @notice Add a limit order (selling y) in the pool
+    /// @param recipient owner of the limit order
+    /// @param point point of the order, be sure to be times of pointDelta
+    /// @param amountY amount of tokenY to sell
+    /// @param data Any data that should be passed through to the callback
+    /// @return orderY actual added amount of tokenY
+    /// @return acquireX amount of tokenX acquired if there exists a limit order to sell x before adding
+    function addLimOrderWithY(
+        address recipient,
+        int24 point,
+        uint128 amountY,
+        bytes calldata data
+    ) external returns (uint128 orderY, uint128 acquireX);
+
+    /// @notice Collect earned or decreased token from limit order
+    /// @param recipient address to benefit
+    /// @param point point of limit order, be sure to be times of pointDelta
+    /// @param collectDec max amount of decreased selling token to collect
+    /// @param collectEarn max amount of earned token to collect
+    /// @param isEarnY direction of this limit order, true for sell y, false for sell x
+    /// @return actualCollectDec actual amount of decresed selling token collected
+    /// @return actualCollectEarn actual amount of earned token collected
+    function collectLimOrder(
+        address recipient, int24 point, uint128 collectDec, uint128 collectEarn, bool isEarnY
+    ) external returns(uint128 actualCollectDec, uint128 actualCollectEarn);
+
+    /// @notice Add liquidity to the pool
+    /// @param recipient Newly created liquidity will belong to this address
+    /// @param leftPt left endpoint of the liquidity, be sure to be times of pointDelta
+    /// @param rightPt right endpoint of the liquidity, be sure to be times of pointDelta
+    /// @param liquidDelta amount of liquidity to add
+    /// @param data Any data that should be passed through to the callback
+    /// @return amountX The amount of tokenX that was paid for the liquidity. Matches the value in the callback
+    /// @return amountY The amount of tokenY that was paid for the liquidity. Matches the value in the callback
+    function mint(
+        address recipient,
+        int24 leftPt,
+        int24 rightPt,
+        uint128 liquidDelta,
+        bytes calldata data
+    ) external returns (uint256 amountX, uint256 amountY);
+
+    /// @notice Decrease a given amount of liquidity from msg.sender's liquidities
+    /// @param leftPt left endpoint of the liquidity
+    /// @param rightPt right endpoint of the liquidity
+    /// @param liquidDelta amount of liquidity to burn
+    /// @return amountX The amount of tokenX should be refund after burn
+    /// @return amountY The amount of tokenY should be refund after burn
+    function burn(
+        int24 leftPt,
+        int24 rightPt,
+        uint128 liquidDelta
+    ) external returns (uint256 amountX, uint256 amountY);
+
+    /// @notice Collects tokens (fee or refunded after burn) from a liquidity
+    /// @param recipient The address which should receive the collected tokens
+    /// @param leftPt left endpoint of the liquidity
+    /// @param rightPt right endpoint of the liquidity
+    /// @param amountXLim max amount of tokenX the owner wants to collect
+    /// @param amountYLim max amount of tokenY the owner wants to collect
+    /// @return actualAmountX The amount tokenX collected
+    /// @return actualAmountY The amount tokenY collected
+    function collect(
+        address recipient,
+        int24 leftPt,
+        int24 rightPt,
+        uint256 amountXLim,
+        uint256 amountYLim
+    ) external returns (uint256 actualAmountX, uint256 actualAmountY);
+
+    /// @notice Swap tokenY for tokenX， given max amount of tokenY user willing to pay
+    /// @param recipient The address to receive tokenX
+    /// @param amount The max amount of tokenY user willing to pay
+    /// @param highPt the highest point(price) of x/y during swap
+    /// @param data Any data to be passed through to the callback
+    /// @return amountX amount of tokenX payed
+    /// @return amountY amount of tokenY acquired
+    function swapY2X(
+        address recipient,
+        uint128 amount,
+        int24 highPt,
+        bytes calldata data
+    ) external returns (uint256 amountX, uint256 amountY);
+    
+    /// @notice Swap tokenY for tokenX， given amount of tokenX user desires
+    /// @param recipient The address to receive tokenX
+    /// @param desireX The amount of tokenX user desires
+    /// @param highPt the highest point(price) of x/y during swap
+    /// @param data Any data to be passed through to the callback
+    /// @return amountX amount of tokenX payed
+    /// @return amountY amount of tokenY acquired
+    function swapY2XDesireX(
+        address recipient,
+        uint128 desireX,
+        int24 highPt,
+        bytes calldata data
+    ) external returns (uint256 amountX, uint256 amountY);
+    
+    /// @notice Swap tokenX for tokenY， given max amount of tokenX user willing to pay
+    /// @param recipient The address to receive tokenY
+    /// @param amount The max amount of tokenX user willing to pay
+    /// @param lowPt the lowest point(price) of x/y during swap
+    /// @param data Any data to be passed through to the callback
+    /// @return amountX amount of tokenX acquired
+    /// @return amountY amount of tokenY payed
+    function swapX2Y(
+        address recipient,
+        uint128 amount,
+        int24 lowPt,
+        bytes calldata data
+    ) external returns (uint256 amountX, uint256 amountY);
+    
+    /// @notice Swap tokenX for tokenY， given amount of tokenY user desires
+    /// @param recipient The address to receive tokenY
+    /// @param desireY The amount of tokenY user desires
+    /// @param lowPt the lowest point(price) of x/y during swap
+    /// @param data Any data to be passed through to the callback
+    /// @return amountX amount of tokenX acquired
+    /// @return amountY amount of tokenY payed
+    function swapX2YDesireY(
+        address recipient,
+        uint128 desireY,
+        int24 lowPt,
+        bytes calldata data
+    ) external returns (uint256 amountX, uint256 amountY);
+
+    /// @notice Returns sqrt(1.0001), in 96 bit fixpoint number
+    function sqrtRate_96() external view returns(uint160);
+    
+    /// @notice State values of pool
+    /// @return sqrtPrice_96 a 96 fixpoing number describe the sqrt value of current price(tokenX/tokenY)
+    /// @return currentPoint The current point of the pool, 1.0001 ^ currentPoint = price
+    /// @return observationCurrentIndex The index of the last oracle observation that was written,
+    /// @return observationQueueLen The current maximum number of observations stored in the pool,
+    /// @return observationNextQueueLen The next maximum number of observations, to be updated when the observation.
+    /// @return locked whether the pool is locked (only used for checking reentrance)
+    /// @return liquidity liquidity on the currentPoint (currX * sqrtPrice + currY / sqrtPrice)
+    /// @return liquidityX liquidity of tokenX
+    function state()
+        external view
+        returns(
+            uint160 sqrtPrice_96,
+            int24 currentPoint,
+            uint16 observationCurrentIndex,
+            uint16 observationQueueLen,
+            uint16 observationNextQueueLen,
+            bool locked,
+            uint128 liquidity,
+            uint128 liquidityX
+        );
+    
+    /// @notice LimitOrder info on a given point
+    /// @param point the given point 
+    /// @return sellingX total amount of tokenX selling on the point
+    /// @return earnY total amount of unclaimed earned tokenY
+    /// @return accEarnY total amount of earned tokenY(via selling tokenX) by all users at this point as of the last swap
+    /// @return sellingY total amount of tokenYselling on the point
+    /// @return earnX total amount of unclaimed earned tokenX
+    /// @return accEarnX total amount of earned tokenX(via selling tokenY) by all users at this point as of the last swap
+    function limitOrderData(int24 point)
+        external view
+        returns(
+            uint128 sellingX,
+            uint128 earnY,
+            uint256 accEarnY,
+            uint128 sellingY,
+            uint128 earnX,
+            uint256 accEarnX
+        );
+    
+    /// @notice Query infomation about a point whether has limit order or is an liquidity's endpoint
+    /// @param point point to query
+    /// @return val endpoint for val&1>0 and has limit order for val&2 > 0
+    function orderOrEndpoint(int24 point) external returns(int24 val);
+
+    /// @notice Returns observation data about a specific index
+    /// @param index the index of observation array
+    /// @return timestamp The timestamp of the observation,
+    /// @return pointCumulative the point multiplied by seconds elapsed for the life of the pool as of the observation timestamp,
+    /// @return secondsPerLiquidityCumulative_128 the seconds per in range liquidity for the life of the pool as of the observation timestamp,
+    /// @return init whether the observation has been initialized and the above values are safe to use
+    function observations(uint256 index)
+        external
+        view
+        returns (
+            uint32 timestamp,
+            int56 pointCumulative,
+            uint160 secondsPerLiquidityCumulative_128,
+            bool init
+        );
+
+    /// @notice Point status in the pool
+    /// @param point the point
+    /// @return liquidSum the total amount of liquidity that uses the point either as left endpoint or right endpoint
+    /// @return liquidDelta how much liquidity changes when the pool price crosses the point from left to right
+    /// @return accFeeXOut_128 the fee growth on the other side of the point from the current point in tokenX
+    /// @return accFeeYOut_128 the fee growth on the other side of the point from the current point in tokenY
+    /// @return isEndpt whether the point is an endpoint of a some miner's liquidity, true if liquidSum > 0
+    function points(int24 point)
+        external
+        view
+        returns (
+            uint128 liquidSum,
+            int128 liquidDelta,
+            uint256 accFeeXOut_128,
+            uint256 accFeeYOut_128,
+            bool isEndpt
+        );
+
+    /// @notice Returns 256 packed point (statusVal>0) boolean values. See PointBitmap for more information
+    function pointBitmap(int16 wordPosition) external view returns (uint256);
+
+    /// @notice Returns the integral value of point(time) and integral value of 1/liquidity(time)
+    ///     at some target timestamps (block.timestamp - secondsAgo[i])
+    /// @dev Reverts if target timestamp is early than oldest observation in the queue
+    /// @dev if you call this method with secondsAgos = [3600, 0]. the average point of this pool during recent hour is 
+    /// (pointCumulatives[1] - pointCumulatives[0]) / 3600
+    /// @param secondsAgos describe the target timestamp , targetTimestimp[i] = block.timestamp - secondsAgo[i]
+    /// @return pointCumulatives integral value of point(time) from 0 to each target timestamp
+    /// @return secondsPerLiquidityCumulative_128s integral value of 1/liquidity(time) from 0 to each target timestamp
+    function observe(uint32[] calldata secondsAgos)
+        external
+        view
+        returns (int56[] memory pointCumulatives, uint160[] memory secondsPerLiquidityCumulative_128s);
+    
+    /// @notice Expand max-length of observation queue
+    /// @param newNextQueueLen new value of observationNextQueueLen, which should be greater than current observationNextQueueLen
+    function expandObservationQueue(uint16 newNextQueueLen) external;
+
+    /// @notice Borrow tokenX and/or tokenY and pay it back within a block
+    /// @dev The caller needs to implement a IiZiSwapPool#flashCallback callback function
+    /// @param recipient The address which will receive the tokenY and/or tokenX
+    /// @param amountX The amount of tokenX to borrow
+    /// @param amountY The amount of tokenY to borrow
+    /// @param data Any data to be passed through to the callback
+    function flash(
+        address recipient,
+        uint256 amountX,
+        uint256 amountY,
+        bytes calldata data
+    ) external;
+
+    /// @notice Returns a snapshot infomation of Liquidity in [leftPoint, rightPoint)
+    /// @param leftPoint left endpoint of range, should be times of pointDelta
+    /// @param rightPoint right endpoint of range, should be times of pointDelta
+    /// @return deltaLiquidities an array of delta liquidity for points in the range
+    ///    note 1. delta liquidity here is amount of liquidity changed when cross a point from left to right
+    ///    note 2. deltaLiquidities only contains points which are times of pointDelta
+    ///    note 3. this function may cost a ENORMOUS amount of gas, be careful to call
+    function liquiditySnapshot(int24 leftPoint, int24 rightPoint) external view returns(int128[] memory deltaLiquidities);
+
+    struct LimitOrderStruct {
+        uint128 sellingX;
+        uint128 earnY;
+        uint256 accEarnY;
+        uint128 sellingY;
+        uint128 earnX;
+        uint256 accEarnX;
+    }
+
+    /// @notice Returns a snapshot infomation of Limit Order in [leftPoint, rightPoint)
+    /// @param leftPoint left endpoint of range, should be times of pointDelta
+    /// @param rightPoint right endpoint of range, should be times of pointDelta
+    /// @return limitOrders an array of Limit Orders for points in the range
+    ///    note 1. this function may cost a HUGE amount of gas, be careful to call
+    function limitOrderSnapshot(int24 leftPoint, int24 rightPoint) external view returns(LimitOrderStruct[] memory limitOrders); 
+
+    /// @notice Amount of charged fee on tokenX
+    function totalFeeXCharged() external view returns(uint256);
+
+    /// @notice Amount of charged fee on tokenY
+    function totalFeeYCharged() external view returns(uint256);
+
+    /// @notice Percent to charge from miner's fee
+    function feeChargePercent() external view returns(uint24);
+
+    /// @notice Collect charged fee, only factory's chargeReceiver can call
+    function collectFeeCharged() external;
+}
+
+// SPDX-License-Identifier: GPL-2.0-or-later
+pragma solidity ^0.8.4;
+
+import './BytesLib.sol';
+
+/// @title Functions for manipulating path data for multihop swaps
+library Path {
+    using BytesLib for bytes;
+
+    /// @dev The length of the bytes encoded address
+    uint256 private constant ADDR_SIZE = 20;
+    /// @dev The length of the bytes encoded fee
+    uint256 private constant FEE_SIZE = 3;
+
+    /// @dev The offset of a single token address and pool fee
+    uint256 private constant NEXT_OFFSET = ADDR_SIZE + FEE_SIZE;
+    /// @dev The offset of an encoded pool key
+    uint256 private constant POP_OFFSET = NEXT_OFFSET + ADDR_SIZE;
+    /// @dev The minimum length of an encoding that contains 2 or more pools
+    uint256 private constant MULTIPLE_POOLS_MIN_LENGTH = POP_OFFSET + NEXT_OFFSET;
+
+    /// @notice Returns true iff the path contains two or more pools
+    /// @param path The encoded swap path
+    /// @return True if path contains two or more pools, otherwise false
+    function hasMultiplePools(bytes memory path) internal pure returns (bool) {
+        return path.length >= MULTIPLE_POOLS_MIN_LENGTH;
+    }
+
+    /// @notice Returns the number of pools in the path
+    /// @param path The encoded swap path
+    /// @return The number of pools in the path
+    function numPools(bytes memory path) internal pure returns (uint256) {
+        // Ignore the first token address. From then on every fee and token offset indicates a pool.
+        return ((path.length - ADDR_SIZE) / NEXT_OFFSET);
+    }
+
+    /// @notice Decodes the first pool in path
+    /// @param path The bytes encoded swap path
+    /// @return tokenA The first token of the given pool
+    /// @return tokenB The second token of the given pool
+    /// @return fee The fee level of the pool
+    function decodeFirstPool(bytes memory path)
+        internal
+        pure
+        returns (
+            address tokenA,
+            address tokenB,
+            uint24 fee
+        )
+    {
+        tokenA = path.toAddress(0);
+        fee = path.toUint24(ADDR_SIZE);
+        tokenB = path.toAddress(NEXT_OFFSET);
+    }
+
+    /// @notice Gets the segment corresponding to the first pool in the path
+    /// @param path The bytes encoded swap path
+    /// @return The segment containing all data necessary to target the first pool in the path
+    function getFirstPool(bytes memory path) internal pure returns (bytes memory) {
+        return path.slice(0, POP_OFFSET);
+    }
+
+    /// @notice Skips a token + fee element from the buffer and returns the remainder
+    /// @param path The swap path
+    /// @return The remaining token + fee elements in the path
+    function skipToken(bytes memory path) internal pure returns (bytes memory) {
+        return path.slice(NEXT_OFFSET, path.length - NEXT_OFFSET);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.6.0) (token/ERC20/IERC20.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20 {
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `to`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `from` to `to` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+}
+
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * @title Solidity Bytes Arrays Utils
+ * @author Gonçalo Sá <[email protected]>
+ *
+ * @dev Bytes tightly packed arrays utility library for ethereum contracts written in Solidity.
+ *      The library lets you concatenate, slice and type cast bytes arrays both in memory and storage.
+ */
+pragma solidity ^0.8.4;
+
+library BytesLib {
+    function slice(
+        bytes memory _bytes,
+        uint256 _start,
+        uint256 _length
+    ) internal pure returns (bytes memory) {
+        require(_length + 31 >= _length, 'slice_overflow');
+        require(_start + _length >= _start, 'slice_overflow');
+        require(_bytes.length >= _start + _length, 'slice_outOfBounds');
+
+        bytes memory tempBytes;
+
+        assembly {
+            switch iszero(_length)
+                case 0 {
+                    // Get a location of some free memory and store it in tempBytes as
+                    // Solidity does for memory variables.
+                    tempBytes := mload(0x40)
+
+                    // The first word of the slice result is potentially a partial
+                    // word read from the original array. To read it, we calculate
+                    // the length of that partial word and start copying that many
+                    // bytes into the array. The first word we copy will start with
+                    // data we don't care about, but the last `lengthmod` bytes will
+                    // land at the beginning of the contents of the new array. When
+                    // we're done copying, we overwrite the full first word with
+                    // the actual length of the slice.
+                    let lengthmod := and(_length, 31)
+
+                    // The multiplication in the next line is necessary
+                    // because when slicing multiples of 32 bytes (lengthmod == 0)
+                    // the following copy loop was copying the origin's length
+                    // and then ending prematurely not copying everything it should.
+                    let mc := add(add(tempBytes, lengthmod), mul(0x20, iszero(lengthmod)))
+                    let end := add(mc, _length)
+
+                    for {
+                        // The multiplication in the next line has the same exact purpose
+                        // as the one above.
+                        let cc := add(add(add(_bytes, lengthmod), mul(0x20, iszero(lengthmod))), _start)
+                    } lt(mc, end) {
+                        mc := add(mc, 0x20)
+                        cc := add(cc, 0x20)
+                    } {
+                        mstore(mc, mload(cc))
+                    }
+
+                    mstore(tempBytes, _length)
+
+                    //update free-memory pointer
+                    //allocating the array padded to 32 bytes like the compiler does now
+                    mstore(0x40, and(add(mc, 31), not(31)))
+                }
+                //if we want a zero-length slice let's just return a zero-length array
+                default {
+                    tempBytes := mload(0x40)
+                    //zero out the 32 bytes slice we are about to return
+                    //we need to do it because Solidity does not garbage collect
+                    mstore(tempBytes, 0)
+
+                    mstore(0x40, add(tempBytes, 0x20))
+                }
+        }
+
+        return tempBytes;
+    }
+
+    function toAddress(bytes memory _bytes, uint256 _start) internal pure returns (address) {
+        require(_start + 20 >= _start, 'toAddress_overflow');
+        require(_bytes.length >= _start + 20, 'toAddress_outOfBounds');
+        address tempAddress;
+
+        assembly {
+            tempAddress := div(mload(add(add(_bytes, 0x20), _start)), 0x1000000000000000000000000)
+        }
+
+        return tempAddress;
+    }
+
+    function toUint24(bytes memory _bytes, uint256 _start) internal pure returns (uint24) {
+        require(_start + 3 >= _start, 'toUint24_overflow');
+        require(_bytes.length >= _start + 3, 'toUint24_outOfBounds');
+        uint24 tempUint;
+
+        assembly {
+            tempUint := mload(add(add(_bytes, 0x3), _start))
+        }
+
+        return tempUint;
+    }
+}
