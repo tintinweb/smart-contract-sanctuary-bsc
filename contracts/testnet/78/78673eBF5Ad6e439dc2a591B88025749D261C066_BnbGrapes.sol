@@ -1,0 +1,623 @@
+// BNB Grapes - 10% daily in BNB
+// 🌎 Website: https://bnb-grapes.com/
+// 📱 Telegram: https://t.me/bnb_grapes
+// 🌐 Twitter: https://twitter.com/bnb_grapes
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.12;
+
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+
+
+contract BnbGrapes is Ownable {
+    using SafeMath for uint256;
+
+    uint256 public GRAPES_TO_HATCH_1MINERS = 1728000; // for final version should be seconds in a day 1728000 (5%)
+    uint256 private PSN = 10000;
+    uint256 private PSNH = 5000;
+    
+    uint256 public devFeePercent = 3;
+    // uint256 public marketingFeePercent = 2;
+    uint256 public vaultFeePercent = 2;
+
+    uint256 public MAX_REF_LEVEL = 5;
+    uint256[] public refPercent = [5, 2, 1, 1, 1]; // 10% in total
+
+    struct User {
+        address _address;
+        uint256 totalDeposit;
+        uint256 totalRefIncome;
+        uint256 totalRefs;
+    }
+
+    struct Referral {
+        address payable inviter;
+        address payable ref;
+    }
+    
+    bool public initialized = false;
+
+    address payable public top;
+
+    address payable public devAddress;
+    address payable public vaultAddress;
+    
+    mapping (address => uint256) private hatcheryMiners;
+    mapping (address => uint256) private claimedGrapes;
+    mapping (address => uint256) private lastHatch;
+
+    mapping (address => Referral) public referrers;
+    mapping (address => mapping(uint256 => uint256)) private referralsIncome;
+    mapping (address => mapping(uint256 => uint256)) private referralsCount;
+
+    mapping (address => User) public users;
+    
+    uint256 private marketGrapes;
+
+    modifier whenInitialized() {
+        require(initialized, "NOT INITIALIZED");
+        _;
+    }
+
+    event AddTopLeader(address indexed _address);
+    event Deposit(address indexed _address, uint256 ethAmount, uint256 grapesAmount, address indexed inviter);
+    event Reinvest(address indexed _address, uint256 grapesAmount, uint256 minersCount);
+    event Withdraw(address indexed _address, uint256 grapesAmount, uint256 bnbAmount);
+
+    
+    constructor(address _devAddress, address _vaultAdress) {
+        devAddress = payable(_devAddress);
+        vaultAddress = payable(_vaultAdress);
+
+        referrers[msg.sender] = Referral(payable(msg.sender), payable(msg.sender));
+        top = payable(msg.sender);
+    }
+
+    function deposit(address payable inviter) external payable whenInitialized {
+        require(msg.value >= 1 ether, "Deposit at least 1 BNB");
+        
+        require(referrers[msg.sender].inviter == address(0), "Sender can't already exist in tree");
+        
+        require(referrers[inviter].ref == inviter, "Inviter must exist");
+        
+        referrers[msg.sender] = Referral(inviter, payable(msg.sender));
+        
+        uint256 restAmount = distributeFees(msg.value, inviter);
+
+        User memory user;
+
+        if(users[msg.sender].totalDeposit > 0) {
+            user = users[msg.sender];
+        } else {
+            user = User(msg.sender, 0, 0, 0);
+        }
+
+        user.totalDeposit = user.totalDeposit.add(restAmount);
+        users[msg.sender] = user;
+
+        uint256 grapesBought = calculateGrapeBuy(restAmount, SafeMath.sub(address(this).balance, restAmount));
+        (uint256 devFee, uint256 vaultFee) = getFees(grapesBought);
+        grapesBought = grapesBought.sub(devFee).sub(vaultFee);
+
+        emit Deposit(msg.sender, msg.value, grapesBought, inviter);
+        claimedGrapes[msg.sender] = claimedGrapes[msg.sender].add(grapesBought);
+
+        reinvest();
+    }
+
+    function reinvest() public whenInitialized {
+    
+        uint256 grapesUsed = getGrapes(msg.sender);
+        uint256 newMiners = SafeMath.div(grapesUsed, GRAPES_TO_HATCH_1MINERS);
+
+        hatcheryMiners[msg.sender] = SafeMath.add(hatcheryMiners[msg.sender], newMiners);
+
+        emit Reinvest(msg.sender, grapesUsed, newMiners);
+        
+        claimedGrapes[msg.sender] = 0;
+        lastHatch[msg.sender] = block.timestamp;
+        
+        // boost market to nerf miners hoarding
+        marketGrapes = SafeMath.add(marketGrapes, SafeMath.div(grapesUsed, 5));
+    }
+
+    function withdraw() external whenInitialized {
+        uint256 hasGrapes = getGrapes(msg.sender);
+        uint256 bnbValue = calculateGrapeSell(hasGrapes);
+
+        claimedGrapes[msg.sender] = 0;
+        lastHatch[msg.sender] = block.timestamp;
+        marketGrapes = SafeMath.add(marketGrapes, hasGrapes);
+
+        bnbValue = bnbValue.sub(distributeDevFees(bnbValue));
+        
+        payable (msg.sender).transfer(bnbValue);
+
+        emit Withdraw(msg.sender, hasGrapes, bnbValue);
+    }
+
+    function distributeFees(uint256 depositAmount, address payable inviter) internal returns (uint restAmount) {
+        restAmount = depositAmount.sub(distributeDevFees(depositAmount));
+        restAmount = restAmount.sub(distributeRefFees(depositAmount, inviter));
+    }
+
+    function distributeDevFees(uint256 amount) internal returns (uint totalFees) {
+
+        totalFees = 0;
+
+        (uint256 devFee, uint256 vaultFee) = getFees(amount);
+
+        devAddress.transfer(devFee);
+        vaultAddress.transfer(vaultFee);
+
+        totalFees = totalFees.add(devFee).add(vaultFee);
+    }
+
+    function distributeRefFees(uint256 amount, address payable inviter) internal returns (uint totalFees) {
+        address payable currentInviter = inviter;
+
+        uint256 currentLevel = 1;
+
+        totalFees = 0;
+
+        bool isTopReached = false;
+
+        while(!isTopReached && currentLevel <= MAX_REF_LEVEL) {
+            uint256 refAmount = getFee(amount, refPercent[currentLevel - 1]);
+
+            // save referral statistic by level
+            referralsCount[currentInviter][currentLevel] += 1;
+            referralsIncome[currentInviter][currentLevel] = referralsIncome[currentInviter][currentLevel].add(refAmount);
+            
+            // save global referral statistic
+            users[currentInviter].totalRefIncome = users[currentInviter].totalRefIncome.add(refAmount);
+            users[currentInviter].totalRefs += 1;
+            
+            currentInviter.transfer(refAmount);
+            
+            totalFees = totalFees.add(refAmount);
+
+            currentInviter = referrers[currentInviter].inviter;
+
+            isTopReached = currentInviter == top;
+            
+            currentLevel++;
+        }
+    }
+
+    function getFee(uint256 amount, uint256 percent) private pure returns(uint256) {
+        return SafeMath.div(SafeMath.mul(amount, percent), 100);
+    }
+    
+    function getFees(uint256 amount) private view returns(uint256 devFee, uint256 vaultFee) {
+        return (
+            getFee(amount, devFeePercent),
+            getFee(amount, vaultFeePercent)
+        );
+    }
+    
+    function seedMarket() external payable onlyOwner {
+        require(marketGrapes == 0, "MARKET IS NOT EMPTY");
+        initialized = true;
+        marketGrapes = 172800000000;
+    }
+    
+    function getBalance() public view returns(uint256) {
+        return address(this).balance;
+    }
+    
+    function getReferralsCount(address _address, uint256 level) public view returns(uint256) {
+        return referralsCount[_address][level];
+    }
+
+    function getReferralsIncome(address _address, uint256 level) public view returns(uint256) {
+        return referralsIncome[_address][level];
+    }
+
+    function getRefLevelPercent(uint level) public view returns(uint256) {
+        return refPercent[level - 1];
+    }
+    
+    function min(uint256 a, uint256 b) private pure returns (uint256) {
+        return a < b ? a : b;
+    }
+
+    
+
+    function calculateTrade(uint256 rt, uint256 rs, uint256 bs) private view returns(uint256) {
+        return SafeMath.div(
+            SafeMath.mul(PSN, bs), 
+            SafeMath.add(
+                PSNH, 
+                SafeMath.div(
+                    SafeMath.add(
+                        SafeMath.mul(PSN, rs),
+                        SafeMath.mul(PSNH, rt)
+                    ),
+                    rt
+                )
+            )
+        );
+    }
+    
+    function calculateGrapeSell(uint256 grapes) public view returns(uint256) {
+        return calculateTrade(grapes, marketGrapes, address(this).balance);
+    }
+    
+    function calculateGrapeBuy(uint256 eth, uint256 contractBalance) public view returns(uint256) {
+        return calculateTrade(eth, contractBalance, marketGrapes);
+    }
+    
+    function calculateGrapeBuySimple(uint256 eth) public view returns(uint256) {
+        return calculateGrapeBuy(eth, address(this).balance);
+    }
+
+    function calculateDailyIncome(address _address) public view returns(uint256) {
+        uint256 grapesSell = calculateGrapeSell(getMiners(_address));
+        uint256 minReturn = SafeMath.mul(grapesSell, SafeMath.mul(SafeMath.mul(60, 60), 30));
+        uint256 maxReturn = SafeMath.mul(grapesSell, SafeMath.mul(SafeMath.mul(60, 60), 25));
+        return SafeMath.div(SafeMath.add(minReturn, maxReturn), 2);
+    }
+
+
+    function getMiners(address _address) public view returns(uint256) {
+        return hatcheryMiners[_address];
+    }
+    
+    function getGrapes(address _address) public view returns(uint256) {
+        return SafeMath.add(claimedGrapes[_address], getGrapesSinceLastHatch(_address));
+    }
+    
+    function getGrapesSinceLastHatch(address _address) public view returns(uint256) {
+        uint256 secondsPassed = min(GRAPES_TO_HATCH_1MINERS, SafeMath.sub(block.timestamp, lastHatch[_address]));
+        return SafeMath.mul(secondsPassed, hatcheryMiners[_address]);
+    }
+
+    function bnbRewards(address _address) external view returns(uint256) {
+        uint256 hasGrapes = getGrapes(_address);
+        uint256 bnbValue = calculateGrapeSell(hasGrapes);
+        return bnbValue;
+    }
+
+    function setDevAddress(address _newDevAddress) external onlyOwner {
+        require(_newDevAddress != address(0), "ZERO ADDRESS");
+        devAddress = payable(_newDevAddress);
+    }
+
+    function setVaultAddress(address _newVaultAddress) external onlyOwner {
+        require(_newVaultAddress != address(0), "ZERO ADDRESS");
+        vaultAddress = payable(_newVaultAddress);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (access/Ownable.sol)
+
+pragma solidity ^0.8.0;
+
+import "../utils/Context.sol";
+
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owner.
+     */
+    constructor() {
+        _transferOwnership(_msgSender());
+    }
+
+    /**
+     * @dev Returns the address of the current owner.
+     */
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    /**
+     * @dev Throws if called by any account other than the owner.
+     */
+    modifier onlyOwner() {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    /**
+     * @dev Leaves the contract without owner. It will not be possible to call
+     * `onlyOwner` functions anymore. Can only be called by the current owner.
+     *
+     * NOTE: Renouncing ownership will leave the contract without an owner,
+     * thereby removing any functionality that is only available to the owner.
+     */
+    function renounceOwnership() public virtual onlyOwner {
+        _transferOwnership(address(0));
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Can only be called by the current owner.
+     */
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _transferOwnership(newOwner);
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Internal function without access restriction.
+     */
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/math/SafeMath.sol)
+
+pragma solidity ^0.8.0;
+
+// CAUTION
+// This version of SafeMath should only be used with Solidity 0.8 or later,
+// because it relies on the compiler's built in overflow checks.
+
+/**
+ * @dev Wrappers over Solidity's arithmetic operations.
+ *
+ * NOTE: `SafeMath` is generally not needed starting with Solidity 0.8, since the compiler
+ * now has built in overflow checking.
+ */
+library SafeMath {
+    /**
+     * @dev Returns the addition of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryAdd(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            uint256 c = a + b;
+            if (c < a) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the substraction of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function trySub(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b > a) return (false, 0);
+            return (true, a - b);
+        }
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMul(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            // Gas optimization: this is cheaper than requiring 'a' not being zero, but the
+            // benefit is lost if 'b' is also tested.
+            // See: https://github.com/OpenZeppelin/openzeppelin-contracts/pull/522
+            if (a == 0) return (true, 0);
+            uint256 c = a * b;
+            if (c / a != b) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the division of two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryDiv(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a / b);
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMod(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a % b);
+        }
+    }
+
+    /**
+     * @dev Returns the addition of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `+` operator.
+     *
+     * Requirements:
+     *
+     * - Addition cannot overflow.
+     */
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting on
+     * overflow (when the result is negative).
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a - b;
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `*` operator.
+     *
+     * Requirements:
+     *
+     * - Multiplication cannot overflow.
+     */
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a * b;
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator.
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a / b;
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting when dividing by zero.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a % b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting with custom message on
+     * overflow (when the result is negative).
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {trySub}.
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b <= a, errorMessage);
+            return a - b;
+        }
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting with custom message on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator. Note: this function uses a
+     * `revert` opcode (which leaves remaining gas untouched) while Solidity
+     * uses an invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a / b;
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting with custom message when dividing by zero.
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {tryMod}.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a % b;
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
