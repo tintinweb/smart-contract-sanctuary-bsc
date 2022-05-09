@@ -1,0 +1,527 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-05-09
+*/
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.6.12;
+
+contract Ownable {
+    address public owner;
+
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    constructor() public {
+        owner = msg.sender;
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == owner);
+        _;
+    }
+
+    function transferOwnership(address newOwner) public onlyOwner {
+        require(newOwner != address(0));
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
+    }
+}
+
+contract Whitelist is Ownable {
+    mapping(address => bool) public whitelist;
+
+    event WhitelistedAddressAdded(address addr);
+    event WhitelistedAddressRemoved(address addr);
+
+    modifier onlyWhitelisted() {
+        require(whitelist[msg.sender], 'no whitelist');
+        _;
+    }
+
+    function addAddressToWhitelist(address addr) onlyOwner public returns(bool success) {
+        if (!whitelist[addr]) {
+            whitelist[addr] = true;
+            emit WhitelistedAddressAdded(addr);
+            success = true;
+        }
+    }
+
+    function addAddressesToWhitelist(address[] memory addrs) onlyOwner public returns(bool success) {
+        for (uint256 i = 0; i < addrs.length; i++) {
+            if (addAddressToWhitelist(addrs[i])) {
+                success = true;
+            }
+        }
+        return success;
+    }
+
+    function removeAddressFromWhitelist(address addr) onlyOwner public returns(bool success) {
+        if (whitelist[addr]) {
+            whitelist[addr] = false;
+            emit WhitelistedAddressRemoved(addr);
+            success = true;
+        }
+        return success;
+    }
+
+    function removeAddressesFromWhitelist(address[] memory addrs) onlyOwner public returns(bool success) {
+        for (uint256 i = 0; i < addrs.length; i++) {
+            if (removeAddressFromWhitelist(addrs[i])) {
+                success = true;
+            }
+        }
+        return success;
+    }
+}
+
+contract ERC20 {
+    using SafeMath for uint256;
+
+    mapping (address => uint256) internal _balances;
+    mapping (address => mapping (address => uint256)) internal _allowed;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    uint256 internal _totalSupply;
+
+    function totalSupply() public view returns (uint256) {
+        return _totalSupply;
+    }
+
+    function balanceOf(address owner) public view returns (uint256) {
+        return _balances[owner];
+    }
+
+    function allowance(address owner, address spender) public view returns (uint256) {
+        return _allowed[owner][spender];
+    }
+
+    function transfer(address to, uint256 value) public returns (bool) {
+        _transfer(msg.sender, to, value);
+        return true;
+    }
+
+    function approve(address spender, uint256 value) public returns (bool) {
+        _approve(msg.sender, spender, value);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 value) public returns (bool) {
+        _transfer(from, to, value);
+        _approve(from, msg.sender, _allowed[from][msg.sender].sub(value));
+        return true;
+    }
+
+    function increaseAllowance(address spender, uint256 addedValue) public returns (bool) {
+        _approve(msg.sender, spender, _allowed[msg.sender][spender].add(addedValue));
+        return true;
+    }
+
+    function decreaseAllowance(address spender, uint256 subtractedValue) public returns (bool) {
+        _approve(msg.sender, spender, _allowed[msg.sender][spender].sub(subtractedValue));
+        return true;
+    }
+
+    function _transfer(address from, address to, uint256 value) internal {
+        require(to != address(0));
+
+        _balances[from] = _balances[from].sub(value);
+        _balances[to] = _balances[to].add(value);
+        emit Transfer(from, to, value);
+    }
+
+    function _mint(address account, uint256 value) internal {
+        require(account != address(0));
+
+        _totalSupply = _totalSupply.add(value);
+        _balances[account] = _balances[account].add(value);
+        emit Transfer(address(0), account, value);
+    }
+
+    function _burn(address account, uint256 value) internal {
+        require(account != address(0));
+
+        _totalSupply = _totalSupply.sub(value);
+        _balances[account] = _balances[account].sub(value);
+        emit Transfer(account, address(0), value);
+    }
+
+    function _approve(address owner, address spender, uint256 value) internal {
+        require(spender != address(0));
+        require(owner != address(0));
+
+        _allowed[owner][spender] = value;
+        emit Approval(owner, spender, value);
+    }
+
+    function _burnFrom(address account, uint256 value) internal {
+        _burn(account, value);
+        _approve(account, msg.sender, _allowed[account][msg.sender].sub(value));
+    }
+}
+
+library SafeMath {
+    function mul(uint256 a, uint256 b) internal pure returns (uint256 c) {
+        if (a == 0) {
+            return 0;
+        }
+        c = a * b;
+        assert(c / a == b);
+        return c;
+    }
+
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a / b;
+    }
+
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        assert(b <= a);
+        return a - b;
+    }
+
+    function safeSub(uint a, uint b) internal pure returns (uint) {
+        if (b > a) {
+            return 0;
+        } else {
+            return a - b;
+        }
+    }
+
+    function add(uint256 a, uint256 b) internal pure returns (uint256 c) {
+        c = a + b;
+        assert(c >= a);
+        return c;
+    }
+
+    function max(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a >= b ? a : b;
+    }
+
+    function min(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a < b ? a : b;
+    }
+}
+
+interface IERC20 {
+    function calculateTransferTaxes(address _from, uint256 _value) external view returns (uint256 adjustedValue, uint256 taxAmount);
+    function transferFrom(address from, address to, uint256 value) external returns (bool);
+    function transfer(address to, uint256 value) external returns (bool);
+    function balanceOf(address who) external view returns (uint256);
+    function burn(uint256 _value) external;
+}
+
+contract SwapX is ERC20, Whitelist {
+
+    string public constant name = "Stronghands Money LP";
+    string public constant symbol = "SMG-CRO LP";
+    uint8 public constant decimals = 18;
+
+    /***********************************|
+    |        Variables && Events        |
+    |__________________________________*/
+
+    // Variables
+    IERC20 internal token; // address of the ERC20 token traded on this contract
+    uint256 public totalTxs;
+
+    uint256 internal lastBalance_;
+    uint256 internal trackingInterval_ = 1 minutes;
+    uint256 public providers;
+
+    mapping (address => bool) internal _providers;
+    mapping (address => uint256) internal _txs;
+
+    bool public isPaused = true;
+
+    // Events
+    event onTokenPurchase(address indexed buyer, uint256 indexed base_amount, uint256 indexed token_amount);
+    event onBasePurchase(address indexed buyer, uint256 indexed token_amount, uint256 indexed base_amount);
+    event onAddLiquidity(address indexed provider, uint256 indexed base_amount, uint256 indexed token_amount);
+    event onRemoveLiquidity(address indexed provider, uint256 indexed base_amount, uint256 indexed token_amount);
+    event onLiquidity(address indexed provider, uint256 indexed amount);
+    event onContractBalance(uint256 balance);
+    event onPrice(uint256 price);
+    event onSummary(uint256 liquidity, uint256 price);
+
+
+    /***********************************|
+    |            Constructor            |
+    |__________________________________*/
+
+    constructor (address token_addr) Ownable() public {
+        token = IERC20(token_addr);
+        lastBalance_= now;
+    }
+
+    function unpause() public onlyOwner {
+        isPaused = false;
+    }
+
+    function pause() public onlyOwner {
+        isPaused = true;
+    }
+
+    modifier isNotPaused() {
+        require(!isPaused, "Swaps currently paused");
+        _;
+    }
+
+
+    /***********************************|
+    |        Exchange Functions         |
+    |__________________________________*/
+
+    receive() external payable {
+        baseToTokenInput(msg.value, 1, msg.sender, msg.sender);
+    }
+
+    function getInputPrice(uint256 input_amount, uint256 input_reserve, uint256 output_reserve)  public pure returns (uint256) {
+        require(input_reserve > 0 && output_reserve > 0, "INVALID_VALUE");
+        uint256 input_amount_with_fee = input_amount.mul(990);
+        uint256 numerator = input_amount_with_fee.mul(output_reserve);
+        uint256 denominator = input_reserve.mul(1000).add(input_amount_with_fee);
+        return numerator / denominator;
+    }
+
+    function getOutputPrice(uint256 output_amount, uint256 input_reserve, uint256 output_reserve)  public pure returns (uint256) {
+        require(input_reserve > 0 && output_reserve > 0);
+        uint256 numerator = input_reserve.mul(output_amount).mul(1000);
+        uint256 denominator = (output_reserve.sub(output_amount)).mul(990);
+        return (numerator / denominator).add(1);
+    }
+
+    function baseToTokenInput(uint256 base_sold, uint256 min_tokens, address buyer, address recipient) private returns (uint256) {
+        require(base_sold > 0 && min_tokens > 0, "sold and min 0");
+
+        uint256 token_reserve = token.balanceOf(address(this));
+        uint256 tokens_bought = getInputPrice(base_sold, address(this).balance.sub(base_sold), token_reserve);
+
+        require(tokens_bought >= min_tokens, "tokens_bought >= min_tokens");
+        require(token.transfer(recipient, tokens_bought), "transfer err");
+
+        emit onTokenPurchase(buyer, base_sold, tokens_bought);
+        emit onContractBalance(baseBalance());
+
+        trackGlobalStats();
+
+        return tokens_bought;
+    }
+
+    function baseToTokenSwapInput(uint256 min_tokens) public payable isNotPaused returns (uint256) {
+        return baseToTokenInput(msg.value, min_tokens,msg.sender, msg.sender);
+    }
+
+    function baseToTokenOutput(uint256 tokens_bought, uint256 max_base, address buyer, address recipient) private returns (uint256) {
+        require(tokens_bought > 0 && max_base > 0);
+        uint256 token_reserve = token.balanceOf(address(this));
+        uint256 base_sold = getOutputPrice(tokens_bought, address(this).balance.sub(max_base), token_reserve);
+        // Throws if base_sold > max_base
+        uint256 base_refund = max_base.sub(base_sold);
+        if (base_refund > 0) {
+            payable(buyer).transfer(base_refund);
+        }
+        require(token.transfer(recipient, tokens_bought));
+        emit onTokenPurchase(buyer, base_sold, tokens_bought);
+        trackGlobalStats();
+        return base_sold;
+    }
+
+    function baseToTokenSwapOutput(uint256 tokens_bought) public payable isNotPaused returns (uint256) {
+        return baseToTokenOutput(tokens_bought, msg.value, msg.sender, msg.sender);
+    }
+
+    function tokenToBaseInput(uint256 tokens_sold, uint256 min_base, address buyer, address recipient) private returns (uint256) {
+        require(tokens_sold > 0 && min_base > 0);
+        uint256 token_reserve = token.balanceOf(address(this));
+
+        (uint256 realized_sold, ) = token.calculateTransferTaxes(buyer, tokens_sold);
+
+        uint256 base_bought = getInputPrice(realized_sold, token_reserve, address(this).balance);
+        require(base_bought >= min_base);
+        payable(recipient).transfer(base_bought);
+        require(token.transferFrom(buyer, address(this), tokens_sold));
+        emit onBasePurchase(buyer, tokens_sold, base_bought);
+        trackGlobalStats();
+        return base_bought;
+    }
+
+    function tokenToBaseSwapInput(uint256 tokens_sold, uint256 min_base) public isNotPaused returns (uint256) {
+        return tokenToBaseInput(tokens_sold, min_base, msg.sender, msg.sender);
+    }
+
+    function tokenToBaseOutput(uint256 base_bought, uint256 max_tokens, address buyer, address recipient) private returns (uint256) {
+        require(base_bought > 0);
+        uint256 token_reserve = token.balanceOf(address(this));
+        uint256 tokens_sold = getOutputPrice(base_bought, token_reserve, address(this).balance);
+
+        (, uint256 taxAmount) = token.calculateTransferTaxes(buyer, tokens_sold);
+        tokens_sold += taxAmount;
+
+        // tokens sold is always > 0
+        require(max_tokens >= tokens_sold, 'max tokens exceeded');
+        payable(recipient).transfer(base_bought);
+        require(token.transferFrom(buyer, address(this), tokens_sold));
+        emit onBasePurchase(buyer, tokens_sold, base_bought);
+        trackGlobalStats();
+
+        return tokens_sold;
+    }
+
+    function tokenToBaseSwapOutput(uint256 base_bought, uint256 max_tokens) public isNotPaused returns (uint256) {
+        return tokenToBaseOutput(base_bought, max_tokens, msg.sender, msg.sender);
+    }
+
+    function trackGlobalStats() private {
+
+        uint256 price = getBaseToTokenOutputPrice(1e18);
+        uint256 balance = baseBalance();
+
+        if (now.safeSub(lastBalance_) > trackingInterval_) {
+
+            emit onSummary(balance * 2, price);
+            lastBalance_ = now;
+        }
+
+        emit onContractBalance(balance);
+        emit onPrice(price);
+
+        totalTxs += 1;
+        _txs[msg.sender] += 1;
+    }
+
+
+    /***********************************|
+    |         Getter Functions          |
+    |__________________________________*/
+
+    function getBaseToTokenInputPrice(uint256 base_sold) public view returns (uint256) {
+        require(base_sold > 0);
+        uint256 token_reserve = token.balanceOf(address(this));
+        return getInputPrice(base_sold, address(this).balance, token_reserve);
+    }
+
+    function getBaseToTokenOutputPrice(uint256 tokens_bought) public view returns (uint256) {
+        require(tokens_bought > 0);
+        uint256 token_reserve = token.balanceOf(address(this));
+        uint256 base_sold = getOutputPrice(tokens_bought, address(this).balance, token_reserve);
+        return base_sold;
+    }
+
+    function getTokenToBaseInputPrice(uint256 tokens_sold) public view returns (uint256) {
+        require(tokens_sold > 0, "token sold < 0");
+        uint256 token_reserve = token.balanceOf(address(this));
+        uint256 base_bought = getInputPrice(tokens_sold, token_reserve, address(this).balance);
+        return base_bought;
+    }
+
+    function getTokenToBaseOutputPrice(uint256 base_bought) public view returns (uint256) {
+        require(base_bought > 0);
+        uint256 token_reserve = token.balanceOf(address(this));
+        return getOutputPrice(base_bought, token_reserve, address(this).balance);
+    }
+
+    function tokenAddress() public view returns (address) {
+        return address(token);
+    }
+
+    function baseBalance() public view returns (uint256) {
+        return address(this).balance;
+    }
+
+    function tokenBalance() public view returns (uint256) {
+        return token.balanceOf(address(this));
+    }
+
+    function getBaseToLiquidityInputPrice(uint256 base_sold) public view returns (uint256){
+        require(base_sold > 0);
+        uint256 token_amount = 0;
+        uint256 total_liquidity = _totalSupply;
+        uint256 base_reserve = address(this).balance;
+        uint256 token_reserve = token.balanceOf(address(this));
+        token_amount = (base_sold.mul(token_reserve) / base_reserve).add(1);
+        uint256 liquidity_minted = base_sold.mul(total_liquidity) / base_reserve;
+
+        return liquidity_minted;
+    }
+
+    function getLiquidityToReserveInputPrice(uint amount) public view returns (uint256, uint256){
+        uint256 total_liquidity = _totalSupply;
+        require(total_liquidity > 0);
+        uint256 token_reserve = token.balanceOf(address(this));
+        uint256 base_amount = amount.mul(address(this).balance) / total_liquidity;
+        uint256 token_amount = amount.mul(token_reserve) / total_liquidity;
+        return (base_amount, token_amount);
+    }
+
+    function txs(address owner) public view returns (uint256) {
+        return _txs[owner];
+    }
+
+    /***********************************|
+    |        Liquidity Functions        |
+    |__________________________________*/
+
+    function addLiquidity(uint256 min_liquidity, uint256 max_tokens) isNotPaused public payable returns (uint256) {
+        require(max_tokens > 0 && msg.value > 0, 'Swap#addLiquidity: INVALID_ARGUMENT');
+        uint256 total_liquidity = _totalSupply;
+
+        uint256 token_amount = 0;
+
+        if (_providers[msg.sender] == false){
+            _providers[msg.sender] = true;
+            providers += 1;
+        }
+
+        if (total_liquidity > 0) {
+            require(min_liquidity > 0);
+            uint256 base_reserve = address(this).balance.sub(msg.value);
+            uint256 token_reserve = token.balanceOf(address(this));
+            token_amount = (msg.value.mul(token_reserve) / base_reserve).add(1);
+            uint256 liquidity_minted = msg.value.mul(total_liquidity) / base_reserve;
+
+            require(max_tokens >= token_amount && liquidity_minted >= min_liquidity);
+            _balances[msg.sender] = _balances[msg.sender].add(liquidity_minted);
+            _totalSupply = total_liquidity.add(liquidity_minted);
+            require(token.transferFrom(msg.sender, address(this), token_amount));
+
+            emit onAddLiquidity(msg.sender, msg.value, token_amount);
+            emit onLiquidity(msg.sender, _balances[msg.sender]);
+            emit Transfer(address(0), msg.sender, liquidity_minted);
+            return liquidity_minted;
+
+        } else {
+            require(msg.value >= 1e18, "INVALID_VALUE");
+            token_amount = max_tokens;
+            uint256 initial_liquidity = address(this).balance;
+            _totalSupply = initial_liquidity;
+            _balances[msg.sender] = initial_liquidity;
+            require(token.transferFrom(msg.sender, address(this), token_amount));
+
+            emit onAddLiquidity(msg.sender, msg.value, token_amount);
+            emit onLiquidity(msg.sender, _balances[msg.sender]);
+            emit Transfer(address(0), msg.sender, initial_liquidity);
+            return initial_liquidity;
+        }
+    }
+
+    function removeLiquidity(uint256 amount, uint256 min_base, uint256 min_tokens) onlyWhitelisted public returns (uint256, uint256) {
+        require(amount > 0 && min_base > 0 && min_tokens > 0);
+        uint256 total_liquidity = _totalSupply;
+        require(total_liquidity > 0);
+        uint256 token_reserve = token.balanceOf(address(this));
+        uint256 base_amount = amount.mul(address(this).balance) / total_liquidity;
+
+        uint256 token_amount = amount.mul(token_reserve) / total_liquidity;
+        require(base_amount >= min_base && token_amount >= min_tokens);
+
+        _balances[msg.sender] = _balances[msg.sender].sub(amount);
+        _totalSupply = total_liquidity.sub(amount);
+        msg.sender.transfer(base_amount);
+        require(token.transfer(msg.sender, token_amount));
+        emit onRemoveLiquidity(msg.sender, base_amount, token_amount);
+        emit onLiquidity(msg.sender, _balances[msg.sender]);
+        emit Transfer(msg.sender, address(0), amount);
+        return (base_amount, token_amount);
+    }
+}
