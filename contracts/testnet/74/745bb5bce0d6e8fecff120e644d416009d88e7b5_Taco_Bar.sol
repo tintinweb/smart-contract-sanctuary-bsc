@@ -1,0 +1,512 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-05-10
+*/
+
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.9;
+
+contract Taco_Bar {
+    using SafeMath for uint256;
+
+    uint256 public EGGS_TO_HIRE_1MINERS = 3200000; //~1.5% return rate on miner
+    uint256 public PERCENTS_DIVIDER = 1000;
+    uint256 public REFERRAL = 30; //3% referral fee
+    uint256 public MKT_TAX = 20; //2% mkt tax
+    uint256 public OWN_TAX = 10; //1% owners tax
+    uint256 public MARKET_EGGS_DIVISOR = 20; // 5% market eggs added on each compound
+    uint256 public MARKET_EGGS_DIVISOR_SELL = 10; // 10% market eggs added on each sell
+
+    uint256 public MIN_INVEST_LIMIT = 1 * 1e17; /** 0.1 BNB min  **/
+    uint256 public WALLET_DEPOSIT_LIMIT = 250 * 1e18; /** 250 BNB max  **/
+
+	uint256 public COMPOUND_BONUS = 0; /** 0% no compound bonus, you get the bonus of compounding your money **/
+	uint256 public COMPOUND_BONUS_MAX_TIMES = 4; /** 10 times / 5 days. **/
+    uint256 public COMPOUND_STEP = 24 * 60 * 60; /** every 24 hours. **/
+
+    uint256 public WITHDRAWAL_TAX = 900; //just dont withdraw until you are supposed to, duh
+    uint256 public COMPOUND_FOR_NO_TAX_WITHDRAWAL = 2; // compound days, for no tax withdrawal.
+
+    uint256 public totalStaked;
+    uint256 public totalDeposits;
+    uint256 public totalCompound;
+    uint256 public totalRefBonus;
+    uint256 public totalWithdrawn;
+
+    uint256 public marketEggs;
+    uint256 PSN = 10000;
+    uint256 PSNH = 5000;
+    bool public contractStarted;
+    bool public blacklistActive = true; //set false after launch
+    mapping(address => bool) public Blacklisted;
+
+	uint256 public CUTOFF_STEP = 36 * 60 * 60; /** 36 hours  **/
+	uint256 public WITHDRAW_COOLDOWN = 4 * 60 * 60; /** 4 hours  **/
+    uint256 public ADDSALSA_TOTALAMOUNT;
+    uint256 public ADDSALSA_REWARDAMOUNT;
+    uint256 public ADDSALSA_WITHDRAWAMOUNT;
+
+    address public owner;
+    address public mkt;
+    address public salsaInvestor;
+
+    struct User {
+        uint256 initialDeposit;
+        uint256 userDeposit;
+        uint256 miners;
+        uint256 claimedEggs;
+        uint256 lastHatch;
+        address referrer;
+        uint256 referralsCount;
+        uint256 referralEggRewards;
+        uint256 totalWithdrawn;
+        uint256 lastWithdrawTime;
+        uint256 addSalsaDeposit;
+        uint256 claimedSalsa;
+    }
+
+    mapping(address => User) public users;
+
+    constructor(address _mkt, address _salsaInvestor) {
+		require(!isContract(_mkt) && !isContract(_salsaInvestor));
+        owner = msg.sender;
+        mkt = _mkt;
+        salsaInvestor = _salsaInvestor;
+    }
+
+    function AddSalsa_Deposit() public payable{
+        User storage user = users[msg.sender];
+        require(contractStarted, "Contract not yet Started.");
+        uint256 amount = msg.value;
+        require(amount>0, "0 ADDSALSA Deposit");
+        user.addSalsaDeposit.add(amount);
+        ADDSALSA_TOTALAMOUNT.add(amount);
+        uint256 fee = amount.div(100);
+        payable(owner).transfer(fee);
+        payable(salsaInvestor).transfer(amount.sub(fee));
+    }
+
+    function AddSalsa_ProfitDeposit() public payable{
+        require(msg.sender==salsaInvestor, "Not ADDSALSA Wallet");
+        require(contractStarted, "Contract not yet Started.");
+        uint256 amount = msg.value;
+        uint256 fee = amount.div(200);
+        payable(owner).transfer(fee);
+        ADDSALSA_REWARDAMOUNT.sub(ADDSALSA_WITHDRAWAMOUNT).add(amount);
+        ADDSALSA_WITHDRAWAMOUNT = 0;
+    }
+
+    function getAddSalsaSharedReward(address _addr) public view returns( uint256 ){
+        if (ADDSALSA_REWARDAMOUNT==0){
+            return 0;
+        }
+        User storage user = users[_addr];
+        uint256 addSalsaDeposit = user.addSalsaDeposit;
+        uint256 claimedAmt = user.claimedSalsa;
+        return ADDSALSA_REWARDAMOUNT.mul(addSalsaDeposit).div(ADDSALSA_TOTALAMOUNT).sub(claimedAmt);
+    }
+
+    function isContract(address addr) internal view returns (bool) {
+        uint size;
+        assembly { size := extcodesize(addr) }
+        return size > 0;
+    }
+
+    function setblacklistActive(bool isActive) public{
+        require(msg.sender == owner, "Admin use only.");
+        blacklistActive = isActive;
+    }
+
+    function blackListWallet(address Wallet, bool isBlacklisted) public{
+        require(msg.sender == owner, "Admin use only.");
+        Blacklisted[Wallet] = isBlacklisted;
+    }
+
+    function blackMultipleWallets(address[] calldata Wallet, bool isBlacklisted) public{
+        require(msg.sender == owner, "Admin use only.");
+        for(uint256 i = 0; i < Wallet.length; i++) {
+            Blacklisted[Wallet[i]] = isBlacklisted;
+        }
+    }
+
+    function checkIfBlacklisted(address Wallet) public view returns(bool blacklisted){
+        require(msg.sender == owner, "Admin use only.");
+        blacklisted = Blacklisted[Wallet];
+    }
+
+    function hireMoreAbuelas(bool isCompound) public {
+        User storage user = users[msg.sender];
+        //User storage userOfOwner = users[owner];
+        require(contractStarted, "Contract not yet Started.");
+
+        uint256 eggsUsed = getMyEggs();
+        uint256 eggsForCompound = eggsUsed;
+
+        if(isCompound) {
+            // uint256 dailyCompoundBonus = getDailyCompoundBonus(msg.sender, eggsForCompound);
+            // eggsForCompound = eggsForCompound.add(dailyCompoundBonus);
+            uint256 eggsUsedValue = calculateEggSell(eggsForCompound);
+            //if they have salsa rewards, compound them into miner contract
+            uint256 addSalsaReward = getAddSalsaSharedReward(msg.sender);
+            //if (addSalsaReward>0 && block.timestamp.sub(user.addSalsaWithdrawTime)>1 days){
+            if (addSalsaReward > 0){
+                eggsUsedValue.add(addSalsaReward);
+                user.claimedSalsa.add(addSalsaReward);
+            }
+            // end salsa compound
+            user.userDeposit = user.userDeposit.add(eggsUsedValue);
+            totalCompound = totalCompound.add(eggsUsedValue);
+        }
+
+        // if(block.timestamp.sub(user.lastHatch) >= COMPOUND_STEP) {
+        //     if(user.dailyCompoundBonus < COMPOUND_BONUS_MAX_TIMES) {
+        //         user.dailyCompoundBonus = user.dailyCompoundBonus.add(1);
+        //     }
+        // }
+        
+        user.miners = user.miners.add(eggsForCompound.div(EGGS_TO_HIRE_1MINERS));
+        user.claimedEggs = 0;
+        user.lastHatch = block.timestamp;
+
+        // uint256 addSalsaReward = getAddSalsaSharedReward(msg.sender);
+        // if (addSalsaReward>0 && block.timestamp.sub(user.addSalsaWithdrawTime)>1 days){
+            
+        //     uint256 fee = addSalsaReward.div(200);
+        //     userOfOwner.addSalsaDeposit.add(fee);
+        //     user.addSalsaDeposit.add(addSalsaReward.sub(fee));
+        //     ADDSALSA_TOTALAMOUNT.add(addSalsaReward);
+        // }
+        
+
+        marketEggs = marketEggs.add(eggsUsed.div(MARKET_EGGS_DIVISOR));
+    }
+
+    function sellTacos() public{
+        require(contractStarted, "Contract not yet Started.");
+
+        if (blacklistActive) {
+            require(!Blacklisted[msg.sender], "Address is blacklisted.");
+        }
+
+        User storage user = users[msg.sender];
+        uint256 hasEggs = getMyEggs();
+        uint256 eggValue = calculateEggSell(hasEggs);
+        
+        /** 
+            if user compound < to mandatory compound days**/
+        //if(user.dailyCompoundBonus < COMPOUND_FOR_NO_TAX_WITHDRAWAL){
+            //daily compound bonus count will not reset and eggValue will be deducted with 60% feedback tax.
+            //eggValue = eggValue.sub(eggValue.mul(WITHDRAWAL_TAX).div(PERCENTS_DIVIDER));
+        //}else{
+            //set daily compound bonus count to 0 and eggValue will remain without deductions
+             //user.dailyCompoundBonus = 0;   
+        //}
+        
+        user.claimedEggs = 0;  
+        user.lastHatch = block.timestamp;
+        marketEggs = marketEggs.add(hasEggs.div(MARKET_EGGS_DIVISOR_SELL));
+        
+        if(getBalance() < eggValue) {
+            eggValue = getBalance();
+        }
+        //get miner payout
+        uint256 eggsPayout = eggValue.sub(payFees(eggValue));
+        //get salsa payout
+        uint256 addSalsaReward = getAddSalsaSharedReward(msg.sender);
+        if (addSalsaReward > 0){
+            uint256 totalSalsa = addSalsaReward.sub(payFees(addSalsaReward));
+            user.claimedSalsa.add(totalSalsa);
+            ADDSALSA_WITHDRAWAMOUNT.add(totalSalsa);
+            eggsPayout.add(totalSalsa);
+        }
+        //send payment to user
+        payable(msg.sender).transfer(eggsPayout);
+        user.totalWithdrawn = user.totalWithdrawn.add(eggsPayout);
+        totalWithdrawn = totalWithdrawn.add(eggsPayout);
+        //user.addSalsaWithdrawTime = block.timestamp;
+    }
+
+    function hireAbuelas(address ref) public payable{
+        require(contractStarted, "Contract not yet Started.");
+        User storage user = users[msg.sender];
+        uint256 amount = msg.value;
+        require(amount >= MIN_INVEST_LIMIT, "Mininum investment not met.");
+        require(user.initialDeposit.add(amount) <= WALLET_DEPOSIT_LIMIT, "Max deposit limit reached.");
+        
+        uint256 eggsBought = calculateEggBuy(amount, getBalance().sub(amount));
+        user.userDeposit = user.userDeposit.add(amount);
+        user.initialDeposit = user.initialDeposit.add(amount);
+        user.claimedEggs = user.claimedEggs.add(eggsBought);
+
+        if (user.referrer == address(0)) {
+            if (ref != msg.sender) {
+                user.referrer = ref;
+            }
+
+            address upline1 = user.referrer;
+            if (upline1 != address(0)) {
+                users[upline1].referralsCount = users[upline1].referralsCount.add(1);
+            }
+        }
+                
+        if (user.referrer != address(0)) {
+            address upline = user.referrer;
+            if (upline != address(0)) {
+                uint256 refRewards = amount.mul(REFERRAL).div(PERCENTS_DIVIDER);
+                payable(upline).transfer(refRewards);
+                users[upline].referralEggRewards = users[upline].referralEggRewards.add(refRewards);
+                totalRefBonus = totalRefBonus.add(refRewards);
+            }
+        }
+
+        uint256 eggsPayout = payFees(amount);
+        totalStaked = totalStaked.add(amount.sub(eggsPayout));
+        totalDeposits = totalDeposits.add(1);
+        hireMoreAbuelas(false);
+    }
+
+    function payFees(uint256 eggValue) internal returns(uint256){
+        uint256 mktTax = eggValue.mul(MKT_TAX).div(PERCENTS_DIVIDER);
+        uint256 ownTax = eggValue.mul(OWN_TAX).div(PERCENTS_DIVIDER);
+        payable(mkt).transfer(mktTax);
+        payable(owner).transfer(ownTax);
+        return mktTax.add(ownTax);
+    }
+
+    // function getDailyCompoundBonus(address _adr, uint256 amount) public view returns(uint256){
+    //     if(users[_adr].dailyCompoundBonus == 0) {
+    //         return 0;
+    //     } else {
+    //         uint256 totalBonus = users[_adr].dailyCompoundBonus.mul(COMPOUND_BONUS); 
+    //         uint256 result = amount.mul(totalBonus).div(PERCENTS_DIVIDER);
+    //         return result;
+    //     }
+    // }
+
+    function getUserInfo(address _adr) public view returns(uint256 _initialDeposit, uint256 _userDeposit, uint256 _miners,
+     uint256 _claimedEggs, uint256 _lastHatch, address _referrer, uint256 _referrals,
+	 uint256 _totalWithdrawn, uint256 _referralEggRewards, uint256 _lastWithdrawTime, uint256 _addSalsaDeposit, uint256 _claimedSalsa) {
+         _initialDeposit = users[_adr].initialDeposit;
+         _userDeposit = users[_adr].userDeposit;
+         _miners = users[_adr].miners;
+         _claimedEggs = users[_adr].claimedEggs;
+         _lastHatch = users[_adr].lastHatch;
+         _referrer = users[_adr].referrer;
+         _referrals = users[_adr].referralsCount;
+         _totalWithdrawn = users[_adr].totalWithdrawn;
+         _referralEggRewards = users[_adr].referralEggRewards;
+         _lastWithdrawTime = users[_adr].lastWithdrawTime;
+         _addSalsaDeposit = users[_adr].addSalsaDeposit;
+         _claimedSalsa = users[_adr].claimedSalsa;
+	}
+
+    function initialize() public{
+        if (!contractStarted) {
+    		if (msg.sender == mkt) {
+    		    require(marketEggs == 0);
+    			contractStarted = true;
+                marketEggs = 86400000000;
+    		} else revert("Contract not yet started.");
+    	}
+    }
+
+    function getBalance() public view returns (uint256) {
+        return address(this).balance;
+	}
+
+    function getTimeStamp() public view returns (uint256) {
+        return block.timestamp;
+    }
+
+    function getAvailableEarnings(address _adr) public view returns(uint256) {
+        uint256 userEggs = users[_adr].claimedEggs.add(getEggsSinceLastHatch(_adr));
+        return calculateEggSell(userEggs);
+    }
+
+    function calculateTrade(uint256 rt,uint256 rs, uint256 bs) public view returns(uint256){
+        return SafeMath.div(SafeMath.mul(PSN, bs), SafeMath.add(PSNH, SafeMath.div(SafeMath.add(SafeMath.mul(PSN, rs), SafeMath.mul(PSNH, rt)), rt)));
+    }
+
+    function calculateEggSell(uint256 eggs) public view returns(uint256){
+        return calculateTrade(eggs, marketEggs, getBalance());
+    }
+
+    function calculateEggBuy(uint256 eth,uint256 contractBalance) public view returns(uint256){
+        return calculateTrade(eth, contractBalance, marketEggs);
+    }
+
+    function calculateEggBuySimple(uint256 eth) public view returns(uint256){
+        return calculateEggBuy(eth, getBalance());
+    }
+
+    function getEggsYield(uint256 amount) public view returns(uint256,uint256) {
+        uint256 eggsAmount = calculateEggBuy(amount , getBalance().add(amount).sub(amount));
+        uint256 miners = eggsAmount.div(EGGS_TO_HIRE_1MINERS);
+        uint256 day = 1 days;
+        uint256 eggsPerDay = day.mul(miners);
+        uint256 earningsPerDay = calculateEggSellForYield(eggsPerDay, amount) + getAddSalsaSharedReward(msg.sender);
+        return(miners, earningsPerDay);
+    }
+
+    function calculateEggSellForYield(uint256 eggs,uint256 amount) public view returns(uint256){
+        return calculateTrade(eggs,marketEggs, getBalance().add(amount));
+    }
+
+    function getSiteInfo() public view returns (uint256 _totalStaked, uint256 _totalDeposits, uint256 _totalCompound, uint256 _totalRefBonus) {
+        return (totalStaked, totalDeposits, totalCompound, totalRefBonus);
+    }
+
+    function getMyMiners() public view returns(uint256){
+        return users[msg.sender].miners;
+    }
+
+    function getMyEggs() public view returns(uint256){
+        return users[msg.sender].claimedEggs.add(getEggsSinceLastHatch(msg.sender));
+    }
+
+    function getEggsSinceLastHatch(address adr) public view returns(uint256){
+        uint256 secondsSinceLastHatch = block.timestamp.sub(users[adr].lastHatch);
+                            /** get min time. **/
+        uint256 cutoffTime = min(secondsSinceLastHatch, CUTOFF_STEP);
+        uint256 secondsPassed = min(EGGS_TO_HIRE_1MINERS, cutoffTime);
+        return secondsPassed.mul(users[adr].miners);
+    }
+
+    function min(uint256 a, uint256 b) private pure returns (uint256) {
+        return a < b ? a : b;
+    }
+
+    /** wallet addresses setters **/
+    function CHANGE_OWNERSHIP(address value) external {
+        require(msg.sender == owner, "Admin use only.");
+        owner = value;
+    }
+
+    function CHANGE_MKT(address value) external {
+        require(msg.sender == owner, "Admin use only.");
+        mkt = value;
+    }
+
+    function CHANGE_SALSA_INVESTOR(address value) external {
+        require(msg.sender == owner, "Admin use only.");
+        salsaInvestor = value;
+    }
+
+    /** percentage setters **/
+
+    // 2592000 - 3%, 2160000 - 4%, 1728000 - 5%, 1440000 - 6%, 1200000 - 7%, 1080000 - 8%
+    // 959000 - 9%, 864000 - 10%, 720000 - 12%, 575424 - 15%, 540000 - 16%, 479520 - 18%
+    
+    function PRC_EGGS_TO_HIRE_1MINERS(uint256 value) external {
+        require(msg.sender == owner, "Admin use only.");
+        require(value >= 1728000 && value <= 9592000); /** min .2% max 5%**/
+        EGGS_TO_HIRE_1MINERS = value;
+    }
+
+    function PRC_MKT_TAX(uint256 value) external {
+        require(msg.sender == owner, "Admin use only.");
+        require(value <= 100); /** 10% max **/
+        MKT_TAX = value;
+    }
+
+    function PRC_OWN_TAX(uint256 value) external {
+        require(msg.sender == owner, "Admin use only.");
+        require(value <= 100); /** 10% max **/
+        OWN_TAX = value;
+    }
+
+    function PRC_REFERRAL(uint256 value) external {
+        require(msg.sender == owner, "Admin use only.");
+        require(value >= 10 && value <= 100); /** 10% max **/
+        REFERRAL = value;
+    }
+
+    function PRC_MARKET_EGGS_DIVISOR(uint256 value) external {
+        require(msg.sender == owner, "Admin use only.");
+        require(value <= 50); /** 50 = 2% **/
+        MARKET_EGGS_DIVISOR = value;
+    }
+
+    /** withdrawal tax **/
+    function SET_WITHDRAWAL_TAX(uint256 value) external {
+        require(msg.sender == owner, "Admin use only.");
+        require(value <= 990); /** Max Tax is 99% or lower **/
+        WITHDRAWAL_TAX = value;
+    }
+    
+    function SET_COMPOUND_FOR_NO_TAX_WITHDRAWAL(uint256 value) external {
+        require(msg.sender == owner, "Admin use only.");
+        COMPOUND_FOR_NO_TAX_WITHDRAWAL = value;
+    }
+
+    function BONUS_DAILY_COMPOUND(uint256 value) external {
+        require(msg.sender == owner, "Admin use only.");
+        require(value >= 10 && value <= 900);
+        COMPOUND_BONUS = value;
+    }
+
+    function BONUS_DAILY_COMPOUND_BONUS_MAX_TIMES(uint256 value) external {
+        require(msg.sender == owner, "Admin use only.");
+        require(value <= 30);
+        COMPOUND_BONUS_MAX_TIMES = value;
+    }
+
+    function BONUS_COMPOUND_STEP(uint256 value) external {
+        require(msg.sender == owner, "Admin use only.");
+        require(value <= 24);
+        COMPOUND_STEP = value * 60 * 60;
+    }
+
+    function SET_MIN_INVEST_LIMIT(uint256 value) external {
+        require(msg.sender == owner, "Admin use only");
+        MIN_INVEST_LIMIT = value * 1e6;
+    }
+
+    function SET_CUTOFF_STEP(uint256 value) external {
+        require(msg.sender == owner, "Admin use only");
+        CUTOFF_STEP = value * 60 * 60;
+    }
+
+    function SET_WITHDRAW_COOLDOWN(uint256 value) external {
+        require(msg.sender == owner, "Admin use only");
+        require(value <= 24);
+        WITHDRAW_COOLDOWN = value * 60 * 60;
+    }
+
+    function SET_WALLET_DEPOSIT_LIMIT(uint256 value) external {
+        require(msg.sender == owner, "Admin use only");
+        require(value >= 20);
+        WALLET_DEPOSIT_LIMIT = value * 1e6;
+    }
+}
+
+library SafeMath {
+  function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+    if (a == 0) {
+      return 0;
+    }
+    uint256 c = a * b;
+    assert(c / a == b);
+    return c;
+  }
+
+  function div(uint256 a, uint256 b) internal pure returns (uint256) {
+    uint256 c = a / b;
+    return c;
+  }
+
+  function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+    assert(b <= a);
+    return a - b;
+  }
+
+  function add(uint256 a, uint256 b) internal pure returns (uint256) {
+    uint256 c = a + b;
+    assert(c >= a);
+    return c;
+  }
+
+  function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+    require(b != 0);
+    return a % b;
+  }
+}
