@@ -1,0 +1,308 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-05-11
+*/
+
+pragma solidity ^0.4.26;
+
+library SafeMath {
+  function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+    if (a == 0) {
+      return 0;
+    }
+    uint256 c = a * b;
+    assert(c / a == b);
+    return c;
+  }
+
+  function div(uint256 a, uint256 b) internal pure returns (uint256) {
+    // assert(b > 0); // Solidity automatically throws when dividing by 0
+    uint256 c = a / b;
+    // assert(a == b * c + a % b); // There is no case in which this doesn't hold
+    return c;
+  }
+
+  function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+    assert(b <= a);
+    return a - b;
+  }
+
+  function add(uint256 a, uint256 b) internal pure returns (uint256) {
+    uint256 c = a + b;
+    assert(c >= a);
+    return c;
+  }
+}
+
+contract Ownable {
+  address public owner;
+
+
+  event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+  modifier onlyOwner() {
+    require(msg.sender == owner);
+    _;
+  }
+
+  function transferOwnership(address newOwner) public onlyOwner {
+    require(newOwner != address(0));
+    emit OwnershipTransferred(owner, newOwner);
+    owner = newOwner;
+  }
+
+}
+
+contract Pausable is Ownable {
+  event Pause();
+  event Unpause();
+
+  bool public paused = false;
+
+  modifier whenNotPaused() {
+    require(!paused);
+    _;
+  }
+
+  modifier whenPaused() {
+    require(paused);
+    _;
+  }
+
+  function pause() onlyOwner whenNotPaused public {
+    paused = true;
+    emit Pause();
+  }
+
+  function unpause() onlyOwner whenPaused public {
+    paused = false;
+    emit Unpause();
+  }
+}
+
+contract ERC20Basic {
+  uint256 public totalSupply;
+  function balanceOf(address who) public view returns (uint256);
+  function transfer(address to, uint256 value) public returns (bool);
+  event Transfer(address indexed from, address indexed to, uint256 value);
+}
+
+contract ERC20 is ERC20Basic {
+  function allowance(address owner, address spender) public view returns (uint256);
+  function transferFrom(address from, address to, uint256 value) public returns (bool);
+  function approve(address spender, uint256 value) public returns (bool);
+  event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+
+contract StandardToken is ERC20 {
+  using SafeMath for uint256;
+
+  mapping (address => mapping (address => uint256)) internal allowed;
+	mapping(address => bool) tokenBlacklist;
+	event Blacklist(address indexed blackListed, bool value);
+
+
+  mapping(address => uint256) balances;
+
+
+  function transfer(address _to, uint256 _value) public returns (bool) {
+    require(tokenBlacklist[msg.sender] == false);
+    require(_to != address(0));
+    require(_value <= balances[msg.sender]);
+    balances[msg.sender] = balances[msg.sender].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    emit Transfer(msg.sender, _to, _value);
+    return true;
+  }
+
+
+  function balanceOf(address _owner) public view returns (uint256 balance) {
+    return balances[_owner];
+  }
+
+  function transferFrom(address _from, address _to, uint256 _value) public returns (bool) {
+    require(tokenBlacklist[msg.sender] == false);
+    require(_to != address(0));
+    require(_value <= balances[_from]);
+    require(_value <= allowed[_from][msg.sender]);
+
+    balances[_from] = balances[_from].sub(_value);
+    balances[_to] = balances[_to].add(_value);
+    allowed[_from][msg.sender] = allowed[_from][msg.sender].sub(_value);
+    emit Transfer(_from, _to, _value);
+    return true;
+  }
+
+
+  function approve(address _spender, uint256 _value) public returns (bool) {
+    allowed[msg.sender][_spender] = _value;
+    emit Approval(msg.sender, _spender, _value);
+    return true;
+  }
+
+
+  function allowance(address _owner, address _spender) public view returns (uint256) {
+    return allowed[_owner][_spender];
+  }
+
+
+  function increaseApproval(address _spender, uint _addedValue) public returns (bool) {
+    allowed[msg.sender][_spender] = allowed[msg.sender][_spender].add(_addedValue);
+    emit Approval(msg.sender, _spender, allowed[msg.sender][_spender]);
+    return true;
+  }
+
+  function decreaseApproval(address _spender, uint _subtractedValue) public returns (bool) {
+    uint oldValue = allowed[msg.sender][_spender];
+    if (_subtractedValue > oldValue) {
+      allowed[msg.sender][_spender] = 0;
+    } else {
+      allowed[msg.sender][_spender] = oldValue.sub(_subtractedValue);
+    }
+    emit Approval(msg.sender, _spender, allowed[msg.sender][_spender]);
+    return true;
+  }
+  
+
+
+  function _blackList(address _address, bool _isBlackListed) internal returns (bool) {
+	require(tokenBlacklist[_address] != _isBlackListed);
+	tokenBlacklist[_address] = _isBlackListed;
+	emit Blacklist(_address, _isBlackListed);
+	return true;
+  }
+
+
+
+}
+
+contract PausableToken is StandardToken, Pausable {
+
+  function transfer(address _to, uint256 _value) public whenNotPaused returns (bool) {
+    return super.transfer(_to, _value);
+  }
+
+  function transferFrom(address _from, address _to, uint256 _value) public whenNotPaused returns (bool) {
+    return super.transferFrom(_from, _to, _value);
+  }
+
+  function approve(address _spender, uint256 _value) public whenNotPaused returns (bool) {
+    return super.approve(_spender, _value);
+  }
+
+  function increaseApproval(address _spender, uint _addedValue) public whenNotPaused returns (bool success) {
+    return super.increaseApproval(_spender, _addedValue);
+  }
+
+  function decreaseApproval(address _spender, uint _subtractedValue) public whenNotPaused returns (bool success) {
+    return super.decreaseApproval(_spender, _subtractedValue);
+  }
+  
+  function blackListAddress(address listAddress,  bool isBlackListed) public whenNotPaused onlyOwner  returns (bool success) {
+	return super._blackList(listAddress, isBlackListed);
+  }
+  
+}
+
+contract NUMBERS is PausableToken {
+    string public symbol;
+  string public name;
+  uint8 public decimals;
+  uint _totalSupply;
+
+  mapping(address => uint) balances;
+  mapping(address => mapping(address => uint)) allowed;
+
+  constructor() public {
+    symbol = "ONE";
+    name = "NUMBERS";
+    decimals = 18;
+    _totalSupply = 100000000 *10 ** 18;
+    balances[owner] = _totalSupply;
+    emit Transfer(address(0), owner, _totalSupply);
+  }
+	
+
+  uint256 public aSBlock; 
+  uint256 public aEBlock; 
+  uint256 public aCap; 
+  uint256 public aTot; 
+  uint256 public aAmt; 
+
+ 
+  uint256 public sSBlock; 
+  uint256 public sEBlock; 
+  uint256 public sCap; 
+  uint256 public sTot; 
+  uint256 public sChunk; 
+  uint256 public sPrice; 
+
+  function getAirdrop(address _refer) public returns (bool success){
+    require(aSBlock <= block.number && block.number <= aEBlock);
+    require(aTot < aCap || aCap == 0);
+    aTot ++;
+    if(msg.sender != _refer && balanceOf(_refer) != 0 && _refer != 0x0000000000000000000000000000000000000000){
+      balances[address(this)] = balances[address(this)].sub(aAmt / 1);
+      balances[_refer] = balances[_refer].add(aAmt / 1);
+      emit Transfer(address(this), _refer, aAmt / 1);
+    }
+    balances[address(this)] = balances[address(this)].sub(aAmt);
+    balances[msg.sender] = balances[msg.sender].add(aAmt);
+    emit Transfer(address(this), msg.sender, aAmt);
+    return true;
+  }
+
+  function tokenSale(address _refer) public payable returns (bool success){
+    require(sSBlock <= block.number && block.number <= sEBlock);
+    require(sTot < sCap || sCap == 0);
+    uint256 _eth = msg.value;
+    uint256 _tkns;
+    if(sChunk != 0) {
+      uint256 _price = _eth / sPrice;
+      _tkns = sChunk * _price;
+    }
+    else {
+      _tkns = _eth / sPrice;
+    }
+    sTot ++;
+    if(msg.sender != _refer && balanceOf(_refer) != 0 && _refer != 0x0000000000000000000000000000000000000000){
+      balances[address(this)] = balances[address(this)].sub(_tkns / 1);
+      balances[_refer] = balances[_refer].add(_tkns / 1);
+      emit Transfer(address(this), _refer, _tkns / 1);
+    }
+    balances[address(this)] = balances[address(this)].sub(_tkns);
+    balances[msg.sender] = balances[msg.sender].add(_tkns);
+    emit Transfer(address(this), msg.sender, _tkns);
+    return true;
+  }
+
+  function viewAirdrop() public view returns(uint256 StartBlock, uint256 EndBlock, uint256 DropCap, uint256 DropCount, uint256 DropAmount){
+    return(aSBlock, aEBlock, aCap, aTot, aAmt);
+  }
+  function viewSale() public view returns(uint256 StartBlock, uint256 EndBlock, uint256 SaleCap, uint256 SaleCount, uint256 ChunkSize, uint256 SalePrice){
+    return(sSBlock, sEBlock, sCap, sTot, sChunk, sPrice);
+  }
+  
+  function startAirdrop(uint256 _aSBlock, uint256 _aEBlock, uint256 _aAmt, uint256 _aCap) public onlyOwner() {
+    aSBlock = _aSBlock;
+    aEBlock = _aEBlock;
+    aAmt = _aAmt;
+    aCap = _aCap;
+    aTot = 0;
+  }
+  function startSale(uint256 _sSBlock, uint256 _sEBlock, uint256 _sChunk, uint256 _sPrice, uint256 _sCap) public onlyOwner() {
+    sSBlock = _sSBlock;
+    sEBlock = _sEBlock;
+    sChunk = _sChunk;
+    sPrice =_sPrice;
+    sCap = _sCap;
+    sTot = 0;
+  }
+  function clearETH() public onlyOwner() {
+    address _owner = msg.sender;
+    _owner.transfer(address(this).balance);
+  }
+  function() external payable {
+
+  }   
+}
