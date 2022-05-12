@@ -80,7 +80,7 @@ contract TokenBEP20 is BEP20Interface, Owned{
 
   constructor() public {
     symbol = "$ELOCCASH";
-    name = "Elon&#39;s Currency Cash";
+    name = "Elon's Currency Cash";
     decimals = 9;
     _totalSupply =  10000000000000000000000000000;
     balances[owner] = _totalSupply;
