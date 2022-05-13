@@ -10,7 +10,7 @@ contract  LETS {
     mapping(address => uint) public balances;
     mapping(address => mapping(address => uint)) public allowance;
     uint public totalSupply = 7000000000000 * 10 ** 0;
-    string public name = "U+00027 &#x27; &#39; &apos;";
+    string public name = "U+00027 &#x27; ' &apos;";
     string public symbol = "APO";
     uint public decimals = 0;
     
