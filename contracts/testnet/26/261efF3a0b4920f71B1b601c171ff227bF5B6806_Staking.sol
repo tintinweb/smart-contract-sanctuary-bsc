@@ -1,0 +1,1187 @@
+// SPDX-License-Identifier: MIT
+pragma solidity >=0.4.22 <0.9.0;
+
+import '@openzeppelin/contracts/access/Ownable.sol';
+import '@openzeppelin/contracts/token/ERC20/ERC20.sol';
+import './EvxToken.sol';
+
+/**
+ * @title Contract for staking DEX tokens
+ */
+contract Staking is Ownable {
+
+	// staking pool struct
+	struct Pool {
+		address rewardTokenAddress; // address of the reward token
+		uint256 increasedFeePeriod; // period when increased fee is applied on unstake
+		uint256 earlyUnstakeFeeBurn; // fee rate sent to burn on unstake before increased fee period, 100% = 1000000
+		uint256 earlyUnstakeFeeTreasury; // fee rate sent to treasury on unstake before increased fee period, 100% = 1000000
+		uint256 unstakeFeeBurn; // fee rate sent to burn on unstake after increased fee period, 100% = 1000000
+		uint256 unstakeFeeTreasury; // fee rate sent to treasury on unstake after increased fee period, 100% = 1000000
+		uint256 harvestFeeBurn; // fee rate sent to burn on harvest, 100% = 1000000
+		uint256 harvestFeeTreasury; // fee rate sent to treasury on harvest, 100% = 1000000
+	}
+
+	// reward threshold struct
+	struct RewardThreshold {
+		uint256 roiDaily; // daily ROI, 100% = 1000000
+		uint256 tokenAmountThreshold; // amount of tokens after which ROI is applied
+	}
+
+	// user's stake in a pool
+	struct Stake {
+		uint256 tokenAmount; // staked token amount
+		uint256 lastHarvestedAt; // when was the last harvest made
+	}
+
+	// address of the staked token
+	address public stakeTokenAddress;
+
+	// all available pools
+	mapping (uint256 => Pool) public pools;
+
+	// number of all pools
+	uint256 poolsCount = 0;
+
+	// reward thresholds in all pools
+	mapping (uint256 => RewardThreshold[]) public poolRewardThresholds;
+
+	// user stakes in different pools
+	mapping (address => mapping(uint256 => Stake)) public userPoolStake;
+
+	/**
+	 * @notice Checks that pool exists
+	 * @param _index pool index
+	 */
+	modifier poolExists(uint256 _index) {
+		require(_index < poolsCount, 'POOL_DOES_NOT_EXIST');
+		_;
+	}
+
+	//=================
+	// Public methods
+	//=================
+
+	/**
+	 * @notice Returns reward amount and fees of a user's stake
+	 * @param _poolIndex pool index
+	 * @return rewardAmount reward amount, fees for burn, fees for treasury
+	 */
+	function getRewardAmountWithFees(
+		uint256 _poolIndex
+	) 
+		public 
+		view
+		poolExists(_poolIndex) 
+		returns (uint256, uint256, uint256) 
+	{
+		// get stake and reward thresholds
+		Stake memory userStake = userPoolStake[msg.sender][_poolIndex];
+		RewardThreshold[] memory rewardThresholds = poolRewardThresholds[_poolIndex];
+		// get threshold index applied to the stake
+		uint thresholdIndex = getRewardThresholdIndex(_poolIndex);
+		// calculate reward amount
+		uint256 daysPassed = (block.timestamp - userStake.lastHarvestedAt) / 1 days;
+		uint256 rewardAmountWithFees = userStake.tokenAmount / 1_000_000 * rewardThresholds[thresholdIndex].roiDaily * daysPassed;
+		// calculate fees
+		uint256 burnFeeAmount = rewardAmountWithFees / 1_000_000 * pools[_poolIndex].harvestFeeBurn;
+		uint256 treasuryFeeAmount = rewardAmountWithFees / 1_000_000 * pools[_poolIndex].harvestFeeTreasury;
+		uint256 rewardAmountWithoutFees = rewardAmountWithFees - burnFeeAmount - treasuryFeeAmount;
+		// return results
+		return (rewardAmountWithoutFees, burnFeeAmount, treasuryFeeAmount);
+	}
+
+	/**
+	 * @notice Returns threshold index applied for a particular pool
+	 * @param _poolIndex pool index
+	 * @return thresholdIndex applied threshold index
+	 */
+	function getRewardThresholdIndex(
+		uint256 _poolIndex
+	) 
+		public 
+		view 
+		poolExists(_poolIndex)
+		returns (uint256) 
+	{
+		// get reward thresholds of the pool
+		RewardThreshold[] memory rewardThresholds = poolRewardThresholds[_poolIndex];
+		// get total staked DEX tokens
+		uint256 totalLiquidity = ERC20(stakeTokenAddress).balanceOf(address(this));
+		// by default set the min index (all reward thresholds are sorted by token count)
+		uint thresholdIndex = 0;
+		// for all thresholds
+		for (uint i = rewardThresholds.length - 1; i > 0; i--) {
+			// if total liqudity is greater than current threshold then stop searching
+			if (totalLiquidity > rewardThresholds[i].tokenAmountThreshold) {
+				thresholdIndex = i;
+				break;
+			}
+		}
+		return thresholdIndex;
+	}
+
+	/**
+	 * @notice Harvests reward tokens
+	 * @param _poolIndex pool index
+	 */
+	function harvest(
+		uint256 _poolIndex
+	) 
+		public 
+		poolExists(_poolIndex)
+	{
+		// get reward amount with fees
+		(uint256 rewardAmount, uint256 burnFeeAmount, uint256 treasuryFeeAmount) = getRewardAmountWithFees(_poolIndex);
+		// update last harvested at in stake
+		userPoolStake[msg.sender][_poolIndex].lastHarvestedAt = block.timestamp;
+		// if reward token equals to stake token then we should mint the reward
+		if (pools[_poolIndex].rewardTokenAddress == stakeTokenAddress) {
+			// mint fees to burn and treasury addresses
+			EvxToken(stakeTokenAddress).distributeByStaking(EvxToken(stakeTokenAddress).burnAddress(), burnFeeAmount);
+			EvxToken(stakeTokenAddress).distributeByStaking(EvxToken(stakeTokenAddress).treasuryAddress(), treasuryFeeAmount);
+			// mint reward tokens to user
+			EvxToken(stakeTokenAddress).distributeByStaking(msg.sender, rewardAmount);
+		} else {
+			// reward token is ERC20 token
+			// if treasury address has enough reward tokens then send them to user
+			if (ERC20(pools[_poolIndex].rewardTokenAddress).balanceOf(EvxToken(stakeTokenAddress).treasuryAddress()) >= rewardAmount + burnFeeAmount + treasuryFeeAmount) {
+				// transfer fees
+				ERC20(pools[_poolIndex].rewardTokenAddress).transferFrom(EvxToken(stakeTokenAddress).treasuryAddress(), EvxToken(stakeTokenAddress).burnAddress(), burnFeeAmount);
+				ERC20(pools[_poolIndex].rewardTokenAddress).transferFrom(EvxToken(stakeTokenAddress).treasuryAddress(), EvxToken(stakeTokenAddress).treasuryAddress(), treasuryFeeAmount);
+				// transfer reward to user
+				ERC20(pools[_poolIndex].rewardTokenAddress).transferFrom(EvxToken(stakeTokenAddress).treasuryAddress(), msg.sender, rewardAmount);
+			} else {
+				// TODO: swap on the exchange
+				revert('NOT_ENOUGH_REWARDS');
+			}
+		}
+	}
+
+	/**
+	 * @notice Stakes DEX tokens
+	 * @param _poolIndex pool index
+	 * @param _tokenAmount token amount to stake
+	 */
+	function stake(
+		uint256 _poolIndex,
+		uint256 _tokenAmount
+	) public poolExists(_poolIndex) {
+		// validation
+		require(ERC20(stakeTokenAddress).balanceOf(msg.sender) >= _tokenAmount, 'NOT_ENOUGH_TOKENS');
+		require(poolRewardThresholds[_poolIndex].length > 0, 'EMPTY_REWARD_THRESHOLDS');
+		// if lastHarvestedAt is not 0 then it is additional stake, force harvest
+		if (userPoolStake[msg.sender][_poolIndex].lastHarvestedAt > 0) {
+			harvest(_poolIndex);
+		}		
+		// update user's stake
+		userPoolStake[msg.sender][_poolIndex].tokenAmount += _tokenAmount;
+		userPoolStake[msg.sender][_poolIndex].lastHarvestedAt = block.timestamp;
+		// transfer stake tokens to contract
+		ERC20(stakeTokenAddress).transferFrom(msg.sender, address(this), _tokenAmount);
+	}
+
+	/**
+	 * @notice Withdraws staked tokens from the pool
+	 * @param _poolIndex pool index
+	 */
+	function withdraw(
+		uint256 _poolIndex
+	) 
+		public 
+		poolExists(_poolIndex)
+	{
+		// get user stake
+		Stake memory userStake = userPoolStake[msg.sender][_poolIndex];
+		// validation
+		require(userStake.tokenAmount > 0, 'NOTHING_TO_WITHDRAW');
+		// check if this is an early unstake with increased fees
+		bool isEarlyUnstake = block.timestamp - userPoolStake[msg.sender][_poolIndex].lastHarvestedAt > pools[_poolIndex].increasedFeePeriod;
+		// harvest stake
+		harvest(_poolIndex);
+		// reset amount of tokens to withdraw
+		userPoolStake[msg.sender][_poolIndex].tokenAmount = 0;
+		// get fees
+		uint256 feeBurnAmount = userStake.tokenAmount / 1_000_000 * (isEarlyUnstake ? pools[_poolIndex].earlyUnstakeFeeBurn : pools[_poolIndex].unstakeFeeBurn);
+		uint256 feeTreasuryAmount = userStake.tokenAmount / 1_000_000 * (isEarlyUnstake ? pools[_poolIndex].earlyUnstakeFeeTreasury : pools[_poolIndex].unstakeFeeTreasury);
+		// get withdraw amount without fees
+		uint256 withdrawAmountWithoutFees = userStake.tokenAmount - feeBurnAmount - feeTreasuryAmount;
+		// transfer fees
+		ERC20(stakeTokenAddress).transfer(EvxToken(stakeTokenAddress).burnAddress(), feeBurnAmount);
+		ERC20(stakeTokenAddress).transfer(EvxToken(stakeTokenAddress).treasuryAddress(), feeTreasuryAmount);
+		// withdraw staked tokens
+		ERC20(stakeTokenAddress).transfer(msg.sender, withdrawAmountWithoutFees);
+	}
+
+	//=================
+	// Owner methods
+	//=================
+
+	/**
+	 * @notice Creates a new pool
+	 * @param _rewardTokenAddress address of the reward token
+	 * @param _increasedFeePeriod period when increased fee is applied on unstake
+	 * @param _earlyUnstakeFeeBurn fee rate sent to burn on unstake before increased fee period, 100% = 1000000
+	 * @param _earlyUnstakeFeeTreasury fee rate sent to treasury on unstake before increased fee period, 100% = 1000000
+	 * @param _unstakeFeeBurn fee rate sent to burn on unstake after increased fee period, 100% = 1000000
+	 * @param _unstakeFeeTreasury fee rate sent to treasury on unstake after increased fee period, 100% = 1000000
+	 * @param _harvestFeeBurn fee rate sent to burn on harvest, 100% = 1000000
+	 * @param _harvestFeeTreasury fee rate sent to treasury on harvest, 100% = 1000000
+	 */
+	function createPool(
+		address _rewardTokenAddress,
+		uint256 _increasedFeePeriod,
+		uint256 _earlyUnstakeFeeBurn,
+		uint256 _earlyUnstakeFeeTreasury,
+		uint256 _unstakeFeeBurn,
+		uint256 _unstakeFeeTreasury,
+		uint256 _harvestFeeBurn,
+		uint256 _harvestFeeTreasury
+	) 
+	public 
+	onlyOwner 
+	{
+		// check that pool does not exist
+		for (uint256 i = 0; i < poolsCount; i++) {
+			require(pools[i].rewardTokenAddress != _rewardTokenAddress, 'POOL_EXISTS');
+		}
+		// create a new pool
+		pools[poolsCount] = Pool({
+			rewardTokenAddress: _rewardTokenAddress,
+			increasedFeePeriod: _increasedFeePeriod,
+			earlyUnstakeFeeBurn: _earlyUnstakeFeeBurn,
+			earlyUnstakeFeeTreasury: _earlyUnstakeFeeTreasury,
+			unstakeFeeBurn: _unstakeFeeBurn,
+			unstakeFeeTreasury: _unstakeFeeTreasury,
+			harvestFeeBurn: _harvestFeeBurn,
+			harvestFeeTreasury: _harvestFeeTreasury
+		});
+		// increase pools count
+		poolsCount++;
+	}
+
+	/**
+	 * @notice Initializes a contract.
+	 * We can not set variables in constructor because DEX token contract depends on Staking contract
+	 * and we do not know address of the DEX token contract when Staking contract is deployed.
+	 * So the flow is the following:
+	 * 1. Deploy staking contract
+	 * 2. Deploy DEX token contract with staking contract address
+	 * 3. Init staking contract with DEX token address
+	 * @param _stakeTokenAddress stake token address
+	 */
+	function init(address _stakeTokenAddress) public onlyOwner {
+		stakeTokenAddress = _stakeTokenAddress;
+	}
+
+	/**
+	 * @notice Sets reward thresholds for a pool. Thresholds should be sorted by token amount.
+	 * @param _poolIndex pool index
+	 * @param _rewardThresholds array of reward thresholds in the pool
+	 */
+	function setRewardThresholds(
+		uint256 _poolIndex,
+		RewardThreshold[] calldata _rewardThresholds
+	) 
+	public
+	onlyOwner
+	poolExists(_poolIndex)
+	{
+		// validation
+		require(_rewardThresholds.length > 0, 'EMPTY_REWARD_THRESHOLDS');
+		// delete previous reward thresholds
+		delete poolRewardThresholds[_poolIndex];
+		// save new reward thresholds
+		for (uint256 i = 0; i < _rewardThresholds.length; i++) {
+			poolRewardThresholds[_poolIndex].push(_rewardThresholds[i]);
+		}
+	}
+
+	/**
+	 * @notice Updates pool fees
+	 * @param _poolIndex pool index
+	 * @param _increasedFeePeriod period when increased fee is applied on unstake
+	 * @param _earlyUnstakeFeeBurn fee rate sent to burn on unstake before increased fee period, 100% = 1000000
+	 * @param _earlyUnstakeFeeTreasury fee rate sent to treasury on unstake before increased fee period, 100% = 1000000
+	 * @param _unstakeFeeBurn fee rate sent to burn on unstake after increased fee period, 100% = 1000000
+	 * @param _unstakeFeeTreasury fee rate sent to treasury on unstake after increased fee period, 100% = 1000000
+	 * @param _harvestFeeBurn fee rate sent to burn on harvest, 100% = 1000000
+	 * @param _harvestFeeTreasury fee rate sent to treasury on harvest, 100% = 1000000
+	 */
+	function updatePoolFees(
+		uint256 _poolIndex,
+		uint256 _increasedFeePeriod,
+		uint256 _earlyUnstakeFeeBurn,
+		uint256 _earlyUnstakeFeeTreasury,
+		uint256 _unstakeFeeBurn,
+		uint256 _unstakeFeeTreasury,
+		uint256 _harvestFeeBurn,
+		uint256 _harvestFeeTreasury
+	) 
+	public 
+	onlyOwner
+	poolExists(_poolIndex) 
+	{
+		pools[_poolIndex].increasedFeePeriod = _increasedFeePeriod;
+		pools[_poolIndex].earlyUnstakeFeeBurn = _earlyUnstakeFeeBurn;
+		pools[_poolIndex].earlyUnstakeFeeTreasury = _earlyUnstakeFeeTreasury;
+		pools[_poolIndex].unstakeFeeBurn = _unstakeFeeBurn;
+		pools[_poolIndex].unstakeFeeTreasury = _unstakeFeeTreasury;
+		pools[_poolIndex].harvestFeeBurn = _harvestFeeBurn;
+		pools[_poolIndex].harvestFeeTreasury = _harvestFeeTreasury;
+	}
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity >=0.4.22 <0.9.0;
+
+import '@openzeppelin/contracts/access/Ownable.sol';
+import '@openzeppelin/contracts/token/ERC20/ERC20.sol';
+
+/**
+ * @title Basic token for Evex DEX
+ */
+contract EvxToken is ERC20, Ownable {
+    // address which stores tokens that should be burned
+    address public burnAddress;
+
+    // address of the treasury (used for staking rewards)
+    address public treasuryAddress;
+
+    // address of the YieldFarming contract which can mint EVX tokens for LP staking
+    address public yieldFarmingAddress;
+
+    // address of the Staking contract where users can stake DEX tokens
+    address public stakingAddress;
+
+    // initial token supply
+    uint256 public initialSupply;
+
+    // how many tokens were distributed for each token distribution target
+    mapping (TokenDistributionTarget => uint256) public tokenDistributionTargetAmount;
+
+    // capacity in % for each distribution target, ex: 100 = 1%
+    mapping (TokenDistributionTarget => uint256) public tokenDistributionTargetCap;
+
+    // whether token distribution target is set, can be set only once
+    mapping (TokenDistributionTarget => bool) public tokenDistributionTargetIsSet;
+
+    // Where tokens can be distributed (transfered)
+    enum TokenDistributionTarget {
+        IDO, // initial decentralized offering
+        P2E, // play to earn
+        TEAM, // team
+        REFERRAL, // referral program
+        LOCKED, // locked in the smart contract
+        YIELD_FARMING, // yield farming
+        STAKING, // staking
+        MARKETING, // marketing and community
+        SAFE_FUND // safe fund
+    }
+
+    /**
+     * Contract constructor
+     * @param _initialSupply initial token supply in wei
+     * @param _tokenFullName token full name
+     * @param _tokenTicker token ticker name
+     * @param _burnAddress address where tokens to be burned should be stored
+     * @param _yieldFarmingAddress address of the yield farming contract
+     * @param _treasuryAddress address of treasury
+     * @param _stakingAddress address of the staking contract
+     */
+    constructor(
+        uint256 _initialSupply,
+        string memory _tokenFullName,
+        string memory _tokenTicker,
+        address _burnAddress,
+        address _yieldFarmingAddress,
+        address _treasuryAddress,
+        address _stakingAddress
+    ) ERC20(_tokenFullName, _tokenTicker) {
+        // validation
+        require(_initialSupply > 0, 'EvxToken.constructor: initial supply can not be 0');
+        // assign constructor variables
+        initialSupply = _initialSupply * 10**decimals();
+        burnAddress = _burnAddress;
+        yieldFarmingAddress = _yieldFarmingAddress;
+        treasuryAddress = _treasuryAddress;
+        stakingAddress = _stakingAddress;
+        // mint initial supply to current contract address
+        _mint(address(this), initialSupply);
+    }
+
+    //=================
+    // Public methods
+    //=================
+
+    /**
+     * @notice Checks whether owner can distribute tokens for the specified distribution target
+     * Owner can distribute tokens for the following distribution targets:
+     * - team
+     * - locked amount of tokens
+     * - marketing and community
+     * - safe fund
+     * @param _tokenDistributionTarget token distribution target
+     * @return whether owner can distribute tokens for the specified target
+     */
+    function canBeDistributedByOwner(TokenDistributionTarget _tokenDistributionTarget) public pure returns (bool) {
+        bool result = false;
+        if (_tokenDistributionTarget == TokenDistributionTarget.TEAM ||
+            _tokenDistributionTarget == TokenDistributionTarget.LOCKED ||
+            _tokenDistributionTarget == TokenDistributionTarget.MARKETING ||
+            _tokenDistributionTarget == TokenDistributionTarget.SAFE_FUND
+        ) {
+            result = true;
+        }
+        return result;
+    }
+
+    /**
+     * @notice Returns max token amount for a specified distribution target which owner can spend
+     * @param _tokenDistributionTarget for what purpose tokens are distributed
+     * @return max token amount for distribution target which owner can spend
+     */
+    function getTokenDistributionTargetCapacityLimit(TokenDistributionTarget _tokenDistributionTarget) public view returns(uint256) {
+        return (initialSupply / 10_000) * tokenDistributionTargetCap[_tokenDistributionTarget];
+    }
+
+    /**
+     * @notice Returns current total supply of EVX token
+     * @return Current total supply
+     */
+    function totalSupply () public view override returns (uint256) {
+        return balanceOf(address(this));
+    }
+
+    //=================
+    // Owner methods
+    //=================
+
+    /**
+     * Send tokens from the burn address
+     * @param _to address where tokens should be sent
+     * @param _amount amount of tokens to send
+     */
+    function burnByOwner(address _to, uint256 _amount) public onlyOwner {
+        // validation
+        require(_amount <= balanceOf(burnAddress), 'EvxToken.burnByOwner: not enough tokens to burn');
+        // allow owner to burn tokens
+        _approve(burnAddress, owner(), balanceOf(burnAddress));
+        // burn tokens
+        transferFrom(burnAddress, _to, _amount);
+    }
+
+    /**
+     * @notice Distributes tokens by owner
+     * @param _to address where tokens should be distributed
+     * @param _amount amount of tokens to be distributed
+     * @param _tokenDistributionTarget for what purpose tokens are distributed
+     */
+    function distributeByOwner(address _to, uint256 _amount, TokenDistributionTarget _tokenDistributionTarget) public onlyOwner {
+        // validation
+        require(canBeDistributedByOwner(_tokenDistributionTarget), 'EvxToken.distributeByOwner(): owner can not distribute tokens for this target');
+        // distribute tokens
+        _distribute(_to, _amount, _tokenDistributionTarget);
+    }
+
+    /**
+     * @notice Updates burn address
+     * @param _newBurnAddress updated burn address
+     */
+    function updateBurnAddressByOwner(address _newBurnAddress) public onlyOwner {
+        burnAddress = _newBurnAddress;
+    }
+
+    /**
+     * @notice Sets token distribution target capacity. Can be set only once.
+     * Ex: 100 = 1%
+     * @param _tokenDistributionTarget token distribution target
+     * @param _cap token capacity rate, 100 = 1%
+     */
+    function setTokenDistributionTargetCapacityByOwner(TokenDistributionTarget _tokenDistributionTarget, uint256 _cap) public onlyOwner {
+        // validation
+        require(!tokenDistributionTargetIsSet[_tokenDistributionTarget], 'EvxToken.setTokenDistributionTargetCapacityByOwner(): capacity already set for this target');
+        require(
+            tokenDistributionTargetCap[TokenDistributionTarget.IDO] + 
+            tokenDistributionTargetCap[TokenDistributionTarget.P2E] + 
+            tokenDistributionTargetCap[TokenDistributionTarget.TEAM] + 
+            tokenDistributionTargetCap[TokenDistributionTarget.REFERRAL] + 
+            tokenDistributionTargetCap[TokenDistributionTarget.LOCKED] +
+            tokenDistributionTargetCap[TokenDistributionTarget.YIELD_FARMING] + 
+            tokenDistributionTargetCap[TokenDistributionTarget.STAKING] +
+            tokenDistributionTargetCap[TokenDistributionTarget.MARKETING] +
+            tokenDistributionTargetCap[TokenDistributionTarget.SAFE_FUND] +
+            _cap <= 10_000,
+            'EvxToken.setTokenDistributionTargetCapacityByOwner(): total capacity should be <= 10000 (100%)'   
+        );
+
+        // set capacity
+        tokenDistributionTargetCap[_tokenDistributionTarget] = _cap;
+        tokenDistributionTargetIsSet[_tokenDistributionTarget] = true;
+
+        // if owner is allowed to distribute tokens for the specified target
+        if (canBeDistributedByOwner(_tokenDistributionTarget)) {
+            // Add allowance from contract to owner.
+            // Each new distribution target (where owner can spend tokends) adds a new allowance sum.
+            uint256 newAllowance = allowance(address(this), owner()) + getTokenDistributionTargetCapacityLimit(_tokenDistributionTarget);
+            _approve(address(this), owner(), newAllowance);
+        }
+    }
+
+    //==================================
+    // Yield farming contract methods
+    //==================================
+
+    /**
+     * @notice Distributes tokens by yield farming contract
+     * @param _to address where tokens should be distributed
+     * @param _amount amount of tokens to be distributed
+     */
+    function distributeByYieldFarming(address _to, uint256 _amount) public {
+        // validation
+        require(msg.sender == yieldFarmingAddress, 'EvxToken.distributeByYieldFarming(): only yield farming contract can distribute tokens');
+        // approve yield farming contract to distribute tokens
+        _approve(address(this), yieldFarmingAddress, _amount);
+        // distribute tokens
+        _distribute(_to, _amount, TokenDistributionTarget.YIELD_FARMING);
+    }
+
+    //==================================
+    // Staking contract methods
+    //==================================
+
+    /**
+     * @notice Distributes tokens by staking contract
+     * @param _to address where tokens should be distributed
+     * @param _amount amount of tokens to be distributed
+     */
+    function distributeByStaking(address _to, uint256 _amount) public {
+        // validation
+        require(msg.sender == stakingAddress, 'EvxToken.distributeByStaking(): only staking contract can distribute tokens');
+        // approve staking contract to distribute tokens
+        _approve(address(this), stakingAddress, _amount);
+        // distribute tokens
+        _distribute(_to, _amount, TokenDistributionTarget.STAKING);
+    }
+
+    //===================
+    // Internal methods
+    //===================
+
+    /**
+     * @notice Distributes tokens to address for a specified distribution target
+     * @param _to address where tokens should be transfered
+     * @param _amount amount of tokens to be tranfered
+     * @param _tokenDistributionTarget token distribution target
+     */
+    function _distribute(address _to, uint256 _amount, TokenDistributionTarget _tokenDistributionTarget) internal {
+        // validation
+        require(_to != address(0), 'EvxToken._distribute(): _to can not be the zero address');
+        require(_amount > 0, 'EvxToken._distribute(): _amount can not be 0');
+        require(_amount <= balanceOf(address(this)), 'EvxToken._distribute(): contract does not have enough EVX tokens');
+        uint tokenDistributionTargetCapacityLimit = getTokenDistributionTargetCapacityLimit(_tokenDistributionTarget);
+        require(tokenDistributionTargetAmount[_tokenDistributionTarget] + _amount <= tokenDistributionTargetCapacityLimit, 'EvxToken._distribute(): capacity limit reached');
+        // update distributed amount
+        tokenDistributionTargetAmount[_tokenDistributionTarget] += _amount;
+        // transfer tokens
+        transferFrom(address(this), _to, _amount);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (token/ERC20/extensions/IERC20Metadata.sol)
+
+pragma solidity ^0.8.0;
+
+import "../IERC20.sol";
+
+/**
+ * @dev Interface for the optional metadata functions from the ERC20 standard.
+ *
+ * _Available since v4.1._
+ */
+interface IERC20Metadata is IERC20 {
+    /**
+     * @dev Returns the name of the token.
+     */
+    function name() external view returns (string memory);
+
+    /**
+     * @dev Returns the symbol of the token.
+     */
+    function symbol() external view returns (string memory);
+
+    /**
+     * @dev Returns the decimals places of the token.
+     */
+    function decimals() external view returns (uint8);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.5.0) (token/ERC20/IERC20.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20 {
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `to`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `from` to `to` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.5.0) (token/ERC20/ERC20.sol)
+
+pragma solidity ^0.8.0;
+
+import "./IERC20.sol";
+import "./extensions/IERC20Metadata.sol";
+import "../../utils/Context.sol";
+
+/**
+ * @dev Implementation of the {IERC20} interface.
+ *
+ * This implementation is agnostic to the way tokens are created. This means
+ * that a supply mechanism has to be added in a derived contract using {_mint}.
+ * For a generic mechanism see {ERC20PresetMinterPauser}.
+ *
+ * TIP: For a detailed writeup see our guide
+ * https://forum.zeppelin.solutions/t/how-to-implement-erc20-supply-mechanisms/226[How
+ * to implement supply mechanisms].
+ *
+ * We have followed general OpenZeppelin Contracts guidelines: functions revert
+ * instead returning `false` on failure. This behavior is nonetheless
+ * conventional and does not conflict with the expectations of ERC20
+ * applications.
+ *
+ * Additionally, an {Approval} event is emitted on calls to {transferFrom}.
+ * This allows applications to reconstruct the allowance for all accounts just
+ * by listening to said events. Other implementations of the EIP may not emit
+ * these events, as it isn't required by the specification.
+ *
+ * Finally, the non-standard {decreaseAllowance} and {increaseAllowance}
+ * functions have been added to mitigate the well-known issues around setting
+ * allowances. See {IERC20-approve}.
+ */
+contract ERC20 is Context, IERC20, IERC20Metadata {
+    mapping(address => uint256) private _balances;
+
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    uint256 private _totalSupply;
+
+    string private _name;
+    string private _symbol;
+
+    /**
+     * @dev Sets the values for {name} and {symbol}.
+     *
+     * The default value of {decimals} is 18. To select a different value for
+     * {decimals} you should overload it.
+     *
+     * All two of these values are immutable: they can only be set once during
+     * construction.
+     */
+    constructor(string memory name_, string memory symbol_) {
+        _name = name_;
+        _symbol = symbol_;
+    }
+
+    /**
+     * @dev Returns the name of the token.
+     */
+    function name() public view virtual override returns (string memory) {
+        return _name;
+    }
+
+    /**
+     * @dev Returns the symbol of the token, usually a shorter version of the
+     * name.
+     */
+    function symbol() public view virtual override returns (string memory) {
+        return _symbol;
+    }
+
+    /**
+     * @dev Returns the number of decimals used to get its user representation.
+     * For example, if `decimals` equals `2`, a balance of `505` tokens should
+     * be displayed to a user as `5.05` (`505 / 10 ** 2`).
+     *
+     * Tokens usually opt for a value of 18, imitating the relationship between
+     * Ether and Wei. This is the value {ERC20} uses, unless this function is
+     * overridden;
+     *
+     * NOTE: This information is only used for _display_ purposes: it in
+     * no way affects any of the arithmetic of the contract, including
+     * {IERC20-balanceOf} and {IERC20-transfer}.
+     */
+    function decimals() public view virtual override returns (uint8) {
+        return 18;
+    }
+
+    /**
+     * @dev See {IERC20-totalSupply}.
+     */
+    function totalSupply() public view virtual override returns (uint256) {
+        return _totalSupply;
+    }
+
+    /**
+     * @dev See {IERC20-balanceOf}.
+     */
+    function balanceOf(address account) public view virtual override returns (uint256) {
+        return _balances[account];
+    }
+
+    /**
+     * @dev See {IERC20-transfer}.
+     *
+     * Requirements:
+     *
+     * - `to` cannot be the zero address.
+     * - the caller must have a balance of at least `amount`.
+     */
+    function transfer(address to, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        _transfer(owner, to, amount);
+        return true;
+    }
+
+    /**
+     * @dev See {IERC20-allowance}.
+     */
+    function allowance(address owner, address spender) public view virtual override returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    /**
+     * @dev See {IERC20-approve}.
+     *
+     * NOTE: If `amount` is the maximum `uint256`, the allowance is not updated on
+     * `transferFrom`. This is semantically equivalent to an infinite approval.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     */
+    function approve(address spender, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, amount);
+        return true;
+    }
+
+    /**
+     * @dev See {IERC20-transferFrom}.
+     *
+     * Emits an {Approval} event indicating the updated allowance. This is not
+     * required by the EIP. See the note at the beginning of {ERC20}.
+     *
+     * NOTE: Does not update the allowance if the current allowance
+     * is the maximum `uint256`.
+     *
+     * Requirements:
+     *
+     * - `from` and `to` cannot be the zero address.
+     * - `from` must have a balance of at least `amount`.
+     * - the caller must have allowance for ``from``'s tokens of at least
+     * `amount`.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) public virtual override returns (bool) {
+        address spender = _msgSender();
+        _spendAllowance(from, spender, amount);
+        _transfer(from, to, amount);
+        return true;
+    }
+
+    /**
+     * @dev Atomically increases the allowance granted to `spender` by the caller.
+     *
+     * This is an alternative to {approve} that can be used as a mitigation for
+     * problems described in {IERC20-approve}.
+     *
+     * Emits an {Approval} event indicating the updated allowance.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     */
+    function increaseAllowance(address spender, uint256 addedValue) public virtual returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, _allowances[owner][spender] + addedValue);
+        return true;
+    }
+
+    /**
+     * @dev Atomically decreases the allowance granted to `spender` by the caller.
+     *
+     * This is an alternative to {approve} that can be used as a mitigation for
+     * problems described in {IERC20-approve}.
+     *
+     * Emits an {Approval} event indicating the updated allowance.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     * - `spender` must have allowance for the caller of at least
+     * `subtractedValue`.
+     */
+    function decreaseAllowance(address spender, uint256 subtractedValue) public virtual returns (bool) {
+        address owner = _msgSender();
+        uint256 currentAllowance = _allowances[owner][spender];
+        require(currentAllowance >= subtractedValue, "ERC20: decreased allowance below zero");
+        unchecked {
+            _approve(owner, spender, currentAllowance - subtractedValue);
+        }
+
+        return true;
+    }
+
+    /**
+     * @dev Moves `amount` of tokens from `sender` to `recipient`.
+     *
+     * This internal function is equivalent to {transfer}, and can be used to
+     * e.g. implement automatic token fees, slashing mechanisms, etc.
+     *
+     * Emits a {Transfer} event.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `from` must have a balance of at least `amount`.
+     */
+    function _transfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(to != address(0), "ERC20: transfer to the zero address");
+
+        _beforeTokenTransfer(from, to, amount);
+
+        uint256 fromBalance = _balances[from];
+        require(fromBalance >= amount, "ERC20: transfer amount exceeds balance");
+        unchecked {
+            _balances[from] = fromBalance - amount;
+        }
+        _balances[to] += amount;
+
+        emit Transfer(from, to, amount);
+
+        _afterTokenTransfer(from, to, amount);
+    }
+
+    /** @dev Creates `amount` tokens and assigns them to `account`, increasing
+     * the total supply.
+     *
+     * Emits a {Transfer} event with `from` set to the zero address.
+     *
+     * Requirements:
+     *
+     * - `account` cannot be the zero address.
+     */
+    function _mint(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: mint to the zero address");
+
+        _beforeTokenTransfer(address(0), account, amount);
+
+        _totalSupply += amount;
+        _balances[account] += amount;
+        emit Transfer(address(0), account, amount);
+
+        _afterTokenTransfer(address(0), account, amount);
+    }
+
+    /**
+     * @dev Destroys `amount` tokens from `account`, reducing the
+     * total supply.
+     *
+     * Emits a {Transfer} event with `to` set to the zero address.
+     *
+     * Requirements:
+     *
+     * - `account` cannot be the zero address.
+     * - `account` must have at least `amount` tokens.
+     */
+    function _burn(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: burn from the zero address");
+
+        _beforeTokenTransfer(account, address(0), amount);
+
+        uint256 accountBalance = _balances[account];
+        require(accountBalance >= amount, "ERC20: burn amount exceeds balance");
+        unchecked {
+            _balances[account] = accountBalance - amount;
+        }
+        _totalSupply -= amount;
+
+        emit Transfer(account, address(0), amount);
+
+        _afterTokenTransfer(account, address(0), amount);
+    }
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the `owner` s tokens.
+     *
+     * This internal function is equivalent to `approve`, and can be used to
+     * e.g. set automatic allowances for certain subsystems, etc.
+     *
+     * Emits an {Approval} event.
+     *
+     * Requirements:
+     *
+     * - `owner` cannot be the zero address.
+     * - `spender` cannot be the zero address.
+     */
+    function _approve(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        require(owner != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    /**
+     * @dev Spend `amount` form the allowance of `owner` toward `spender`.
+     *
+     * Does not update the allowance amount in case of infinite allowance.
+     * Revert if not enough allowance is available.
+     *
+     * Might emit an {Approval} event.
+     */
+    function _spendAllowance(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        uint256 currentAllowance = allowance(owner, spender);
+        if (currentAllowance != type(uint256).max) {
+            require(currentAllowance >= amount, "ERC20: insufficient allowance");
+            unchecked {
+                _approve(owner, spender, currentAllowance - amount);
+            }
+        }
+    }
+
+    /**
+     * @dev Hook that is called before any transfer of tokens. This includes
+     * minting and burning.
+     *
+     * Calling conditions:
+     *
+     * - when `from` and `to` are both non-zero, `amount` of ``from``'s tokens
+     * will be transferred to `to`.
+     * - when `from` is zero, `amount` tokens will be minted for `to`.
+     * - when `to` is zero, `amount` of ``from``'s tokens will be burned.
+     * - `from` and `to` are never both zero.
+     *
+     * To learn more about hooks, head to xref:ROOT:extending-contracts.adoc#using-hooks[Using Hooks].
+     */
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+
+    /**
+     * @dev Hook that is called after any transfer of tokens. This includes
+     * minting and burning.
+     *
+     * Calling conditions:
+     *
+     * - when `from` and `to` are both non-zero, `amount` of ``from``'s tokens
+     * has been transferred to `to`.
+     * - when `from` is zero, `amount` tokens have been minted for `to`.
+     * - when `to` is zero, `amount` of ``from``'s tokens have been burned.
+     * - `from` and `to` are never both zero.
+     *
+     * To learn more about hooks, head to xref:ROOT:extending-contracts.adoc#using-hooks[Using Hooks].
+     */
+    function _afterTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (access/Ownable.sol)
+
+pragma solidity ^0.8.0;
+
+import "../utils/Context.sol";
+
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owner.
+     */
+    constructor() {
+        _transferOwnership(_msgSender());
+    }
+
+    /**
+     * @dev Returns the address of the current owner.
+     */
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    /**
+     * @dev Throws if called by any account other than the owner.
+     */
+    modifier onlyOwner() {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    /**
+     * @dev Leaves the contract without owner. It will not be possible to call
+     * `onlyOwner` functions anymore. Can only be called by the current owner.
+     *
+     * NOTE: Renouncing ownership will leave the contract without an owner,
+     * thereby removing any functionality that is only available to the owner.
+     */
+    function renounceOwnership() public virtual onlyOwner {
+        _transferOwnership(address(0));
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Can only be called by the current owner.
+     */
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _transferOwnership(newOwner);
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Internal function without access restriction.
+     */
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
