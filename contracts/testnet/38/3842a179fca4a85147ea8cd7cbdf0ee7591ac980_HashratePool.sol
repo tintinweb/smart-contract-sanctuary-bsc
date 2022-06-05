@@ -1,0 +1,426 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-06-05
+*/
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.6.6;
+
+interface YiMainPool {
+    function allocHashrateAirDrop(uint256 _hashrateTotal) external returns (uint256);
+}
+
+interface YiToken {
+    function balanceOf(address _owner) external view returns (uint256);
+    function transfer(address _to, uint256 _amount) external returns (bool);
+}
+
+interface IYiBoxSetting {
+    function calcOpenBox() external returns (uint256, uint256,uint256,uint256[2] memory);
+    function getIncomePool() external returns (address);
+    function getrepoPool() external returns (address);
+    function getIncomePer() external returns (uint32);
+    function getRepoPer() external returns (uint32);
+    function getMaxLevel(uint8 _vLevel) external returns(uint256);
+    function getHashrate(uint q, uint com, uint r) external returns (uint[] memory, uint[] memory);
+    function getLevelUpV4(uint256 currentLevel_) external returns(uint256, uint256, uint256, uint256, uint256);
+    function getLevelUpV5(uint256 currentLevel_) external returns(uint256, uint256, uint256, uint256, uint256, uint256);
+    function getLevelUpV6(uint256 currentLevel_) external view returns(uint256, uint256, uint256, uint256, uint256, uint256, uint256);
+}
+
+interface IYiBoxNFT {
+    function getHashrateTotal() external view returns (uint256 hTotal);
+    function getHashrateByAddress(address _target) external view returns (uint256);
+    function openBox(uint256 tokenId, uint8 _quality, uint32 _hashrate, uint16 _type) external;
+    function getTokensByStatus(address _owner, uint8 _status) external view returns (uint256[] memory);
+    function setStatus(address _s, uint256 tokenId, uint8 _status) external;
+    function tokenBase(uint256 tokenId) external view returns (string memory, uint16, uint8 ,uint32, uint8, uint256, uint16);
+    // function setPrice(address _owner, uint256 _tokens, uint256 _price) external;
+    function ownerOf(uint256 tokenId) external returns (address);
+    function transferFromInternal(address from, address to, uint256 tokenId) external;
+    function getLevelsByToken(uint256 _token) external returns (uint16[] memory, uint256[] memory, uint32[] memory);
+    function upLevel(uint256 tokenId, uint32 _hashrate) external;
+    function burnIn(uint256 tokenId) external;
+}
+
+interface IBUSD {
+    function balanceOf(address account) external returns (uint256);
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
+    function transfer(address recipient, uint256 amount) external returns (bool);
+}
+
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        uint256 c = a + b;
+        require(c >= a, "SafeMath add");
+
+        return c;
+    }
+
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        require(b <= a, "SafeMath sub");
+        uint256 c = a - b;
+
+        return c;
+    }
+
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        if (a == 0) {
+            return 0;
+        }
+        uint256 c = a * b;
+        require(c / a == b, "SafeMath mul");
+        return c;
+    }
+
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        // Solidity only automatically asserts when dividing by 0
+        require(b > 0, "SafeMath div");
+        uint256 c = a / b;
+        return c;
+    }
+
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        require(b != 0, "SafeMath mod");
+        return a % b;
+    }
+}
+
+library SafeMathExt {
+    function safe32(uint256 a) internal pure returns(uint32) {
+        require(a < 0x0100000000, "safe32");
+        return uint32(a);
+    }
+
+    function safe16(uint256 a) internal pure returns(uint16) {
+        require(a < 0x010000, "safe16");
+        return uint16(a);
+    }
+
+    function safe8(uint256 a) internal pure returns(uint8) {
+        require(a < 0x0100, "safe8");
+        return uint8(a);
+    }
+}
+
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address payable) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes memory) {
+        this;
+        return msg.data;
+    }
+}
+
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    constructor() internal {
+        _owner = _msgSender();
+        emit OwnershipTransferred(address(0), _owner);
+    }
+
+    uint8 private unlocked = 1;
+
+    modifier lock() {
+        require(unlocked == 1, "is LOCKED");
+        unlocked = 0;
+        _;
+        unlocked = 1;
+    }
+
+    function owner() public view returns (address) {
+        return _owner;
+    }
+
+    modifier onlyOwner() {
+        require(_msgSender() == _owner, "owner error");
+        _;
+    }
+
+    function transferOwnership(address newOwner) public {
+        require(newOwner != address(0), "newOwner invalid");
+        if (_owner != address(0)) {
+            require(_msgSender() == _owner, "not owner");
+        }
+        emit OwnershipTransferred(_owner, newOwner);
+        _owner = newOwner;
+    }
+}
+
+contract HashratePool is Ownable {
+    using SafeMath for uint256;
+    struct Hashrate {
+        address staker;     //质押人
+        uint256 sTime;  //首次加入时间
+        uint256 lTime;   //上次更新时间
+        uint256 allIncome;  //累计收益
+        uint256 balance;    //收益余额
+    }
+    
+    Hashrate[] public hashrates; //质押详细记录
+    mapping (address => uint) public ownerStake;   //质押人键值对应
+
+    uint256 public lastAirDrop; //上次空投量
+
+    uint256 constant AD_INTERVAL = 23 hours + 50 minutes;
+    uint256 public lastestAirDroping;   //上次空投时间戳（秒）
+    address public mainPool;           //主矿池
+    address public mainToken;          //主币
+    address public NFTToken;
+    address YiSetting;
+
+    function setNFTToken(address _NFTToken) public onlyOwner {
+        // require(_NFTToken != address(0), "NFTToken invalid");
+        NFTToken = _NFTToken;
+    }
+
+    function setSetting(address _setting) public onlyOwner {
+        YiSetting = _setting;
+    } 
+
+    //设置主矿池
+    function setMainPool(address _main) external onlyOwner {
+        require(_main != address(0));
+        mainPool = _main;
+    }
+
+    //设置主币
+    function setMainToken(address _token) external onlyOwner {
+        // require(_token != address(0), "mainToken invalid");
+        mainToken = _token;
+    }
+
+    //查询矿池余额
+    function balance() external view returns (uint256) {
+        require(mainToken != address(0), "mainToken invalid");
+        return YiToken(mainToken).balanceOf(address(this));
+    }
+
+    //结算所有人的余额
+    function settlement(address _exclude) internal {
+        for (uint i=0; i < hashrates.length; i++) {
+            if (_exclude == address(0)) {
+                _update(hashrates[i].staker);
+            } else if (hashrates[i].staker != _exclude) {
+                _update(hashrates[i].staker);
+            }
+        }
+    }
+
+    //和nft合约同步并结算算力池
+    function settlementAll() external {
+        settlement(address(0));
+    }
+
+
+    //空投，先重新计算所有人的收益,然后空投
+    function airDrop() external lock {
+        uint256 hashrateToal = IYiBoxNFT(NFTToken).getHashrateTotal();
+        require(mainPool != address(0),"mainPool error");
+        require(lastestAirDroping.add(AD_INTERVAL) < block.timestamp, "airDroping error");
+        settlement(address(0));
+        lastAirDrop = YiMainPool(mainPool).allocHashrateAirDrop(hashrateToal);
+        lastestAirDroping = block.timestamp;
+    }
+
+    function openBox(uint256 _num) external lock returns(uint256[] memory _tks) {
+        require(_num <= 10,"openBox error");
+        require(YiSetting != address(0),"YiSetting error");
+        // require(NFTToken != address(0),"NFTToken error");
+        uint256[] memory _tokens = IYiBoxNFT(NFTToken).getTokensByStatus(_msgSender(), 3);
+        require(_num <= _tokens.length,"Not enough nft");
+
+        _update(_msgSender());
+        settlement(_msgSender());
+
+        _tks = new uint256[](_num);
+        for (uint i = 0; i < _num; i++) {
+            (uint256 _lv, uint256 _hr, uint256 _ty,) = IYiBoxSetting(YiSetting).calcOpenBox();
+            IYiBoxNFT(NFTToken).openBox(_tokens[i], SafeMathExt.safe8(_lv), SafeMathExt.safe32(_hr), SafeMathExt.safe16(_ty));
+            _tks[i] = _tokens[i];
+        }
+    }
+
+    struct B1 {
+        uint256 cV1;
+        uint256 cV2;
+        uint256 cV3;
+        uint256 cV4;
+        uint256 lV4;
+        uint256 cV5;
+        uint256 cSelf;
+    }
+
+    function levelUp(uint256 _tT, uint256[] memory _st) public lock returns (bool) {
+        require(NFTToken != address(0) && YiSetting != address(0),"NFT Setting error");
+        (, uint16 _lv, uint8 _ql, , , ,uint16 _ty) = IYiBoxNFT(NFTToken).tokenBase(_tT);
+        require(_ql > 3 && _ql <= 6 && _lv < IYiBoxSetting(YiSetting).getMaxLevel(_ql), "up error");
+        (uint16[] memory _ls, , uint32[] memory _hss) = IYiBoxNFT(NFTToken).getLevelsByToken(_tT);
+        require(_ls.length > 0, "level error");
+        
+        B1 memory b1 = B1(0,0,0,0,0,0,0);
+
+        if (_ql == 4) {
+            (b1.cV1,b1.cV2,b1.cV3,b1.cSelf,b1.lV4) = IYiBoxSetting(YiSetting).getLevelUpV4(_lv);
+        } else if (_ql == 5) {
+            (b1.cV1,b1.cV2,b1.cV3,b1.cV4,b1.lV4,b1.cSelf) = IYiBoxSetting(YiSetting).getLevelUpV5(_lv);
+        } else if (_ql == 6) {
+            (b1.cV1,b1.cV2,b1.cV3,b1.cV4,b1.lV4,b1.cV5,b1.cSelf) = IYiBoxSetting(YiSetting).getLevelUpV6(_lv);
+        }
+        
+        for (uint i = 0; i < _st.length; i++) {
+            if (_st[i] == _tT) {
+                return false;
+            }
+            (, uint16 _l1, uint8 _q1, , uint8 _s1, ,uint16 _t1) = IYiBoxNFT(NFTToken).tokenBase(_st[i]);
+            if (_s1 != 4 && _s1 != 5 && _s1 != 6) {
+                return false;
+            }
+
+            if (b1.cV1 > 0) {
+                if (b1.cSelf >= 1) {
+                    if (_t1 == _ty && _q1 == 1) {
+                        b1.cV1--;
+                    } 
+                } else {
+                    if (_q1 == 1) {
+                        b1.cV1--;
+                    }
+                }
+            } else if (b1.cV2 > 0) {
+                if (b1.cSelf >= 2) {
+                    if (_t1 == _ty && _q1 == 2) {
+                        b1.cV2--;
+                    } 
+                } else {
+                    if (_q1 == 2) {
+                        b1.cV2--;
+                    }
+                }
+            } else if (b1.cV3 > 0) {
+                if (b1.cSelf >= 3) {
+                    if (_t1 == _ty && _q1 == 3) {
+                        b1.cV3--;
+                    } 
+                } else {
+                    if (_q1 == 3) {
+                        b1.cV3--;
+                    }
+                }
+            } else if (b1.cV4 > 0) {
+                if (b1.cSelf >= 4) {
+                    if (_t1 == _ty && _q1 == 4 && _l1 >= b1.lV4) {
+                        b1.cV4--;
+                    } 
+                } else {
+                    if (_q1 == 4 && _l1 >= b1.lV4) {
+                        b1.cV4--;
+                    }
+                }
+            } else if (b1.cV5 > 0) {
+                if (b1.cSelf >= 5) {
+                    if (_t1 == _ty && _q1 == 5) {
+                        b1.cV5--;
+                    } 
+                } else {
+                    if (_q1 == 5) {
+                        b1.cV5--;
+                    }
+                }
+            }
+        }
+        this.settlementAll();
+        require(b1.cV1 == 0 && b1.cV2 == 0 && b1.cV3 == 0 && b1.cV4 == 0 && b1.cV5 == 0, "stuff error");
+        uint32 _bhr = _hss[0];
+        (uint[] memory _hr,) = IYiBoxSetting(YiSetting).getHashrate(_ql, _bhr, 5);
+        uint32 _hs = SafeMathExt.safe32(_hr[_lv-1]) ;
+        IYiBoxNFT(NFTToken).upLevel(_tT, _hs);
+        for (uint x = 0; x < _st.length; x++) {
+            IYiBoxNFT(NFTToken).burnIn(_st[x]);
+        }
+    }
+
+    function calcIncome(uint256 _hashrate, uint256 _delay) internal view returns(uint256) {
+        uint256 hashrateToal = IYiBoxNFT(NFTToken).getHashrateTotal();
+        if (lastAirDrop == 0 || _hashrate == 0 || hashrateToal == 0) {
+            return 0;
+        }
+        return (_delay * _hashrate * lastAirDrop) / (86400 * hashrateToal);
+    }
+
+    //收益更新
+    function updateIncome(uint _idx, uint256 _income, uint256 _time) internal {
+        hashrates[_idx].allIncome += _income;
+        hashrates[_idx].balance += _income;
+        hashrates[_idx].lTime = _time;
+    }
+
+    //更新算力池
+    function _update(address _staker) internal returns(uint256) {
+        require(_staker != address(0), "user error");
+        require(mainPool != address(0) && NFTToken != address(0),"main or NFT error");
+
+        uint256 _income = 0;
+        if (ownerStake[_staker] == 0) {
+            if (hashrates.length == 0) {
+                hashrates.push(Hashrate(_staker, now, now, 0, 0));
+                ownerStake[_staker] = hashrates.length - 1;
+            } else {
+                if (_staker == hashrates[0].staker) {
+                    uint256 _now = now;
+                    _income = calcIncome(IYiBoxNFT(NFTToken).getHashrateByAddress(hashrates[0].staker), _now - hashrates[0].lTime);
+                    updateIncome(0, _income, _now);
+                } else {
+                    hashrates.push(Hashrate(_staker, now, now, 0, 0));
+                    ownerStake[_staker] = hashrates.length - 1;
+                }
+            }
+        } else {
+            uint _idx = ownerStake[_staker];
+            if (_staker == hashrates[_idx].staker) {
+                uint256 _now = now;
+                _income = calcIncome(IYiBoxNFT(NFTToken).getHashrateByAddress(hashrates[0].staker), _now - hashrates[_idx].lTime);
+                updateIncome(_idx, _income, _now);
+            } else {
+                require(false, "error address");
+            }
+        }
+
+        return _income;
+    }
+
+    //查询收益(每秒), 返回 每秒收益，质押量，总收益，当前余额
+    function queryIncome(address _staker) external view returns(uint256,uint256,uint256,uint256){
+        require(mainPool != address(0) && NFTToken != address(0), "mainPool error");
+        require(hashrates.length > 0, "Empty staker");
+        uint _idx = ownerStake[_staker];
+        require(hashrates[_idx].staker == _staker, "no staker");
+
+        uint256 _total = IYiBoxNFT(NFTToken).getHashrateByAddress(hashrates[_idx].staker);
+
+        uint256 _incomePer = calcIncome(_total, 1); //每秒收益
+        uint256 _incomeNow = calcIncome(_total, now - hashrates[_idx].lTime);
+
+        return (_incomePer,_total, hashrates[_idx].allIncome + _incomeNow, hashrates[_idx].balance + _incomeNow);
+    }
+
+    //提现 (提现人 提现金额)
+    function withdraw(address _sender, uint256 _amount) external lock returns(bool) {
+        require(mainPool != address(0),"mainPool error");
+        require(hashrates.length > 0, "Empty staker");
+        uint _idx = ownerStake[_sender];
+        require(hashrates[_idx].staker == _sender, "Can't find staker");
+        uint256 _PoolBal = this.balance();
+        require(_amount > _PoolBal, "Pool Insufficient balance");
+        uint256 _balance = hashrates[_idx].balance;
+        uint256 _incomeNow = calcIncome(IYiBoxNFT(NFTToken).getHashrateByAddress(_sender), now - hashrates[_idx].lTime);
+        _balance += _incomeNow;
+        require(_amount > _balance, "Person Insufficient balance");
+        hashrates[_idx].balance = _balance - _amount;
+        return YiToken(mainToken).transfer(_sender, _amount);
+    }
+}
