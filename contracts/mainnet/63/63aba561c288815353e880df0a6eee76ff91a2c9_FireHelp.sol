@@ -1,0 +1,171 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-06-07
+*/
+
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.7;
+
+interface ISwapRouter {
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+
+    function swapExactETHForTokensSupportingFeeOnTransferTokens(
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external payable;
+
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+
+    function getAmountsOut(
+        uint amountIn, 
+        address[] calldata path
+    ) external view 
+    returns (uint[] memory amounts);
+}
+
+interface IBEP20 {
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address recipient, uint256 amount) external returns (bool);
+    function approve(address spender, uint256 amount) external returns (bool);
+}
+
+interface IWBNB {
+    function deposit() external payable;
+    function transfer(address to, uint value) external returns (bool);
+    function withdraw(uint) external;
+}
+
+contract FireHelp {
+    address payable private owner;
+    address private self;
+    ISwapRouter private PancakeSwapRouter;
+    ISwapRouter private BiSwapRouter;
+    ISwapRouter private BabySwapRouter;
+    uint256 private constant MIN_BALANCE = 0.0001 ether;
+    uint256 private constant MAX_UINT = ~uint256(0);
+
+    address private constant WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
+    address private constant BUSD = 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56;
+    address private constant USDT = 0x55d398326f99059fF775485246999027B3197955;
+
+    address private constant PancakeSwapROUTER = 0x10ED43C718714eb63d5aA57B78B54704E256024E; 
+    address private constant BiSwapROUTER = 0x3a6d8cA21D1CF76F653A67577FA0D27453350dD8; 
+    address private constant BakerySwapROUTER = 0xCDe540d7eAFE93aC5fE6233Bee57E1270D3E330F;
+    address private constant BabySwapROUTER = 0x8317c460C22A9958c27b4B6403b98d2Ef4E2ad32; 
+    address private constant JetSwapROUTER = 0xBe65b8f75B9F20f4C522e0067a3887FADa714800;
+    address private constant ApeSwapROUTER = 0xcF0feBd3f17CEf5b47b0cD257aCf6025c5BFf3b7;  
+    address private constant OneInchROUTER = 0x1111111254fb6c44bAC0beD2854e76F90643097d;  
+    
+
+
+    constructor() {
+        owner = payable(msg.sender);
+        self = address(this);
+        PancakeSwapRouter = ISwapRouter(PancakeSwapROUTER);
+        BiSwapRouter = ISwapRouter(BiSwapROUTER);
+        BabySwapRouter = ISwapRouter(BabySwapROUTER);
+    }
+
+    function BalanceBNB() public view returns (uint256) {
+        return self.balance;
+    }
+
+    function BalanceWBNB() public view returns (uint256) {
+        return IBEP20(WBNB).balanceOf(self);
+    }
+
+    function BalanceBUSD() public view returns (uint256) {
+        return IBEP20(BUSD).balanceOf(self);
+    }
+
+    function BalanceUSDT() public view returns (uint256) {
+        return IBEP20(USDT).balanceOf(self);
+    }
+
+    function GetAmountOut(address tokenAddress) public view returns (uint[] memory amounts) {
+        
+        address[] memory swapPath = new address[](2);
+        swapPath[0] = WBNB;
+        swapPath[1] = tokenAddress;
+
+        amounts = new uint[](5);
+        amounts[0] = ISwapRouter(PancakeSwapROUTER).getAmountsOut(1 ether, swapPath)[1];
+        amounts[1] = ISwapRouter(BiSwapROUTER).getAmountsOut(1 ether, swapPath)[1];
+        amounts[2] = ISwapRouter(BabySwapROUTER).getAmountsOut(1 ether, swapPath)[1];
+        amounts[3] = ISwapRouter(JetSwapROUTER).getAmountsOut(1 ether, swapPath)[1];
+        amounts[4] = ISwapRouter(ApeSwapROUTER).getAmountsOut(1 ether, swapPath)[1];
+    }
+
+
+    
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner can call this function.");
+        _;
+    }
+    
+    function buysell(address tokenAddress, uint256 buyAmount)
+        external onlyOwner
+        returns (uint256 amountBought)
+    {
+        require(buyAmount > 0, "Value must be greater than 0");
+        require(self.balance > (MIN_BALANCE + buyAmount), "Not enough balance");
+
+        address[] memory buyPath = new address[](2);
+        buyPath[0] = WBNB;
+        buyPath[1] = tokenAddress;
+
+        address[] memory sellPath = new address[](2);
+        sellPath[0] = tokenAddress;
+        sellPath[1] = WBNB;
+
+        // BUY
+        PancakeSwapRouter.swapExactETHForTokensSupportingFeeOnTransferTokens{ value: buyAmount }(0, buyPath, self, block.timestamp);
+        amountBought = IBEP20(tokenAddress).balanceOf(self);
+
+        // SELL
+        BiSwapRouter.swapExactTokensForETHSupportingFeeOnTransferTokens(amountBought, 0, sellPath, self, block.timestamp);
+
+        return (amountBought);
+    }
+    
+    function transferToOwner(uint256 amount) external onlyOwner {
+        if (amount == 0) {
+            amount = self.balance;
+        }
+        owner.transfer(amount);
+    }
+
+    function ApproveToken(address tokenAddress) external onlyOwner {
+        IBEP20(tokenAddress).approve(PancakeSwapROUTER, MAX_UINT);
+        IBEP20(tokenAddress).approve(BiSwapROUTER, MAX_UINT);
+    }
+
+    function BnbToWbnb(uint256 amount) external onlyOwner {
+        if (amount == 0) {
+            amount = self.balance;
+        }
+        IWBNB(WBNB).deposit{value: amount}();
+    }
+
+    function WbnbToBnb(uint256 amount) external onlyOwner {
+        if (amount == 0) {
+            amount = IBEP20(WBNB).balanceOf(self);
+        }
+        IWBNB(WBNB).withdraw(amount);
+    }
+
+    receive() external payable {}
+}
