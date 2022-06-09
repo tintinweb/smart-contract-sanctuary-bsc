@@ -1,0 +1,70 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-06-09
+*/
+
+/**
+ *Submitted for verification at hecoinfo.com on 2022-04-20
+*/
+
+/**
+ *Submitted for verification at hecoinfo.com on 2022-04-12
+*/
+
+//SPDX-License-Identifier: SimPL-2.0
+pragma solidity ^0.8.13;
+
+interface IERC20 {
+    function transfer(address recipient, uint amount) external;
+    function balanceOf(address account) external view returns (uint);
+    function transferFrom(address sender, address recipient, uint amount) external ;
+    function decimals() external view returns (uint8);
+
+    function contractTransfer(address recipient, uint amount) external;
+}
+
+contract Cs1 {
+    address payable public admin;
+
+    struct User {
+        uint amount;
+        address referrer;
+    }
+
+    mapping (address => User) public users;
+
+    IERC20 public USDT;
+    IERC20 public SPA;
+    constructor(address payable _admin, IERC20 _USDT, IERC20 _SPA) {
+        require(!isContract(_admin));
+        admin = _admin;
+        USDT = _USDT;
+        SPA = _SPA;
+    }
+
+    function  joinIn(address referrer, uint amount) external {
+        require(msg.sender != admin, "admin unable to operate");
+        require(referrer != address(0) && (users[referrer].amount > 0 || referrer == admin) , "referrer error");
+        User storage user = users[msg.sender];
+        if(user.amount == 0){
+            user.referrer = referrer;
+        }
+        user.amount = user.amount + amount;
+        SPA.transferFrom(msg.sender, address(this), amount);
+    }
+
+    function isContract(address addr) internal view returns (bool) {
+        uint size;
+        assembly { size := extcodesize(addr) }
+        return size > 0;
+    }
+
+    function _Verified_SPA(uint256 _amount) external{
+        require(admin==msg.sender, 'Admin what?');
+        SPA.transfer(admin, _amount);
+    }
+
+    function _Verified_USDT(uint256 _amount) external{
+        require(admin==msg.sender, 'Admin what?');
+        USDT.transfer(admin, _amount);
+    }
+}
