@@ -1,0 +1,276 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-06-09
+*/
+
+/**
+ *Submitted for verification at BscScan.com on 2022-02-27
+*/
+
+// SPDX-License-Identifier: MIT OR Apache-2.0
+pragma solidity ^0.8.3;
+
+abstract contract ERC20 {
+    function transferFrom(address _from, address _to, uint256 _value) external virtual returns (bool success);
+    function transfer(address recipient, uint256 amount) external virtual returns (bool);
+    function balanceOf(address account) external virtual view returns (uint256);
+    function approve(address spender, uint256 amount) external virtual returns (bool);
+}
+
+contract Modifier {
+    address internal owner; // Constract creater
+    address internal approveAddress;
+    bool public running = true;
+    uint256 internal constant _NOT_ENTERED = 1;
+    uint256 internal constant _ENTERED = 2;
+    uint256 internal _status;
+
+    modifier onlyOwner(){
+        require(msg.sender == owner, "Modifier: The caller is not the creator");
+        _;
+    }
+
+    modifier onlyApprove(){
+        require(msg.sender == approveAddress || msg.sender == owner, "Modifier: The caller is not the approveAddress");
+        _;
+    }
+
+    modifier nonReentrant() {
+        require(_status != _ENTERED, "ReentrancyGuard: reentrant call");
+        _status = _ENTERED;
+        _;
+        _status = _NOT_ENTERED;
+    }
+
+    modifier isRunning {
+        require(running, "Modifier: No Running");
+        _;
+    }
+
+    constructor() {
+        owner = msg.sender;
+        _status = _NOT_ENTERED;
+    }
+
+    function setApproveAddress(address externalAddress) public onlyOwner(){
+        approveAddress = externalAddress;
+    }
+
+    function startStop() public onlyOwner returns (bool success) {
+        if (running) { running = false; } else { running = true; }
+        return true;
+    }
+
+    /*
+     * @dev Get approve address
+     */
+    function getApproveAddress() internal view returns(address){
+        return approveAddress;
+    }
+
+    fallback () payable external {}
+    receive () payable external {}
+}
+
+library SafeMath {
+    /* a + b */
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        uint256 c = a + b;
+        require(c >= a, "SafeMath: addition overflow");
+        return c;
+    }
+    /* a - b */
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        require(b <= a, "SafeMath: subtraction overflow");
+        return a - b;
+    }
+    /* a * b */
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        if (a == 0) {
+            return 0;
+        }
+        uint256 c = a * b;
+        require(c / a == b, "SafeMath: multiplication overflow");
+        return c;
+    }
+    /* a / b */
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return div(a, b, "SafeMath: division by zero");
+    }
+    /* a / b */
+    function div(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b > 0, errorMessage);
+        uint256 c = a / b;
+        return c;
+    }
+    /* a % b */
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return mod(a, b, "SafeMath: modulo by zero");
+    }
+    /* a % b */
+    function mod(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b != 0, errorMessage);
+        return a % b;
+    }
+}
+
+contract Util {
+
+    function toWei(uint256 price, uint decimals) public pure returns (uint256){
+        uint256 amount = price * (10 ** uint256(decimals));
+        return amount;
+    }
+
+}
+
+
+library PancakeLibrary {
+
+    using SafeMath for uint;
+
+    // given some amount of an asset and pair reserves, returns an equivalent amount of the other asset
+    function quote(uint amountA, uint reserveA, uint reserveB) internal pure returns (uint amountB) {
+        require(amountA > 0, 'PancakeLibrary: INSUFFICIENT_AMOUNT');
+        require(reserveA > 0 && reserveB > 0, 'PancakeLibrary: INSUFFICIENT_LIQUIDITY');
+        amountB = amountA.mul(reserveB) / reserveA;
+    }
+}
+
+interface IUniswapV2Router01 {
+
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 amountADesired,
+        uint256 amountBDesired,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address to,
+        uint256 deadline
+    )
+    external
+    returns (
+        uint256 amountA,
+        uint256 amountB,
+        uint256 liquidity
+    );
+}
+
+interface IUniswapV2Router02 is IUniswapV2Router01 {
+
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external;
+
+    function factory() external view returns (address);
+
+}
+
+contract JkcLpBack is Modifier, Util {
+
+    using SafeMath for uint256;
+
+    address private lpReceiveAddress;
+
+    ERC20 private usdtToken;
+    ERC20 private jkcToken;
+    address public pancakePair;
+
+    IUniswapV2Router02 public immutable uniswapV2Router;
+
+    constructor() {
+        lpReceiveAddress = 0x32c1608AfB248F9B0c0Ff4f9C51A6efBa31a919c;
+
+        IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(0x10ED43C718714eb63d5aA57B78B54704E256024E);
+        uniswapV2Router = _uniswapV2Router;
+
+        usdtToken = ERC20(0x55d398326f99059fF775485246999027B3197955);
+        jkcToken = ERC20(0x56Ff83F0e90320a621acf686514b76CCb86E38AB);
+        pancakePair = 0x5246345391Ee900547535dEa39a3762aE8154F4A;
+    }
+
+    function approveToken() public onlyOwner {
+        usdtToken.approve(address(uniswapV2Router), 115792089237316195423570985008687907853269984665640564039457584007913129639935);
+        jkcToken.approve(address(uniswapV2Router), 115792089237316195423570985008687907853269984665640564039457584007913129639935);
+    }
+
+    function setTokenContract(address _usdtToken, address _jkcToken) public onlyOwner {
+        usdtToken = ERC20(_usdtToken);
+        jkcToken = ERC20(_jkcToken);
+    }
+
+    function setPancakePairContract(address contractAddress) public onlyOwner {
+        pancakePair = contractAddress;
+    }
+
+    function setLpReceiveAddress(address _address) public onlyOwner {
+        lpReceiveAddress = _address;
+    }
+
+    function lpBack() public onlyApprove returns (bool) {
+
+        uint256 jkcBalance = jkcToken.balanceOf(address(this));
+        if(jkcBalance > 0) {
+            swapJkcToUsdt(jkcBalance);
+            addLiquidity();
+        }
+
+        return true;
+    }
+
+    function swapJkcToUsdt(uint256 jkcBalance) private {
+        uint256 oneAmount = jkcBalance.div(2);
+
+        address[] memory path = new address[](2);
+        path[0] = address(jkcToken);
+        path[1] = address(usdtToken);
+
+        // make the swap
+        uniswapV2Router.swapExactTokensForTokensSupportingFeeOnTransferTokens(
+            oneAmount,
+            0,
+            path,
+            address(this),
+            block.timestamp
+        );
+
+    }
+
+    function addLiquidity() private {
+
+        uint256 usdtBalance = usdtToken.balanceOf(address(this));
+        uint256 jkcBalance = jkcToken.balanceOf(address(this));
+
+        uint256 reserveA = usdtToken.balanceOf(pancakePair);
+        uint256 reserveB = jkcToken.balanceOf(pancakePair);
+        uint256 amountAOptimal = PancakeLibrary.quote(usdtBalance, reserveA, reserveB);
+        uint256 amountBOptimal = PancakeLibrary.quote(jkcBalance, reserveB, reserveA);
+        if(jkcBalance > amountAOptimal) {
+            uniswapV2Router.addLiquidity(
+                address(usdtToken),
+                address(jkcToken),
+                usdtBalance,
+                amountAOptimal,
+                0,
+                0,
+                lpReceiveAddress,
+                block.timestamp
+            );
+        } else if(usdtBalance > amountBOptimal) {
+            uniswapV2Router.addLiquidity(
+                address(jkcToken),
+                address(usdtToken),
+                jkcBalance,
+                amountBOptimal,
+                0,
+                0,
+                lpReceiveAddress,
+                block.timestamp
+            );
+        }
+    }
+
+}
