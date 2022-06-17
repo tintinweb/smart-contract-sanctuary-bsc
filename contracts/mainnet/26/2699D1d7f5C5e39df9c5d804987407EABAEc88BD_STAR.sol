@@ -1,0 +1,422 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-06-17
+*/
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.6;
+
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes memory) {
+        this;
+        // silence state mutability warning without generating bytecode - see https://github.com/ethereum/solidity/issues/2691
+        return msg.data;
+    }
+}
+
+
+interface IUniswapV2Factory {
+   
+   function createPair(address tokenA, address tokenB) external returns (address pair);
+
+}
+
+
+interface IERC20 {
+
+    function totalSupply() external view returns (uint256);
+
+    function balanceOf(address account) external view returns (uint256);
+
+    function transfer(address recipient, uint256 amount)external returns (bool);
+
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    function transferFrom(address sender,address recipient,uint256 amount) external returns (bool);
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    event Approval(address indexed owner,address indexed spender,uint256 value);
+}
+
+interface IERC20Metadata is IERC20 {
+   
+    function name() external view returns (string memory);
+    function symbol() external view returns (string memory);
+    function decimals() external view returns (uint8);
+}
+
+contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner,address indexed newOwner);
+
+    constructor() {
+        address msgSender = _msgSender();
+        _owner = msgSender;
+        emit OwnershipTransferred(address(0), msgSender);
+    }
+
+    function owner() public view returns (address) {
+        return _owner;
+    }
+
+    modifier onlyOwner() {
+        require(_owner == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    function renounceOwnership() public virtual onlyOwner {
+        emit OwnershipTransferred(_owner, address(0));
+        _owner = address(0);
+    }
+
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(
+            newOwner != address(0),
+            "Ownable: new owner is the zero address"
+        );
+        emit OwnershipTransferred(_owner, newOwner);
+        _owner = newOwner;
+    }
+}
+
+
+contract ERC20 is Ownable, IERC20, IERC20Metadata {
+    using SafeMath for uint256;
+
+    mapping(address => uint256) private _balances;
+
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    uint256 private _totalSupply;
+
+    string private _name;
+    string private _symbol;
+
+    constructor(string memory name_, string memory symbol_) {
+        _name = name_;
+        _symbol = symbol_;
+    }
+
+    function name() public view virtual override returns (string memory) {
+        return _name;
+    }
+
+    
+    function symbol() public view virtual override returns (string memory) {
+        return _symbol;
+    }
+
+    function decimals() public view virtual override returns (uint8) {
+        return 18;
+    }
+
+    function totalSupply() public view virtual override returns (uint256) {
+        return _totalSupply;
+    }
+
+    function balanceOf(address account)public view virtual override returns (uint256)
+    {
+        return _balances[account];
+    }
+
+    function transfer(address recipient, uint256 amount)public virtual override returns (bool)
+    {
+        _transfer(_msgSender(), recipient, amount);
+        return true;
+    }
+
+   
+    function allowance(address owner, address spender)public view virtual override returns (uint256)
+    {
+        return _allowances[owner][spender];
+    }
+
+
+    function approve(address spender, uint256 amount)public virtual override returns (bool)
+    {
+        _approve(_msgSender(), spender, amount);
+        return true;
+    }
+
+    function transferFrom(  address sender, address recipient,  uint256 amount ) public virtual override returns (bool) {
+        _transfer(sender, recipient, amount);
+        _approve( sender, _msgSender(),  _allowances[sender][_msgSender()].sub( amount, "ERC20: transfer amount exceeds allowance") );
+        return true;
+    }
+
+    function increaseAllowance(address spender, uint256 addedValue) public virtual  returns (bool)
+    {
+        _approve( _msgSender(), spender, _allowances[_msgSender()][spender].add(addedValue) );
+        return true;
+    }
+
+  
+    function decreaseAllowance(address spender, uint256 subtractedValue)  public virtual returns (bool)
+    {
+        _approve( _msgSender(), spender, _allowances[_msgSender()][spender].sub(subtractedValue, "ERC20: decreased allowance below zero") );
+        return true;
+    }
+
+   
+    function _transfer(  address sender,  address recipient,  uint256 amount) internal virtual {
+        require(sender != address(0), "ERC20: transfer from the zero address");
+        require(recipient != address(0), "ERC20: transfer to the zero address");
+        _beforeTokenTransfer(sender, recipient, amount);
+
+         _transferToken(sender,recipient,amount);
+    }
+
+    
+    function _transferToken(address sender, address recipient, uint256 amount ) internal virtual {
+        _balances[sender] = _balances[sender].sub( amount, "ERC20: transfer amount exceeds balance" );
+        _balances[recipient] = _balances[recipient].add(amount);
+        emit Transfer(sender, recipient, amount);
+    }
+
+    function _mint(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: mint to the zero address");
+
+        _beforeTokenTransfer(address(0), account, amount);
+
+        _totalSupply = _totalSupply.add(amount);
+        _balances[account] = _balances[account].add(amount);
+        emit Transfer(address(0), account, amount);
+    }
+
+  
+    function _burn(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: burn from the zero address");
+
+        _beforeTokenTransfer(account, address(0), amount);
+
+        _balances[account] = _balances[account].sub( amount, "ERC20: burn amount exceeds balance");
+        _totalSupply = _totalSupply.sub(amount);
+        emit Transfer(account, address(0), amount);
+    }
+    
+    
+    function _approve( address owner, address spender, uint256 amount ) internal virtual {
+        require(owner != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    function _beforeTokenTransfer( address from, address to, uint256 amount ) internal virtual {}
+}
+
+
+library SafeMath {
+   
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        uint256 c = a + b;
+        require(c >= a, "SafeMath: addition overflow");
+
+        return c;
+    }
+
+  
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return sub(a, b, "SafeMath: subtraction overflow");
+    }
+
+    function sub(uint256 a, uint256 b, string memory errorMessage ) internal pure returns (uint256) {
+        require(b <= a, errorMessage);
+        uint256 c = a - b;
+
+        return c;
+    }
+
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        // Gas optimization: this is cheaper than requiring 'a' not being zero, but the
+        // benefit is lost if 'b' is also tested.
+        // See: https://github.com/OpenZeppelin/openzeppelin-contracts/pull/522
+        if (a == 0) { return 0;}
+
+        uint256 c = a * b;
+        require(c / a == b, "SafeMath: multiplication overflow");
+
+        return c;
+    }
+
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return div(a, b, "SafeMath: division by zero");
+    }
+
+    function div(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        require(b > 0, errorMessage);
+        uint256 c = a / b;
+        // assert(a == b * c + a % b); // There is no case in which this doesn't hold
+
+        return c;
+    }
+
+   
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return mod(a, b, "SafeMath: modulo by zero");
+    }
+
+    function mod(uint256 a, uint256 b, string memory errorMessage ) internal pure returns (uint256) {
+        require(b != 0, errorMessage);
+        return a % b;
+    }
+}
+
+interface IUniswapV2Router01 {
+    function factory() external pure returns (address);
+
+    function WETH() external pure returns (address); 
+
+    function swapExactTokensForTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+
+    function swapTokensForExactTokens(
+        uint256 amountOut,
+        uint256 amountInMax,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+
+    function swapExactETHForTokens(
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external payable returns (uint256[] memory amounts);
+
+    function swapTokensForExactETH(
+        uint256 amountOut,
+        uint256 amountInMax,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+
+    function swapExactTokensForETH(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+
+    function swapETHForExactTokens(
+        uint256 amountOut,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external payable returns (uint256[] memory amounts);
+}
+
+
+interface IUniswapV2Router02 is IUniswapV2Router01 {
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external;
+
+    function swapExactETHForTokensSupportingFeeOnTransferTokens(
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external payable;
+
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external;
+}
+
+
+contract STAR is ERC20 {
+    using SafeMath for uint256;
+
+    IUniswapV2Router02 public uniswapV2Router;
+    address public  uniswapV2PairU;
+    address public  uniswapV2PairT;
+    address private _MarketAddress = address(0x26BEeA5906482C81a0f66b0F80e2036f91D8C65E);
+    uint256 total = 21000000 * 10**decimals();
+    mapping(address => bool) private _isExcludedFromFees;
+
+    uint256 public sellFee = 1;
+    uint256 public dividend = 100;
+
+    constructor() ERC20("STAR", "STAR") {
+        
+        IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(0x10ED43C718714eb63d5aA57B78B54704E256024E);
+        address _uniswapV2PairU = IUniswapV2Factory(_uniswapV2Router.factory())
+        .createPair(address(this), address(0x55d398326f99059fF775485246999027B3197955));
+
+        address _uniswapV2PairT = IUniswapV2Factory(_uniswapV2Router.factory())
+        .createPair(address(this), address(0xa3F2d13e003F2Fe1F113cF265b2a629494af4459)); 
+
+        uniswapV2Router = _uniswapV2Router;
+        uniswapV2PairU = _uniswapV2PairU;
+        uniswapV2PairT = _uniswapV2PairT;
+        _mint(msg.sender, total);
+    }
+
+    receive() external payable {}
+
+    function _transfer( address from, address to, uint256 amount ) internal override {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(to != address(0), "ERC20: transfer to the zero address");
+      
+        if(_isExcludedFromFees[from] || _isExcludedFromFees[to] ){
+            super._transfer(from, to, amount);
+            return;
+        }
+        
+        if(to == uniswapV2PairU || to == uniswapV2PairT){
+            super._transfer(from, _MarketAddress, amount.div(100).mul(sellFee));
+            amount = amount.div(100).mul(dividend.sub(sellFee));
+        }
+
+        super._transfer(from, to, amount);
+    }
+
+
+    function excludeFromFees(address account, bool excluded) public onlyOwner {
+        _isExcludedFromFees[account] = excluded;
+    }
+
+	
+    function excludeMultipleAccountsFromFees(address[] calldata accounts, bool excluded) public onlyOwner {
+        for (uint256 i = 0; i < accounts.length; i++) {
+            _isExcludedFromFees[accounts[i]] = excluded;
+        }
+    }
+    
+    function rescueToken(address tokenAddress, uint256 tokens) public onlyOwner returns (bool success){
+        return IERC20(tokenAddress).transfer(msg.sender, tokens);
+    }
+
+    function rescueETH(uint256 amount) public onlyOwner{
+        payable(msg.sender).transfer(amount);
+    }
+
+}
