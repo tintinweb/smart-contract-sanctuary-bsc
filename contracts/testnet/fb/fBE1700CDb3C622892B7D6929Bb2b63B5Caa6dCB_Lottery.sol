@@ -1,0 +1,201 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-06-25
+*/
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.14;
+
+
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+
+    function balanceOf(address account) external view returns (uint256);
+
+    function transfer(address recipient, uint256 amount)
+        external
+        returns (bool);
+
+    function allowance(address owner, address spender)
+        external
+        view
+        returns (uint256);
+
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    function transferFrom(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) external returns (bool);
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(
+        address indexed owner,
+        address indexed spender,
+        uint256 value
+    );
+}
+
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        this; // silence state mutability warning without generating bytecode - see https://github.com/ethereum/solidity/issues/2691
+        return msg.data;
+    }
+}
+
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(
+        address indexed previousOwner,
+        address indexed newOwner
+    );
+
+    constructor() {
+        address msgSender = _msgSender();
+        _owner = msgSender;
+        emit OwnershipTransferred(address(0), msgSender);
+    }
+
+    function owner() public view returns (address) {
+        return _owner;
+    }
+
+    modifier onlyOwner() {
+        require(_owner == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    function renounceOwnership() public virtual onlyOwner {
+        emit OwnershipTransferred(_owner, address(0));
+        _owner = address(0);
+    }
+
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(
+            newOwner != address(0),
+            "Ownable: new owner is the zero address"
+        );
+        emit OwnershipTransferred(_owner, newOwner);
+        _owner = newOwner;
+    }
+}
+
+
+
+contract Lottery is Ownable {
+
+    address public token;
+    IERC20 public lotteryToken;
+    mapping (uint256 => address) public winnersTop100;
+    mapping (uint256 => address) public winnersTop100_200;
+
+    mapping (address=> uint256) public winnersTop100Amounts;
+    mapping (address=> uint256) public winnersTop100_200Amounts;
+
+    address[] private lastWinnersTop100;
+    address[] private lastWinnersTop100_200;
+
+    uint256 public top100WinnersCount;
+    uint256 public top100_200WinnersCount;
+
+    uint256 public minimumHoldAmount=20;
+
+    uint256 public top100WinnerLenght = 5;
+    uint256 public top100_200WinnerLenght = 5;
+    uint256 public totalWinnerLenght = 10;
+
+    uint256 lastGiveAwayTime;
+    uint256 giveAwayPeriod;
+
+
+    event PickWinner(bool lotteryEnded, uint256 time);
+
+    function pickWinner() external onlyOwner{
+        emit PickWinner(true,block.timestamp);
+    }
+
+    function setToken(address _token) external onlyOwner{
+        token=_token;
+        lotteryToken=IERC20(_token);
+    }
+    
+    function setGiveAwayPeriod(uint256 _giveAwayPeriod) external onlyOwner{
+        require(_giveAwayPeriod>0,"Giveaway time must be greater than zero!");
+        giveAwayPeriod=_giveAwayPeriod;
+    }
+
+    function giveAwayTokens(address[] memory winners ) external onlyOwner{
+        require(winners.length==totalWinnerLenght,"There is 10 winner at each giveaway!");
+        require(lotteryToken!=IERC20(address(0)),"Giveaway token can not be the zero address!");
+
+        if (lastGiveAwayTime!=0){
+            require(lastGiveAwayTime + giveAwayPeriod < block.timestamp,"Next giveaway time has not met yet!");
+        }
+
+        uint32 i;
+        
+        for (i=0;i<winners.length;i++)
+        {
+            uint256 amount=IERC20(token).balanceOf(winners[i])/100;
+            address winner = winners[i];
+            IERC20(token).transfer(winner , amount);
+            if(i<top100WinnerLenght)
+            {
+                winnersTop100[top100WinnersCount] = winner;
+                winnersTop100Amounts[winner] = amount;
+                top100WinnersCount++;
+
+            }
+            else{
+                winnersTop100_200[top100_200WinnersCount] = winner;
+                winnersTop100_200Amounts[winner] = amount;
+                top100_200WinnersCount++;
+            }
+        }
+        setLastTop100Winners();
+        setLastTop100_200Winners();
+        lastGiveAwayTime=block.timestamp;
+    }
+
+
+    function setLastTop100Winners() private{
+        lastWinnersTop100 = new address[](0);
+        for(uint256 i = top100WinnersCount ; i > top100WinnersCount - top100WinnerLenght ; i-- )
+            lastWinnersTop100.push(winnersTop100[i-1]);
+    }
+
+    function setLastTop100_200Winners() private{
+        lastWinnersTop100_200 = new address[](0);
+        for(uint256 i = top100_200WinnersCount ; i > top100_200WinnersCount - top100_200WinnerLenght ; i-- )
+            lastWinnersTop100_200.push(winnersTop100_200[i-1]);
+    }
+
+    function getLastWinnersTop100() public view returns(address[] memory){
+        return lastWinnersTop100;
+    }
+
+    function getLastWinnersTop100_200() public view returns(address[] memory){
+        return lastWinnersTop100_200;
+    }
+
+    function claimStuckTokens(address _token) 
+        external 
+        onlyOwner 
+    {
+        if (_token == address(0x0)) {
+            payable(msg.sender).transfer(address(this).balance);
+            return;
+        }
+        IERC20 ERC20token = IERC20(_token);
+        uint256 balance = ERC20token.balanceOf(address(this));
+        ERC20token.transfer(msg.sender, balance);
+    }
+
+
+}
