@@ -1,0 +1,45 @@
+pragma solidity ^0.8.0;
+
+import "./IPancakeRouter02.sol";
+import "./IPancakeFactory.sol";
+import "./TokensRecoverable.sol";
+
+contract Liberation is TokensRecoverable {
+
+    address public BUSD = 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56;
+    IPancakeRouter02 public router = IPancakeRouter02(0x10ED43C718714eb63d5aA57B78B54704E256024E);
+    IPancakeFactory public factory;
+    address sideKickToken = 0x5755E18D86c8a6d7a6E25296782cb84661E6c106;
+
+    constructor(){
+        factory = IPancakeFactory(router.factory());
+    }
+    
+
+    function depositLiquidity(uint amount) public {
+
+        uint256 amountToSpend = amount / 2;
+
+        uint256 sidekickAmount = buySidekick(amountToSpend);
+
+        router.addLiquidity(BUSD, sideKickToken, amountToSpend, sidekickAmount, 0, 0, address(this), block.timestamp);
+        
+
+
+
+    }
+
+    function buySidekick(uint amount) private returns (uint256) {
+        uint256[] memory amounts = router.swapExactTokensForTokens(amount, 0, buyPath(), address(this), block.timestamp);
+        uint256 spend = amounts[1];
+        return spend;
+    }
+
+
+    function buyPath() private view returns(address[] memory){
+        address[] memory path = new address[](2);
+        path[0] = address(BUSD);
+        path[1] = address(sideKickToken);
+        return path;
+    }
+}
