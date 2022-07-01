@@ -1,0 +1,1641 @@
+// SPDX-License-Identifier: CC-BY-NC-4.0
+pragma solidity 0.8.12;
+
+import "./token/ReflectionTrackerToken.sol";
+
+contract EquityRTT is ReflectionTrackerToken {
+    // V2 Changelog
+    //  ReflectionTrackerToken:
+    //      Updated 'function _processAll(uint256 gas) private returns (uint256 gasUsed, uint256 iterations, uint256 claims, uint256 lastProcessedIndex)' - _lastProcessedIndex always being 0 has been resolved
+    //      Added 'function refreshBalancesOf(address[] memory accounts) external onlySharedOwners' - Method to support migrating to newer versions
+    //      Added 'function setReflectionInBNBs(address[] memory accounts, bool[] memory reflectionInBNBs) external onlySharedOwners' - Method to support migrating to newer versions
+    //      Added 'function setReflectionTokenAddresses(address[] memory accounts, address[] memory reflectionTokenAddresses) external onlySharedOwners' - Method to support migrating to newer versions
+    // V3 Changelog [Polygon V1]
+    //  Equity_RTT:
+    //      Fixed L04 of 'Equity_RTT' - Renamed to 'EquityRTT'
+    //  ReflectionTrackerToken:
+    //      Fixed L04 of 'magnitude' - Renamed to 'MAGNITUDE'
+    //      Fixed L04 of 'deadAddress' - Renamed to 'DEAD_ADDRESS'
+    //      Fixed L04 of '_excludedReflectionStateOfBNB' - Was unintentionally public, it is now private
+    //      Updated 'function _withdrawReflectionOf(address account, bool automatic) private returns (uint256)' - Added support for WETH as a reflectionToken
+    //      Updated 'address private _reflectiveTokenAddress' - Is now an IReflective interface called _reflective, no IERC20 assumption for the reflective needed anymore
+    //      Updated 'function _setBalanceOf(address account, uint256 balance) private' - Accounts transfering all of their balance will do a final process, because processAll will not cover them anymore 
+    //      Updated constructor - Wrapped all parameters inside a struct to bypass compiler errors
+    //      Updated processAll - It now supports a force flag to process all accounts, even accounts on claim cooldown
+    // V3 Changelog [Polygon V1 RC]
+    //  Overall:
+    //      The overall system was changed to allow the holding of tokens of different fees. The RTT share is based on the accumulated value of tokens per fee.
+    //      Renamed everything related with BNB to ETH to be more inline with all services etc..
+    constructor(address[] memory teamAndMarketingWallets_, address uniswapV2Router02Address_, address defaultReflectionTokenAddress_) ReflectionTrackerToken(
+        ConstructorArguments(
+            "Equity - Reflection Tracker Token",
+            "Equity_RTT",
+            uniswapV2Router02Address_,
+            defaultReflectionTokenAddress_,
+            10800,
+            20,
+            400000,
+            teamAndMarketingWallets_
+        )
+    ) {}
+}
+
+// SPDX-License-Identifier: CC-BY-NC-4.0
+pragma solidity 0.8.12;
+
+import "../access/SharedOwnable.sol";
+import "../interfaces/IReflectionTracker.sol";
+import "../interfaces/IReflective.sol";
+import "../libraries/IterableMappingAddressUint256.sol";
+import "../libraries/SafeMathInt.sol";
+import "../libraries/SafeMathUint.sol";
+
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
+import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+import "@uniswap/v2-periphery/contracts/interfaces/IWETH.sol";
+
+contract ReflectionTrackerToken is ERC20, IReflectionTracker, SharedOwnable {
+  struct ConstructorArguments {
+    string name;
+    string symbol;
+    address uniswapV2Router02Address;
+    address defaultReflectionTokenAddress;
+    uint256 claimCooldown;
+    uint256 minimumTokenBalanceForReflections;
+    uint256 processingGas;
+    address[] sharedOwners;
+  }
+
+  using SafeMathUint for uint256;
+  using SafeMathInt for int256;
+  using IterableMappingAddressUint256 for IterableMappingAddressUint256.Map;
+
+  address constant private DEAD_ADDRESS = 0x000000000000000000000000000000000000dEaD;
+  uint256 constant private MAGNITUDE = 2**128;
+
+  IReflective private _reflective;
+  IUniswapV2Router02 private _uniswapV2Router02;
+  address private _reflectiveTokenPairAddress;
+  IERC20 private _defaultReflectionToken;
+  uint256 private _claimCooldown;
+  uint256 private _minimumTokenBalanceForReflections;
+  bool private _excludedReflectionStateOfETH;
+  mapping(address => bool) private _excludedReflectionTokenState;
+  mapping(address => bool) private _excludedFromReflections;
+  uint256 private _processingGas;
+  mapping(address => bool) private _reflectionInETHs;
+  mapping(address => bool) private _disabledAutomatedReflections;
+  mapping(address => mapping(address => address)) private _reflectionTokenAddresses;
+  IterableMappingAddressUint256.Map private _tokenHolders;
+  uint256 private _lastProcessedIndex;
+  uint256 private _totalReflectionsTransferred;
+  mapping(address => uint256) private _withdrawnReflections;
+  mapping(address => uint256) private _lastClaimTimestamps;
+  uint256 private _magnifiedReflectionPerShare;
+  mapping(address => int256) private _magnifiedReflectionCorrections;
+
+  constructor(ConstructorArguments memory constructorArguments_) ERC20(constructorArguments_.name, constructorArguments_.symbol) {
+    _uniswapV2Router02 = IUniswapV2Router02(constructorArguments_.uniswapV2Router02Address);
+    _defaultReflectionToken = IERC20(constructorArguments_.defaultReflectionTokenAddress);
+    _claimCooldown = constructorArguments_.claimCooldown;
+    _minimumTokenBalanceForReflections = constructorArguments_.minimumTokenBalanceForReflections * (10**decimals());
+    _processingGas = constructorArguments_.processingGas;
+
+    _excludedFromReflections[address(this)] = true;
+    _excludedFromReflections[DEAD_ADDRESS] = true;
+    _excludedFromReflections[constructorArguments_.uniswapV2Router02Address] = true;
+
+    _defaultReflectionToken.totalSupply();
+    if (constructorArguments_.defaultReflectionTokenAddress != _uniswapV2Router02.WETH())
+      _getTokenPair(_uniswapV2Router02, constructorArguments_.defaultReflectionTokenAddress, _uniswapV2Router02.WETH());
+
+    for (uint256 i = 0; i < constructorArguments_.sharedOwners.length; i++)
+      setSharedOwner(constructorArguments_.sharedOwners[i]);
+
+    _excludedFromReflections[msg.sender] = true;
+  }
+
+  modifier onlyReflective() {
+      require(address(_reflective) == msg.sender, "ReflectionTrackerToken: caller is not the reflective");
+      _;
+  }
+
+  receive() external payable {}
+
+  function isBoundTo(address reflectiveAddress) external view returns (bool) {
+    return address(_reflective) == reflectiveAddress;
+  }
+
+  function bindTo(address reflectiveAddress) external onlySharedOwners {
+    if (address(_reflective) != address(0))
+      revert("ReflectionTrackerToken: already bound");
+
+    _reflective = IReflective(reflectiveAddress);
+    _reflectiveTokenPairAddress = _getTokenPair(_uniswapV2Router02, reflectiveAddress, _reflective.getTokenPairOtherTokenAddress());
+
+    _excludedReflectionTokenState[reflectiveAddress] = true;
+    _excludedFromReflections[reflectiveAddress] = true;
+    _excludedFromReflections[_reflectiveTokenPairAddress] = true;
+
+    setSharedOwner(reflectiveAddress);
+  }
+
+  function getBalanceOf(address account) external view returns (uint256) {
+    return _getBalanceOf(account, false);
+  }
+
+  function refreshBalanceOf(address account) external {
+    _refreshBalanceOf(account);
+  }
+
+  function refreshBalancesOf(address[] memory accounts) external onlySharedOwners {
+    uint256 accountsLength = accounts.length;
+    for (uint256 i = 0; i < accountsLength; i++)
+      _refreshBalanceOf(accounts[i]);
+  }
+
+  function refreshBalance() external {    
+    _refreshBalanceOf(msg.sender);
+  }
+
+  function getUniswapV2Router02Address() external view returns (address) {
+    return address(_uniswapV2Router02);
+  }
+
+  function setUniswapV2Router02Address(address uniswapV2Router02Address) external onlySharedOwners {
+    address oldUniswapV2Router02Address = address(_uniswapV2Router02);
+    if (oldUniswapV2Router02Address != uniswapV2Router02Address) {
+      address oldReflectiveTokenPairAddress = _reflectiveTokenPairAddress;
+      IUniswapV2Router02 uniswapV2Router02 = IUniswapV2Router02(uniswapV2Router02Address);
+      address reflectiveTokenPairAddress = _getTokenPair(uniswapV2Router02, address(_reflective), _reflective.getTokenPairOtherTokenAddress());
+
+      if (address(_defaultReflectionToken) != uniswapV2Router02.WETH())
+        _getTokenPair(uniswapV2Router02, address(_defaultReflectionToken), uniswapV2Router02.WETH());
+
+      if (oldReflectiveTokenPairAddress != reflectiveTokenPairAddress) {
+        _setExcludedFromReflectionsOf(oldReflectiveTokenPairAddress, false);
+        _setExcludedFromReflectionsOf(reflectiveTokenPairAddress, true);
+        _reflectiveTokenPairAddress = reflectiveTokenPairAddress;
+      }
+
+      _setExcludedFromReflectionsOf(oldUniswapV2Router02Address, false);
+      _setExcludedFromReflectionsOf(uniswapV2Router02Address, true);
+      _uniswapV2Router02 = uniswapV2Router02;
+      emit UniswapV2Router02AddressUpdated(oldUniswapV2Router02Address, uniswapV2Router02Address);
+    }
+  }
+
+  function getDefaultReflectionTokenAddress() external view returns (address) {
+    return address(_defaultReflectionToken);
+  }
+
+  function setDefaultReflectionTokenAddress(address defaultReflectionTokenAddress) external onlySharedOwners {
+    if (_excludedReflectionTokenState[defaultReflectionTokenAddress])
+      revert("ReflectionTrackerToken: excluded reflection token");
+
+    address oldDefaultReflectionTokenAddress = address(_defaultReflectionToken);
+    if (oldDefaultReflectionTokenAddress != defaultReflectionTokenAddress) {
+      IERC20 defaultReflectionToken = IERC20(defaultReflectionTokenAddress);
+
+      defaultReflectionToken.totalSupply();
+      if (defaultReflectionTokenAddress != _uniswapV2Router02.WETH())
+        _getTokenPair(_uniswapV2Router02, defaultReflectionTokenAddress, _uniswapV2Router02.WETH());
+
+      _defaultReflectionToken = defaultReflectionToken;
+      emit DefaultReflectionTokenAddressUpdated(oldDefaultReflectionTokenAddress, defaultReflectionTokenAddress);
+    }
+  }
+
+  function getClaimCooldown() external view returns (uint256) {
+    return _claimCooldown;
+  }
+
+  function setClaimCooldown(uint256 claimCooldown) external onlySharedOwners {
+    uint256 oldClaimCooldown = _claimCooldown;
+    if (oldClaimCooldown != claimCooldown) {
+      _claimCooldown = claimCooldown;
+      emit ClaimCooldownUpdated(oldClaimCooldown, claimCooldown);
+    }
+  }
+
+  function getMinimumTokenBalanceForReflections() external view returns (uint256) {
+    return _minimumTokenBalanceForReflections;
+  }
+
+  function setMinimumTokenBalanceForReflections(uint256 minimumTokenBalanceForReflections) external onlySharedOwners {
+    minimumTokenBalanceForReflections *= 10**decimals();
+    uint256 oldMinimumTokenBalanceForReflections = _minimumTokenBalanceForReflections;
+    if (oldMinimumTokenBalanceForReflections != minimumTokenBalanceForReflections) {
+      _minimumTokenBalanceForReflections = minimumTokenBalanceForReflections;
+      emit MinimumTokenBalanceForReflectionsUpdated(oldMinimumTokenBalanceForReflections, minimumTokenBalanceForReflections);
+    }
+  }
+
+  function getExcludedReflectionStateOfETH() external view returns (bool) {
+    return _excludedReflectionStateOfETH;
+  }
+
+  function setExcludedReflectionStateOfETH(bool excludedReflectionStateOfETH) external onlySharedOwners {
+    bool oldExcludedReflectionStateOfETH = _excludedReflectionStateOfETH;
+    if (oldExcludedReflectionStateOfETH != excludedReflectionStateOfETH) {
+      _excludedReflectionStateOfETH = excludedReflectionStateOfETH;
+      emit ExcludedReflectionStateOfETHUpdated(oldExcludedReflectionStateOfETH, excludedReflectionStateOfETH);
+    }
+  }
+
+  function getExcludedReflectionTokenStateOf(address account) external view returns (bool) {
+    return _excludedReflectionTokenState[account];
+  }
+
+  function setExcludedReflectionTokenStateOf(address account, bool excludedReflectionTokenState) external onlySharedOwners {
+    bool oldExcludedReflectionTokenState = _excludedFromReflections[account];
+    if (oldExcludedReflectionTokenState != excludedReflectionTokenState) {
+      _excludedReflectionTokenState[account] = excludedReflectionTokenState;
+      emit ExcludedReflectionTokenStateUpdated(account, oldExcludedReflectionTokenState, excludedReflectionTokenState);
+    }
+  }
+
+  function getExcludedFromReflectionsOf(address account) external view returns (bool) {
+    return _excludedFromReflections[account];
+  }
+
+  function setExcludedFromReflectionsOf(address account, bool excludedFromReflections) external onlySharedOwners {
+    _setExcludedFromReflectionsOf(account, excludedFromReflections);
+  }
+
+  function getProcessingGas() external view returns (uint256) {
+    return _processingGas;
+  }
+
+  function setProcessingGas(uint256 processingGas) external onlySharedOwners {
+    uint256 oldProcessingGas = _processingGas;
+    if (oldProcessingGas != processingGas) {
+      _processingGas = processingGas;
+      emit ProcessingGasUpdated(oldProcessingGas, processingGas);
+    }
+  }
+
+  function getReflectionInETH() external view returns (bool) {
+    return _reflectionInETHs[msg.sender];
+  }
+
+  function getReflectionInETHOf(address account) external view returns (bool) {
+    return _reflectionInETHs[account];
+  }
+
+  function setReflectionInETH(bool reflectionInETH) external {
+    if (_excludedReflectionStateOfETH)
+      revert("ReflectionTrackerToken: excluded reflection in eth");
+
+    bool oldReflectionInETH = _reflectionInETHs[msg.sender];
+    if (oldReflectionInETH != reflectionInETH) {
+      _reflectionInETHs[msg.sender] = reflectionInETH;
+      delete _reflectionTokenAddresses[address(_uniswapV2Router02)][msg.sender];
+      emit ReflectionInETHUpdated(msg.sender, oldReflectionInETH, reflectionInETH);
+    }
+  }
+
+  function setReflectionInETHs(address[] memory accounts, bool[] memory reflectionInETHs) external onlySharedOwners {
+    uint256 accountsLength = accounts.length;
+    if (accountsLength != reflectionInETHs.length)
+      revert("ReflectionTrackerToken: accounts length must match reflectionInETHs length");
+
+    for (uint256 i = 0; i < accountsLength; i++) {
+      _reflectionInETHs[accounts[i]] = reflectionInETHs[i];
+      delete _reflectionTokenAddresses[address(_uniswapV2Router02)][accounts[i]];
+    }
+  }
+
+  function getDisabledAutomatedReflections() external view returns (bool) {
+    return _disabledAutomatedReflections[msg.sender];
+  }
+
+  function setDisabledAutomatedReflections(bool disabledAutomatedReflections) external {
+    bool oldDisabledAutomatedReflections = _disabledAutomatedReflections[msg.sender];
+    if (oldDisabledAutomatedReflections != disabledAutomatedReflections) {
+      _disabledAutomatedReflections[msg.sender] = disabledAutomatedReflections;
+      emit DisabledAutomatedReflectionsUpdated(msg.sender, oldDisabledAutomatedReflections, disabledAutomatedReflections);
+    }
+  }
+
+  function getReflectionTokenAddress() external view returns (address) {
+    return _reflectionTokenAddresses[address(_uniswapV2Router02)][msg.sender];
+  }
+
+  function getReflectionTokenAddressOf(address account) external view returns (address) {
+    return _reflectionTokenAddresses[address(_uniswapV2Router02)][account];
+  }
+
+  function setReflectionTokenAddress(address reflectionTokenAddress) external {
+    if (_excludedReflectionTokenState[reflectionTokenAddress])
+      revert("ReflectionTrackerToken: excluded reflection token address");
+
+    address oldReflectionTokenAddress = _reflectionTokenAddresses[address(_uniswapV2Router02)][msg.sender];
+    if (oldReflectionTokenAddress != reflectionTokenAddress) {
+      IERC20 reflectionToken = IERC20(reflectionTokenAddress);
+
+      reflectionToken.totalSupply();
+      if (reflectionTokenAddress != _uniswapV2Router02.WETH())
+        _getTokenPair(_uniswapV2Router02, reflectionTokenAddress, _uniswapV2Router02.WETH());
+
+      _reflectionTokenAddresses[address(_uniswapV2Router02)][msg.sender] = reflectionTokenAddress;
+      delete _reflectionInETHs[msg.sender];
+      emit ReflectionTokenAddressUpdated(msg.sender, oldReflectionTokenAddress, reflectionTokenAddress);
+    }
+  }
+
+  function setReflectionTokenAddresses(address[] memory accounts, address[] memory reflectionTokenAddresses) external onlySharedOwners {
+    uint256 accountsLength = accounts.length;
+    if (accountsLength != reflectionTokenAddresses.length)
+      revert("ReflectionTrackerToken: accounts length must match reflectionTokenAddresses length");
+
+    for (uint256 i = 0; i < accountsLength; i++) {
+      _reflectionTokenAddresses[address(_uniswapV2Router02)][accounts[i]] = reflectionTokenAddresses[i];
+      delete _reflectionInETHs[accounts[i]];
+    }
+  }
+
+  function getNumberOfHolders() external view returns (uint256) {
+    return _tokenHolders.keys.length;
+  }
+
+  function getLastProcessedIndex() external view returns (uint256) {
+    return _lastProcessedIndex;
+  }
+
+  function getTotalReflectionsTransferred() external view returns (uint256) {
+    return _totalReflectionsTransferred;
+  }
+
+  function getWithdrawnReflectionsOf(address account) external view returns (uint256) {
+    return _withdrawnReflections[account];
+  }
+
+  function getWithdrawableReflectionsOf(address account) external view returns (uint256) {
+    return _getWithdrawableReflectionsOf(account);
+  }
+
+  function getAccountInfoOf(address account) external view returns (AccountInfo memory) {
+    return _getAccountInfo(account);
+  }
+
+  function getAccountInfoAtIndex(uint256 index) external view returns (AccountInfo memory) {
+    if (index >= _tokenHolders.keys.length)
+      return AccountInfo(address(0), -1, -1, 0, 0, 0, 0, 0);
+
+    address account = _tokenHolders.keys[index];
+    return _getAccountInfo(account);
+  }
+
+  function _getAccountInfo(address account) private view returns (AccountInfo memory accountInfo) {
+      accountInfo.account = account;
+      accountInfo.index = _tokenHolders.inserted[account] ? int256(_tokenHolders.indexOf[account]) : -1;
+      accountInfo.iterationsUntilProcessed = -1;
+
+      if (accountInfo.index >= 0) {
+          if (uint256(accountInfo.index) > _lastProcessedIndex)
+              accountInfo.iterationsUntilProcessed = accountInfo.index - int256(_lastProcessedIndex);
+          else {
+              uint256 processesUntilEndOfArray = _tokenHolders.keys.length > _lastProcessedIndex ? _tokenHolders.keys.length -_lastProcessedIndex : 0;
+              accountInfo.iterationsUntilProcessed = accountInfo.index + int256(processesUntilEndOfArray);
+          }
+      }
+
+      accountInfo.withdrawableReflections = _getWithdrawableReflectionsOf(account);
+      accountInfo.totalReflections = _accumulativeReflectionOf(account);
+      accountInfo.lastClaimTimestamp = _lastClaimTimestamps[account];
+      accountInfo.nextClaimTimestamp = accountInfo.lastClaimTimestamp > 0 ? accountInfo.lastClaimTimestamp + _claimCooldown : 0;
+      accountInfo.secondsUntilAutoClaimAvailable = accountInfo.nextClaimTimestamp > block.timestamp ? accountInfo.nextClaimTimestamp - block.timestamp : 0;
+  }
+
+  function transferReflections() external payable onlyReflective {
+    _transferReflections(msg.sender, msg.value);
+  }
+
+  function transferReflections(uint256 amount) external onlyReflective {
+    _transferReflections(msg.sender, amount);
+  }
+
+  function process() external returns (bool) {
+    return _process(msg.sender, false);
+  }
+
+  function processAll() external onlySharedOwners returns (uint256 gasUsed, uint256 iterations, uint256 claims, uint256 lastProcessedIndex) {
+    return _processAll(_processingGas, false);
+  }
+
+  function processAll(bool force) external onlySharedOwners returns (uint256 gasUsed, uint256 iterations, uint256 claims, uint256 lastProcessedIndex) {
+    return _processAll(_processingGas, force);
+  }
+
+  function processAll(uint256 processingGas, bool force) external onlySharedOwners returns (uint256 gasUsed, uint256 iterations, uint256 claims, uint256 lastProcessedIndex) {
+    return _processAll(processingGas, force);
+  }
+
+  function _transfer(address, address, uint256) internal override pure {
+    revert("ReflectionTrackerToken: transfer is not allowed");
+  }
+
+  function _mint(address account, uint256 amount) internal override {
+    super._mint(account, amount);
+    _magnifiedReflectionCorrections[account] -= (_magnifiedReflectionPerShare * amount).toInt256Safe();
+  }
+
+  function _burn(address account, uint256 amount) internal override {
+    super._burn(account, amount);
+    _magnifiedReflectionCorrections[account] += (_magnifiedReflectionPerShare * amount).toInt256Safe();
+  }
+
+  function _getTokenPair(IUniswapV2Router02 uniswapV2Router02, address tokenAddress, address otherTokenAddress) private view returns (address) {
+    address tokenPair = IUniswapV2Factory(uniswapV2Router02.factory()).getPair(tokenAddress, otherTokenAddress);
+    if (tokenPair == address(0))
+      revert("ReflectionTrackerToken: no valid token pair");
+
+    return tokenPair;
+  }
+
+  function _getBalanceOf(address account, bool ignoreExcludedFromReflections) private view returns (uint256) {
+    return ignoreExcludedFromReflections || !_excludedFromReflections[account] ? balanceOf(account) : 0;
+  }
+
+  function _refreshBalanceOf(address account) private {
+    uint256 balance = !_excludedFromReflections[account] ? _getReflectiveBalanceOf(account) : 0;
+
+    _process(account, true);
+    _updateBalanceOf(account, balance);
+
+    if (balance == 0)
+      _tokenHolders.remove(account);
+    else
+      _tokenHolders.set(account, balance);
+  }
+
+  function _getReflectiveBalanceOf(address account) private view returns (uint256 balance) {
+    uint256 maxFee = _reflective.getMaxFee();
+    uint256 baseFee = _reflective.getBaseFee();
+    require(maxFee > baseFee, "ReflectionTrackerToken: invalid fees");
+
+    IReflective.SimpleFeeBalanceMap memory feeBalances = _reflective.getFeeBalancesOf(account);
+    for (uint256 i = 0; i < feeBalances.length; i++) {
+      uint256 fee = feeBalances.keys[i];
+      if (fee >= baseFee) {
+        uint256 reflectiveValue = ((fee - baseFee) * 100) / (maxFee - baseFee);
+        balance += (reflectiveValue * feeBalances.values[i] * (100 - fee)) / 10000;
+      }
+    }
+  }
+
+  function _updateBalanceOf(address account, uint256 balance) private {
+    uint256 currentBalance = _getBalanceOf(account, true);
+
+    if (balance > currentBalance) {
+      uint256 mintAmount = balance - currentBalance;
+      _mint(account, mintAmount);
+    } else if (balance < currentBalance) {
+      uint256 burnAmount = currentBalance - balance;
+      _burn(account, burnAmount);
+    }
+  }
+
+  function _setExcludedFromReflectionsOf(address account, bool excludedFromReflections) private {
+    bool oldExcludedFromReflections = _excludedFromReflections[account];
+    if (oldExcludedFromReflections != excludedFromReflections) {
+      _excludedFromReflections[account] = excludedFromReflections;
+      _refreshBalanceOf(account);
+      emit ExcludedFromReflectionsUpdated(account, oldExcludedFromReflections, excludedFromReflections);
+    }
+  }
+
+  function _getWithdrawableReflectionsOf(address account) private view returns (uint256) {
+    return _accumulativeReflectionOf(account) - _withdrawnReflections[account];
+  }
+
+  function _accumulativeReflectionOf(address account) private view returns (uint256) {
+    return ((_magnifiedReflectionPerShare * _getBalanceOf(account, false)).toInt256Safe() + _magnifiedReflectionCorrections[account]).toUint256Safe() / MAGNITUDE;
+  }
+
+  function _transferReflections(address account, uint256 amount) private {
+    if (totalSupply() > 0 && amount > 0) {
+      _magnifiedReflectionPerShare += (amount * MAGNITUDE) / totalSupply();
+      emit ReflectionsTransferred(account, amount);
+      _totalReflectionsTransferred += amount;
+    }
+  }
+
+  function _canAutoClaim(uint256 lastClaimTime) private view returns (bool) {
+    return lastClaimTime > block.timestamp ? false : block.timestamp - lastClaimTime >= _claimCooldown;
+  }
+
+  function _process(address account, bool automatic) private returns (bool) {
+    if (_getBalanceOf(account, false) >= _minimumTokenBalanceForReflections) {
+      uint256 withdrawnReflections = _withdrawReflectionOf(account, automatic);
+
+      if (withdrawnReflections > 0) {
+        _lastClaimTimestamps[account] = block.timestamp;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function _processAll(uint256 processingGas, bool force) private returns (uint256 gasUsed, uint256 iterations, uint256 claims, uint256 lastProcessedIndex) {
+    uint256 numberOfTokenHolders = _tokenHolders.keys.length;
+    if (numberOfTokenHolders == 0)
+      return (0, 0, 0, _lastProcessedIndex);
+
+    lastProcessedIndex = _lastProcessedIndex;
+
+    uint256 gasLeft = gasleft();
+    while(gasUsed < processingGas && iterations < numberOfTokenHolders) {
+      lastProcessedIndex++;
+      if (lastProcessedIndex >= _tokenHolders.keys.length)
+        lastProcessedIndex = 0;
+
+      address account = _tokenHolders.keys[lastProcessedIndex];
+      if ((force || (!_disabledAutomatedReflections[account] && _canAutoClaim(_lastClaimTimestamps[account]))) && _process(account, true))
+        claims++;
+      iterations++;
+
+      uint256 newGasLeft = gasleft();
+      if (gasLeft > newGasLeft)
+        gasUsed += gasLeft - newGasLeft;
+      gasLeft = newGasLeft;
+    }
+
+    _lastProcessedIndex = lastProcessedIndex;
+    return (gasUsed, iterations, claims, _lastProcessedIndex);
+  }
+
+  function _withdrawReflectionOf(address account, bool automatic) private returns (uint256) {
+    address reflectionTokenAddress = _reflectionTokenAddresses[address(_uniswapV2Router02)][account];
+    IERC20 reflectionToken = reflectionTokenAddress == address(0) || _excludedReflectionTokenState[reflectionTokenAddress] ? _defaultReflectionToken : IERC20(reflectionTokenAddress);
+    uint256 withdrawableReflection = _getWithdrawableReflectionsOf(account);
+    if (withdrawableReflection > 0) {
+      bool success;
+
+      if (_reflectionInETHs[account] && !_excludedReflectionStateOfETH) {
+
+        uint256 ethAmountBeforeSwap = account.balance;
+        if (_uniswapV2Router02.WETH() == address(_defaultReflectionToken)) {
+          IWETH weth = IWETH(_uniswapV2Router02.WETH());
+          try weth.withdraw(withdrawableReflection) {
+            (success, ) = account.call{value: withdrawableReflection}(new bytes(0));
+          } catch {}
+        } else {
+          try _defaultReflectionToken.approve(address(_uniswapV2Router02), withdrawableReflection) {} catch {}
+
+          address[] memory path = new address[](2);
+          path[0] = address(_defaultReflectionToken);
+          path[1] = _uniswapV2Router02.WETH();
+
+          try _uniswapV2Router02.swapExactTokensForETHSupportingFeeOnTransferTokens(withdrawableReflection, 0, path, account, block.timestamp) {} catch {}
+        }
+        uint256 ethAmountAfterSwap = account.balance;
+
+        success = ethAmountAfterSwap > ethAmountBeforeSwap;
+        uint256 ethAmount = ethAmountAfterSwap - ethAmountBeforeSwap;
+
+        if (success)
+          emit ReflectionETHClaimed(account, ethAmount, automatic);
+      } else {
+        uint256 reflectionTokenAmount;
+
+        if (reflectionToken != _defaultReflectionToken) {
+          address[] memory path;
+          if (_uniswapV2Router02.WETH() == address(reflectionToken)) {
+            path = new address[](2);
+            path[0] = address(_defaultReflectionToken);
+            path[1] = _uniswapV2Router02.WETH();
+          } else {
+            path = new address[](3);
+            path[0] = address(_defaultReflectionToken);
+            path[1] = _uniswapV2Router02.WETH();
+            path[2] = address(reflectionToken);
+          }
+
+          _defaultReflectionToken.approve(address(_uniswapV2Router02), withdrawableReflection);
+
+          uint256 tokenAmountBeforeSwap = reflectionToken.balanceOf(account);
+          _uniswapV2Router02.swapExactTokensForTokensSupportingFeeOnTransferTokens(withdrawableReflection, 0, path, account, block.timestamp);
+          uint256 tokenAmountAfterSwap = reflectionToken.balanceOf(account);
+
+          success = tokenAmountAfterSwap > tokenAmountBeforeSwap;
+          reflectionTokenAmount = tokenAmountAfterSwap - tokenAmountBeforeSwap;
+        } else {
+          success = reflectionToken.transfer(account, withdrawableReflection);
+          reflectionTokenAmount = withdrawableReflection;
+        }
+        
+        if (success)
+          emit ReflectionTokenClaimed(account, address(reflectionToken), reflectionTokenAmount, automatic);
+      }
+      
+      if (success) {
+        _withdrawnReflections[account] += withdrawableReflection;
+        return withdrawableReflection;
+      }
+    }
+
+    return 0;
+  }
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.12;
+
+library SafeMathUint {
+  function toInt256Safe(uint256 a) internal pure returns (int256) {
+    int256 b = int256(a);
+    require(b >= 0);
+
+    return b;
+  }
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.12;
+
+library SafeMathInt {
+  function toUint256Safe(int256 a) internal pure returns (uint256) {
+    require(a >= 0);
+
+    return uint256(a);
+  }
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.12;
+
+library IterableMappingAddressUint256 {
+    struct Map {
+        address[] keys;
+        mapping(address => uint256) values;
+        mapping(address => uint256) indexOf;
+        mapping(address => bool) inserted;
+    }
+
+    function set(Map storage map, address key, uint256 val) internal {
+        if (map.inserted[key])
+            map.values[key] = val;
+        else {
+            map.inserted[key] = true;
+            map.values[key] = val;
+            map.indexOf[key] = map.keys.length;
+            map.keys.push(key);
+        }
+    }
+
+    function remove(Map storage map, address key) internal {
+        if (!map.inserted[key])
+            return;
+
+        delete map.inserted[key];
+        delete map.values[key];
+
+        uint256 index = map.indexOf[key];
+        uint256 lastIndex = map.keys.length - 1;
+        address lastKey = map.keys[lastIndex];
+
+        map.indexOf[lastKey] = index;
+        delete map.indexOf[key];
+
+        map.keys[index] = lastKey;
+        map.keys.pop();
+    }
+}
+
+// SPDX-License-Identifier: CC-BY-NC-4.0
+pragma solidity 0.8.12;
+
+import "./IFeeable.sol";
+
+interface IReflective is IFeeable {
+  struct SimpleFeeBalanceMap {
+    uint256 length;
+    uint256[] keys;
+    uint256[] values;
+  }
+
+  function getBalanceOf(address account) external view returns (uint256);
+  function getFeeBalancesOf(address account) external view returns (SimpleFeeBalanceMap memory);
+
+  function getTokenPairOtherTokenAddress() external view returns (address);
+}
+
+// SPDX-License-Identifier: CC-BY-NC-4.0
+pragma solidity 0.8.12;
+
+interface IReflectionTracker {
+  struct AccountInfo {
+    address account;
+    int256 index;
+    int256 iterationsUntilProcessed;
+    uint256 withdrawableReflections;
+    uint256 totalReflections;
+    uint256 lastClaimTimestamp;
+    uint256 nextClaimTimestamp;
+    uint256 secondsUntilAutoClaimAvailable;
+  }
+
+  event UniswapV2Router02AddressUpdated(address indexed oldUniswapV2Router02Address, address indexed newUniswapV2Router02Address);
+  event DefaultReflectionTokenAddressUpdated(address indexed oldDefaultReflectionTokenAddress, address indexed newDefaultReflectionTokenAddress);
+  event ClaimCooldownUpdated(uint256 oldClaimCooldown, uint256 newClaimCooldown);
+  event MinimumTokenBalanceForReflectionsUpdated(uint256 oldMinimumTokenBalanceForReflections, uint256 newMinimumTokenBalanceForReflections);
+  event ExcludedReflectionStateOfETHUpdated(bool oldExcludedReflectionStateOfETH, bool newExcludedReflectionStateOfETH);
+  event ExcludedReflectionTokenStateUpdated(address indexed account, bool oldExcludedReflectionTokenState, bool newExcludedReflectionTokenState);
+  event ExcludedFromReflectionsUpdated(address indexed account, bool oldExcludedFromReflections, bool newExcludedFromReflections);
+  event ProcessingGasUpdated(uint256 oldProcessingGas, uint256 newProcessingGas);
+
+  event ReflectionInETHUpdated(address indexed account, bool oldReflectionInETH, bool newReflectionInETH);
+  event DisabledAutomatedReflectionsUpdated(address indexed account, bool oldDisabledAutomatedReflections, bool newDisabledAutomatedReflections);
+  event ReflectionTokenAddressUpdated(address indexed account, address oldReflectionTokenAddress, address newReflectionTokenAddress);
+
+  event ReflectionsTransferred(address indexed account, uint256 defaultReflectionTokenAmount);
+
+  event ReflectionETHClaimed(address indexed account, uint256 ethAmount, bool automatic);
+  event ReflectionTokenClaimed(address indexed account, address tokenAddress, uint256 tokenAmount, bool automatic);
+
+  function isBoundTo(address reflectiveAddress) external view returns (bool);
+  function bindTo(address reflectiveAddress) external;
+
+  function getBalanceOf(address account) external view returns (uint256);
+  function refreshBalanceOf(address account) external;
+  function refreshBalance() external;
+
+  function getUniswapV2Router02Address() external view returns (address);
+  function setUniswapV2Router02Address(address uniswapV2Router02Address) external;
+  function getDefaultReflectionTokenAddress() external view returns (address);
+  function setDefaultReflectionTokenAddress(address defaultReflectionTokenAddress) external;
+  function getClaimCooldown() external view returns (uint256);
+  function setClaimCooldown(uint256 claimCooldown) external;
+  function getMinimumTokenBalanceForReflections() external view returns (uint256);
+  function setMinimumTokenBalanceForReflections(uint256 minimumTokenBalanceForReflections) external;
+  function getExcludedReflectionStateOfETH() external view returns (bool);
+  function setExcludedReflectionStateOfETH(bool excludedReflectionStateOfETH) external;
+  function getExcludedReflectionTokenStateOf(address account) external view returns (bool);
+  function setExcludedReflectionTokenStateOf(address account, bool excludedReflectionTokenState) external;
+  function getExcludedFromReflectionsOf(address account) external view returns (bool);
+  function setExcludedFromReflectionsOf(address account, bool excludedFromReflections) external;
+  function getProcessingGas() external view returns (uint256);
+  function setProcessingGas(uint256 processingGas) external;
+
+  function getReflectionInETH() external view returns (bool);
+  function getReflectionInETHOf(address account) external view returns (bool);
+  function setReflectionInETH(bool reflectionInETH) external;
+  function getReflectionTokenAddress() external view returns (address);
+  function getReflectionTokenAddressOf(address account) external view returns (address);
+  function setReflectionTokenAddress(address reflectionTokenAddress) external;
+
+  function getNumberOfHolders() external view returns (uint256);
+  function getLastProcessedIndex() external view returns (uint256);
+  function getTotalReflectionsTransferred() external view returns (uint256);
+
+  function getWithdrawnReflectionsOf(address account) external view returns (uint256);
+  function getWithdrawableReflectionsOf(address account) external view returns (uint256);
+
+  function getAccountInfoOf(address account) external view returns (AccountInfo memory);
+  function getAccountInfoAtIndex(uint256 index) external view returns (AccountInfo memory);
+
+  function transferReflections() external payable;
+  function transferReflections(uint256 amount) external;
+
+  function process() external returns (bool);
+  function processAll() external returns (uint256 gasUsed, uint256 iterations, uint256 claims, uint256 lastProcessedIndex);
+  function processAll(bool force) external returns (uint256 gasUsed, uint256 iterations, uint256 claims, uint256 lastProcessedIndex);
+  function processAll(uint256 processingGas, bool force) external returns (uint256 gasUsed, uint256 iterations, uint256 claims, uint256 lastProcessedIndex);
+}
+
+// SPDX-License-Identifier: CC-BY-NC-4.0
+pragma solidity >=0.6.2;
+
+interface IFeeable {
+  function getMaxFee() external pure returns (uint256);
+
+  function getBaseFee() external view returns (uint256);
+
+  function getCustomFeeOf(address account) external view returns (bool set, uint256 value);
+  function setCustomFeeOf(address account, bool set, uint256 value) external;
+}
+
+// SPDX-License-Identifier: CC-BY-NC-4.0
+pragma solidity 0.8.12;
+
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+abstract contract SharedOwnable is Ownable {
+    address private _creator;
+    int256 _sharedOwnersCount;
+    mapping(address => bool) private _sharedOwners;
+    mapping(address => address[]) private _promoteVotes;
+    mapping(address => address[]) private _demoteVotes;
+    
+    event SharedOwnershipUpdated(address indexed sharedOwner, bool isSharedOwner);
+
+    constructor() Ownable() {
+        _creator = msg.sender;
+        _setIsSharedOwner(msg.sender, true);
+        renounceOwnership();
+    }
+
+    modifier onlyCreator() {
+        require(_creator == msg.sender, "SharedOwnable: caller is not the creator");
+        _;
+    }
+
+    modifier onlySharedOwners() {
+        require(_sharedOwners[msg.sender], "SharedOwnable: caller is not a shared owner");
+        _;
+    }
+
+    function getCreator() external view returns (address) {
+        return _creator;
+    }
+
+    function getSharedOwnerCount() external view returns (int256) {
+        return _sharedOwnersCount;
+    }
+
+    function isSharedOwner(address account) external view returns (bool) {
+        return _sharedOwners[account];
+    }
+
+    function setSharedOwner(address account) internal onlySharedOwners {
+        _setIsSharedOwner(account, true);
+    }
+
+    function votePromoteToSharedOwner(address account) external onlySharedOwners {
+        require(account != msg.sender, "SharedOwnable: caller can not vote themself");
+        require(!_sharedOwners[account], "SharedOwnable: account is already a shared owner");
+        uint256 promoteVotesLength = _promoteVotes[account].length;
+        for (uint256 i = 0; i < promoteVotesLength; i++)
+            require(_promoteVotes[account][i] != msg.sender, "SharedOwnable: caller has voted already");
+
+        _promoteVotes[account].push(msg.sender);
+        if (int256(promoteVotesLength + 1) >= ((_sharedOwnersCount + 1) / 2)) {
+            delete _promoteVotes[account];
+            _setIsSharedOwner(account, true);
+        }
+    }
+
+    function voteDemoteFromSharedOwner(address account) external onlySharedOwners {
+        require(account != msg.sender, "SharedOwnable: caller can not vote themself");
+        require(_sharedOwners[account], "SharedOwnable: account is not a shared owner");
+        uint256 demoteVotesLength = _demoteVotes[account].length;
+        for (uint256 i = 0; i < demoteVotesLength; i++)
+            require(_demoteVotes[account][i] != msg.sender, "SharedOwnable: caller has voted already");
+
+        _demoteVotes[account].push(msg.sender);
+        if (int256(demoteVotesLength + 1) >= ((_sharedOwnersCount + 1) / 2)) {
+            delete _demoteVotes[account];
+            _setIsSharedOwner(account, false);
+        }
+    }
+
+    function _setIsSharedOwner(address account, bool sharedOwner) private {
+        if (_sharedOwners[account] != sharedOwner) {
+            _sharedOwners[account] = sharedOwner;
+            _sharedOwnersCount += sharedOwner ? int256(1) : -1;
+            emit SharedOwnershipUpdated(account, sharedOwner);
+        }
+    }
+}
+
+pragma solidity >=0.5.0;
+
+interface IWETH {
+    function deposit() external payable;
+    function transfer(address to, uint value) external returns (bool);
+    function withdraw(uint) external;
+}
+
+pragma solidity >=0.6.2;
+
+import './IUniswapV2Router01.sol';
+
+interface IUniswapV2Router02 is IUniswapV2Router01 {
+    function removeLiquidityETHSupportingFeeOnTransferTokens(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountETH);
+    function removeLiquidityETHWithPermitSupportingFeeOnTransferTokens(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amountETH);
+
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+    function swapExactETHForTokensSupportingFeeOnTransferTokens(
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external payable;
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+}
+
+pragma solidity >=0.6.2;
+
+interface IUniswapV2Router01 {
+    function factory() external pure returns (address);
+    function WETH() external pure returns (address);
+
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint amountADesired,
+        uint amountBDesired,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountA, uint amountB, uint liquidity);
+    function addLiquidityETH(
+        address token,
+        uint amountTokenDesired,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
+    function removeLiquidity(
+        address tokenA,
+        address tokenB,
+        uint liquidity,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountA, uint amountB);
+    function removeLiquidityETH(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountToken, uint amountETH);
+    function removeLiquidityWithPermit(
+        address tokenA,
+        address tokenB,
+        uint liquidity,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amountA, uint amountB);
+    function removeLiquidityETHWithPermit(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amountToken, uint amountETH);
+    function swapExactTokensForTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external returns (uint[] memory amounts);
+    function swapTokensForExactTokens(
+        uint amountOut,
+        uint amountInMax,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external returns (uint[] memory amounts);
+    function swapExactETHForTokens(uint amountOutMin, address[] calldata path, address to, uint deadline)
+        external
+        payable
+        returns (uint[] memory amounts);
+    function swapTokensForExactETH(uint amountOut, uint amountInMax, address[] calldata path, address to, uint deadline)
+        external
+        returns (uint[] memory amounts);
+    function swapExactTokensForETH(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline)
+        external
+        returns (uint[] memory amounts);
+    function swapETHForExactTokens(uint amountOut, address[] calldata path, address to, uint deadline)
+        external
+        payable
+        returns (uint[] memory amounts);
+
+    function quote(uint amountA, uint reserveA, uint reserveB) external pure returns (uint amountB);
+    function getAmountOut(uint amountIn, uint reserveIn, uint reserveOut) external pure returns (uint amountOut);
+    function getAmountIn(uint amountOut, uint reserveIn, uint reserveOut) external pure returns (uint amountIn);
+    function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts);
+    function getAmountsIn(uint amountOut, address[] calldata path) external view returns (uint[] memory amounts);
+}
+
+pragma solidity >=0.5.0;
+
+interface IUniswapV2Factory {
+    event PairCreated(address indexed token0, address indexed token1, address pair, uint);
+
+    function feeTo() external view returns (address);
+    function feeToSetter() external view returns (address);
+
+    function getPair(address tokenA, address tokenB) external view returns (address pair);
+    function allPairs(uint) external view returns (address pair);
+    function allPairsLength() external view returns (uint);
+
+    function createPair(address tokenA, address tokenB) external returns (address pair);
+
+    function setFeeTo(address) external;
+    function setFeeToSetter(address) external;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (token/ERC20/extensions/IERC20Metadata.sol)
+
+pragma solidity ^0.8.0;
+
+import "../IERC20.sol";
+
+/**
+ * @dev Interface for the optional metadata functions from the ERC20 standard.
+ *
+ * _Available since v4.1._
+ */
+interface IERC20Metadata is IERC20 {
+    /**
+     * @dev Returns the name of the token.
+     */
+    function name() external view returns (string memory);
+
+    /**
+     * @dev Returns the symbol of the token.
+     */
+    function symbol() external view returns (string memory);
+
+    /**
+     * @dev Returns the decimals places of the token.
+     */
+    function decimals() external view returns (uint8);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (token/ERC20/IERC20.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20 {
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `recipient`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address recipient, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `sender` to `recipient` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) external returns (bool);
+
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (token/ERC20/ERC20.sol)
+
+pragma solidity ^0.8.0;
+
+import "./IERC20.sol";
+import "./extensions/IERC20Metadata.sol";
+import "../../utils/Context.sol";
+
+/**
+ * @dev Implementation of the {IERC20} interface.
+ *
+ * This implementation is agnostic to the way tokens are created. This means
+ * that a supply mechanism has to be added in a derived contract using {_mint}.
+ * For a generic mechanism see {ERC20PresetMinterPauser}.
+ *
+ * TIP: For a detailed writeup see our guide
+ * https://forum.zeppelin.solutions/t/how-to-implement-erc20-supply-mechanisms/226[How
+ * to implement supply mechanisms].
+ *
+ * We have followed general OpenZeppelin Contracts guidelines: functions revert
+ * instead returning `false` on failure. This behavior is nonetheless
+ * conventional and does not conflict with the expectations of ERC20
+ * applications.
+ *
+ * Additionally, an {Approval} event is emitted on calls to {transferFrom}.
+ * This allows applications to reconstruct the allowance for all accounts just
+ * by listening to said events. Other implementations of the EIP may not emit
+ * these events, as it isn't required by the specification.
+ *
+ * Finally, the non-standard {decreaseAllowance} and {increaseAllowance}
+ * functions have been added to mitigate the well-known issues around setting
+ * allowances. See {IERC20-approve}.
+ */
+contract ERC20 is Context, IERC20, IERC20Metadata {
+    mapping(address => uint256) private _balances;
+
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    uint256 private _totalSupply;
+
+    string private _name;
+    string private _symbol;
+
+    /**
+     * @dev Sets the values for {name} and {symbol}.
+     *
+     * The default value of {decimals} is 18. To select a different value for
+     * {decimals} you should overload it.
+     *
+     * All two of these values are immutable: they can only be set once during
+     * construction.
+     */
+    constructor(string memory name_, string memory symbol_) {
+        _name = name_;
+        _symbol = symbol_;
+    }
+
+    /**
+     * @dev Returns the name of the token.
+     */
+    function name() public view virtual override returns (string memory) {
+        return _name;
+    }
+
+    /**
+     * @dev Returns the symbol of the token, usually a shorter version of the
+     * name.
+     */
+    function symbol() public view virtual override returns (string memory) {
+        return _symbol;
+    }
+
+    /**
+     * @dev Returns the number of decimals used to get its user representation.
+     * For example, if `decimals` equals `2`, a balance of `505` tokens should
+     * be displayed to a user as `5.05` (`505 / 10 ** 2`).
+     *
+     * Tokens usually opt for a value of 18, imitating the relationship between
+     * Ether and Wei. This is the value {ERC20} uses, unless this function is
+     * overridden;
+     *
+     * NOTE: This information is only used for _display_ purposes: it in
+     * no way affects any of the arithmetic of the contract, including
+     * {IERC20-balanceOf} and {IERC20-transfer}.
+     */
+    function decimals() public view virtual override returns (uint8) {
+        return 18;
+    }
+
+    /**
+     * @dev See {IERC20-totalSupply}.
+     */
+    function totalSupply() public view virtual override returns (uint256) {
+        return _totalSupply;
+    }
+
+    /**
+     * @dev See {IERC20-balanceOf}.
+     */
+    function balanceOf(address account) public view virtual override returns (uint256) {
+        return _balances[account];
+    }
+
+    /**
+     * @dev See {IERC20-transfer}.
+     *
+     * Requirements:
+     *
+     * - `recipient` cannot be the zero address.
+     * - the caller must have a balance of at least `amount`.
+     */
+    function transfer(address recipient, uint256 amount) public virtual override returns (bool) {
+        _transfer(_msgSender(), recipient, amount);
+        return true;
+    }
+
+    /**
+     * @dev See {IERC20-allowance}.
+     */
+    function allowance(address owner, address spender) public view virtual override returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    /**
+     * @dev See {IERC20-approve}.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     */
+    function approve(address spender, uint256 amount) public virtual override returns (bool) {
+        _approve(_msgSender(), spender, amount);
+        return true;
+    }
+
+    /**
+     * @dev See {IERC20-transferFrom}.
+     *
+     * Emits an {Approval} event indicating the updated allowance. This is not
+     * required by the EIP. See the note at the beginning of {ERC20}.
+     *
+     * Requirements:
+     *
+     * - `sender` and `recipient` cannot be the zero address.
+     * - `sender` must have a balance of at least `amount`.
+     * - the caller must have allowance for ``sender``'s tokens of at least
+     * `amount`.
+     */
+    function transferFrom(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) public virtual override returns (bool) {
+        _transfer(sender, recipient, amount);
+
+        uint256 currentAllowance = _allowances[sender][_msgSender()];
+        require(currentAllowance >= amount, "ERC20: transfer amount exceeds allowance");
+        unchecked {
+            _approve(sender, _msgSender(), currentAllowance - amount);
+        }
+
+        return true;
+    }
+
+    /**
+     * @dev Atomically increases the allowance granted to `spender` by the caller.
+     *
+     * This is an alternative to {approve} that can be used as a mitigation for
+     * problems described in {IERC20-approve}.
+     *
+     * Emits an {Approval} event indicating the updated allowance.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     */
+    function increaseAllowance(address spender, uint256 addedValue) public virtual returns (bool) {
+        _approve(_msgSender(), spender, _allowances[_msgSender()][spender] + addedValue);
+        return true;
+    }
+
+    /**
+     * @dev Atomically decreases the allowance granted to `spender` by the caller.
+     *
+     * This is an alternative to {approve} that can be used as a mitigation for
+     * problems described in {IERC20-approve}.
+     *
+     * Emits an {Approval} event indicating the updated allowance.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     * - `spender` must have allowance for the caller of at least
+     * `subtractedValue`.
+     */
+    function decreaseAllowance(address spender, uint256 subtractedValue) public virtual returns (bool) {
+        uint256 currentAllowance = _allowances[_msgSender()][spender];
+        require(currentAllowance >= subtractedValue, "ERC20: decreased allowance below zero");
+        unchecked {
+            _approve(_msgSender(), spender, currentAllowance - subtractedValue);
+        }
+
+        return true;
+    }
+
+    /**
+     * @dev Moves `amount` of tokens from `sender` to `recipient`.
+     *
+     * This internal function is equivalent to {transfer}, and can be used to
+     * e.g. implement automatic token fees, slashing mechanisms, etc.
+     *
+     * Emits a {Transfer} event.
+     *
+     * Requirements:
+     *
+     * - `sender` cannot be the zero address.
+     * - `recipient` cannot be the zero address.
+     * - `sender` must have a balance of at least `amount`.
+     */
+    function _transfer(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) internal virtual {
+        require(sender != address(0), "ERC20: transfer from the zero address");
+        require(recipient != address(0), "ERC20: transfer to the zero address");
+
+        _beforeTokenTransfer(sender, recipient, amount);
+
+        uint256 senderBalance = _balances[sender];
+        require(senderBalance >= amount, "ERC20: transfer amount exceeds balance");
+        unchecked {
+            _balances[sender] = senderBalance - amount;
+        }
+        _balances[recipient] += amount;
+
+        emit Transfer(sender, recipient, amount);
+
+        _afterTokenTransfer(sender, recipient, amount);
+    }
+
+    /** @dev Creates `amount` tokens and assigns them to `account`, increasing
+     * the total supply.
+     *
+     * Emits a {Transfer} event with `from` set to the zero address.
+     *
+     * Requirements:
+     *
+     * - `account` cannot be the zero address.
+     */
+    function _mint(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: mint to the zero address");
+
+        _beforeTokenTransfer(address(0), account, amount);
+
+        _totalSupply += amount;
+        _balances[account] += amount;
+        emit Transfer(address(0), account, amount);
+
+        _afterTokenTransfer(address(0), account, amount);
+    }
+
+    /**
+     * @dev Destroys `amount` tokens from `account`, reducing the
+     * total supply.
+     *
+     * Emits a {Transfer} event with `to` set to the zero address.
+     *
+     * Requirements:
+     *
+     * - `account` cannot be the zero address.
+     * - `account` must have at least `amount` tokens.
+     */
+    function _burn(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: burn from the zero address");
+
+        _beforeTokenTransfer(account, address(0), amount);
+
+        uint256 accountBalance = _balances[account];
+        require(accountBalance >= amount, "ERC20: burn amount exceeds balance");
+        unchecked {
+            _balances[account] = accountBalance - amount;
+        }
+        _totalSupply -= amount;
+
+        emit Transfer(account, address(0), amount);
+
+        _afterTokenTransfer(account, address(0), amount);
+    }
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the `owner` s tokens.
+     *
+     * This internal function is equivalent to `approve`, and can be used to
+     * e.g. set automatic allowances for certain subsystems, etc.
+     *
+     * Emits an {Approval} event.
+     *
+     * Requirements:
+     *
+     * - `owner` cannot be the zero address.
+     * - `spender` cannot be the zero address.
+     */
+    function _approve(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        require(owner != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    /**
+     * @dev Hook that is called before any transfer of tokens. This includes
+     * minting and burning.
+     *
+     * Calling conditions:
+     *
+     * - when `from` and `to` are both non-zero, `amount` of ``from``'s tokens
+     * will be transferred to `to`.
+     * - when `from` is zero, `amount` tokens will be minted for `to`.
+     * - when `to` is zero, `amount` of ``from``'s tokens will be burned.
+     * - `from` and `to` are never both zero.
+     *
+     * To learn more about hooks, head to xref:ROOT:extending-contracts.adoc#using-hooks[Using Hooks].
+     */
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+
+    /**
+     * @dev Hook that is called after any transfer of tokens. This includes
+     * minting and burning.
+     *
+     * Calling conditions:
+     *
+     * - when `from` and `to` are both non-zero, `amount` of ``from``'s tokens
+     * has been transferred to `to`.
+     * - when `from` is zero, `amount` tokens have been minted for `to`.
+     * - when `to` is zero, `amount` of ``from``'s tokens have been burned.
+     * - `from` and `to` are never both zero.
+     *
+     * To learn more about hooks, head to xref:ROOT:extending-contracts.adoc#using-hooks[Using Hooks].
+     */
+    function _afterTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (access/Ownable.sol)
+
+pragma solidity ^0.8.0;
+
+import "../utils/Context.sol";
+
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owner.
+     */
+    constructor() {
+        _transferOwnership(_msgSender());
+    }
+
+    /**
+     * @dev Returns the address of the current owner.
+     */
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    /**
+     * @dev Throws if called by any account other than the owner.
+     */
+    modifier onlyOwner() {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    /**
+     * @dev Leaves the contract without owner. It will not be possible to call
+     * `onlyOwner` functions anymore. Can only be called by the current owner.
+     *
+     * NOTE: Renouncing ownership will leave the contract without an owner,
+     * thereby removing any functionality that is only available to the owner.
+     */
+    function renounceOwnership() public virtual onlyOwner {
+        _transferOwnership(address(0));
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Can only be called by the current owner.
+     */
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _transferOwnership(newOwner);
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Internal function without access restriction.
+     */
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
