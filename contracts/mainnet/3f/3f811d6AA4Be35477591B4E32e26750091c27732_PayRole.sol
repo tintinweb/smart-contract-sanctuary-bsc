@@ -1,0 +1,195 @@
+//SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.15;
+
+import '@openzeppelin/contracts/token/ERC20/IERC20.sol';
+
+
+contract PayRole{
+
+/// @notice You can use this contract to set hourly payments
+/// @dev This contract were write in test-based
+
+address owner;
+IERC20 BUSD = IERC20(0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56);
+mapping(address => bool) allowed;
+mapping(address => uint) allowance;
+mapping(address => uint) moment;
+mapping(address => uint) residual;
+
+event devAdded(address);
+event allowanceAdded(address, uint);
+event allowanceChanged(address, uint);
+event claimed(address, uint);
+event ownershipTransfered(address);
+event ownerClaimned(uint);
+event hasResidual(address, uint);
+event residualClaimed(address, uint);
+
+
+constructor () public {
+owner = msg.sender;
+}
+
+/// @dev Owner access modifier
+
+modifier onlyOwner() {
+require(
+    msg.sender == owner, "This function is residualricted to the contract's owner");
+_;
+}
+
+/// @dev return the status of the address
+
+function getStatus(address _address) view external onlyOwner returns(bool){
+    return allowed[_address];
+}
+
+/// @notice Returns the claimable amount for an specific address
+/// @param _address The address in which you wanna know how much does per hour
+
+function checkReward(address _address) view external returns(uint){
+    uint _moment = moment[_address];
+    uint _allowance = allowance[_address];
+     uint result = (((block.timestamp - _moment) / 1 hours) * _allowance) + residual[_address];
+    return result;
+}
+
+/** 
+/// @notice write function to claim the value from the contract to msg.sender
+/// @dev It checks if there's balance on the contract for the whole payment 
+    if it does he claims, else we store the residual in a mapping for each address 
+*/
+
+function claim() external {
+    uint _moment = moment[msg.sender];
+    uint _allowance = allowance[msg.sender];
+    uint amount = (((block.timestamp - _moment) / 1 hours) * _allowance) + residual[msg.sender];
+    require(allowed[msg.sender] == true, 'This address is not allowed to perform withdrawns');
+    require(amount > 0 ,'No value to be claimned');
+        if(BUSD.balanceOf(address(this)) < amount){
+            uint _residual = amount - BUSD.balanceOf(address(this));
+            BUSD.transfer(msg.sender, BUSD.balanceOf(address(this)));
+            moment[msg.sender] = block.timestamp;
+            residual[msg.sender] = _residual;
+            emit hasResidual(msg.sender, _residual);
+            emit claimed(msg.sender, amount);        
+        }else{
+            BUSD.transfer(msg.sender, amount);
+            moment[msg.sender] = block.timestamp;
+            emit residualClaimed(msg.sender, residual[msg.sender]);
+            residual[msg.sender] = 0;
+            emit claimed(msg.sender, amount);
+        }
+}
+
+/// @notice Owner is able to add a dev along with his allowance per hour
+/// @param _address Address in which you wanna add in the payrole
+/// @param _allowance How much per hour this address should be making
+
+function addDev(address _address, uint _allowance) external onlyOwner {
+    allowed[_address] = true;
+    moment[_address] = block.timestamp;
+    allowance[_address] = _allowance * 1 ether;
+    emit devAdded(_address);
+    emit allowanceAdded(_address, _allowance);
+}
+
+/// @notice Update the allowance
+/// @param _address Address in which you wanna change the allowance
+/// @param _amount The amount per hour that you wanna make this address available to claim
+
+function setAllowance(address _address, uint _amount) external onlyOwner{
+    allowance[_address] = _amount * 1 ether;
+    emit allowanceChanged(_address, _amount);
+}
+
+/// @notice Pass the ownership for someone else
+/// @param _address Address that you wanna make the new owner
+
+function transferOwnership(address _address) external onlyOwner {
+    owner = _address;
+}
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.6.0) (token/ERC20/IERC20.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20 {
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `to`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `from` to `to` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+}
