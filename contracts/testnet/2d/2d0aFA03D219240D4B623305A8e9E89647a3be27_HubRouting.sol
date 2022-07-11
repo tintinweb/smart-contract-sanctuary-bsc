@@ -1,0 +1,191 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.15;
+
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+interface IStakingMain {
+    function WBNB() external view returns(address);
+}
+
+interface IStakingSet {
+    function buyStakingSet(uint256 amount, uint256 tokenId) external;
+    function withdrawUserRewards(uint256 id, address tokenOwner) external;
+    function burnStakingSet(uint256 id, address tokenOwner) external;
+    function getNFTfields(uint tokenId, uint NFTFieldIndex) 
+        external 
+        view 
+        returns (address pool, address rewardToken, uint256 rewardAmount, uint256 percentage, uint256 stakedAmount);
+    function purchaseToken() external view returns(address); 
+}
+
+contract HubRouting is Ownable {
+    address immutable StakingMain;
+    uint256 public stakingSetCount;
+
+    mapping(uint256 => bool) public listActive;
+    mapping(uint256 => address) public listMap; // stakingSet id => address
+    mapping(uint256 => address) public smartByNFT; // nft id => stakingSet address
+
+    event UpdateStakingSetStatus(uint256 indexed setNum, bool isActive);
+    event RegistrationSet(uint256 indexed stakingSetCount, address stakingSet, address purchaseToken);
+
+    constructor(address _StakingMain) {
+        require(_StakingMain != address(0), "HubRouting :: Zero address was given as StakingMain");
+        StakingMain = _StakingMain;
+    }
+
+    modifier onlyStakingMain {
+        require(msg.sender == StakingMain, "HubRouting::caller is not the Staking Main contract");
+        _;
+    }
+
+    function stake(uint256 _setNum, uint256 _amount, uint _tokenId) external payable onlyStakingMain {
+        require(listActive[_setNum], "StakingSet::not active");
+        smartByNFT[_tokenId] = listMap[_setNum];
+        (bool success,) = listMap[_setNum].call{value: msg.value}(abi.encodeWithSignature("buyStakingSet(uint256,uint256)",_amount,_tokenId));
+        require(success, "HubRouting::buySmartStaker failed");
+    }
+
+
+    function withdrawReward(uint256 _id, address _tokenOwner) external onlyStakingMain {
+        address stakingSet = smartByNFT[_id];
+        IStakingSet(stakingSet).withdrawUserRewards(_id, _tokenOwner);
+    }
+
+    function burn(uint256 _id, address _tokenOwner) external onlyStakingMain {
+        address stakingSet = smartByNFT[_id];
+        IStakingSet(stakingSet).burnStakingSet(_id, _tokenOwner);
+    }
+
+    
+    function getNFTFields(uint256 _id, uint256 NFTFieldIndex) 
+        external 
+        view 
+        returns (address pool, address rewardToken, uint256 rewardAmount, uint256 percentage, uint256 stakedAmount) 
+    {
+        (pool, rewardToken, rewardAmount, percentage, stakedAmount) = IStakingSet(smartByNFT[_id]).getNFTfields(_id, NFTFieldIndex);
+    }
+
+    function registrationSet(address _stakingSet) external onlyStakingMain {
+        listMap[stakingSetCount] = _stakingSet;
+        listActive[stakingSetCount] = true;
+        stakingSetCount++;
+        address purchaseToken = IStakingSet(_stakingSet).purchaseToken();
+
+        emit RegistrationSet(stakingSetCount, _stakingSet, purchaseToken);
+    }
+
+    function deactivateSet(uint256 _setNum) external onlyOwner {
+        listActive[_setNum] = false;
+
+        emit UpdateStakingSetStatus(_setNum, false);
+    }
+
+    function activateSet(uint256 _setNum) external onlyOwner {
+        listActive[_setNum] = true;
+
+        emit UpdateStakingSetStatus(_setNum, true);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (access/Ownable.sol)
+
+pragma solidity ^0.8.0;
+
+import "../utils/Context.sol";
+
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owner.
+     */
+    constructor() {
+        _transferOwnership(_msgSender());
+    }
+
+    /**
+     * @dev Returns the address of the current owner.
+     */
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    /**
+     * @dev Throws if called by any account other than the owner.
+     */
+    modifier onlyOwner() {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    /**
+     * @dev Leaves the contract without owner. It will not be possible to call
+     * `onlyOwner` functions anymore. Can only be called by the current owner.
+     *
+     * NOTE: Renouncing ownership will leave the contract without an owner,
+     * thereby removing any functionality that is only available to the owner.
+     */
+    function renounceOwnership() public virtual onlyOwner {
+        _transferOwnership(address(0));
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Can only be called by the current owner.
+     */
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _transferOwnership(newOwner);
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Internal function without access restriction.
+     */
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
