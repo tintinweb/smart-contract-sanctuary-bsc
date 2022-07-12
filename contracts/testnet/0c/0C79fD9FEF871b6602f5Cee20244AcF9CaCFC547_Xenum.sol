@@ -1,0 +1,339 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-07-12
+*/
+
+pragma solidity ^0.8.10;
+
+abstract contract Context 
+{
+    function _msgSender() internal view virtual returns (address) 
+    {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) 
+    {
+        this; // silence state mutability warning without generating bytecode - see https://github.com/ethereum/solidity/issues/2691
+        return msg.data;
+    }
+}
+
+
+
+
+interface IERC20 { 
+   
+    function totalSupply() external view returns (uint256);
+
+    
+    function balanceOf(address account) external view returns (uint256);
+
+   
+    function transfer(address recipient, uint256 amount) external returns (bool);
+
+   
+    function allowance(address owner, address spender) external view returns (uint256);
+
+   
+    function approve(address spender, uint256 amount) external returns (bool);
+
+   
+    function transferFrom(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) external returns (bool);
+
+   
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+   
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+
+
+
+interface IERC20Metadata is IERC20 { 
+  
+    function name() external view returns (string memory);
+
+   
+    function symbol() external view returns (string memory);
+
+   
+    function decimals() external view returns (uint8);
+}
+
+
+contract Token is Context, IERC20, IERC20Metadata
+ { 
+    
+    mapping(address => uint256) public _balances; 
+
+    mapping(address => mapping(address => uint256)) public _allowances;
+
+    uint256 public _totalSupply = 1000000000*10**18;   
+    
+    string public _name = "Xenum";  
+    
+    string public _symbol = "XNM"; 
+
+    address payable public marketingAddress = payable(0x8F1715f9a25ae4c8f2F900C255DfB85E896a201b); 
+    uint256 public marketingPercent = 1; 
+    
+    address public immutable burnAddress = 0x000000000000000000000000000000000000dEaD;
+    uint256 public burnPercent = 1; 
+    
+    uint256 public marketingAmount;
+    uint256 public burnAmount;
+    
+    function SetMarketingAddress(address payable  _marketingAddress) onlyOwner public {
+        marketingAddress = _marketingAddress;
+    }
+    
+    function SetMarketingPercent(uint256 _marketingPercent) onlyOwner public {
+        marketingPercent = _marketingPercent;
+    }
+    
+    function SetBurnPercent(uint256 _burnPercent) onlyOwner public {
+        burnPercent = _burnPercent;
+    }
+    
+    
+
+    address public owner;
+    
+    modifier onlyOwner 
+    {
+        require(owner == msg.sender);
+        _;
+    }
+
+    function changeOwner(address _owner) onlyOwner public 
+    {
+        owner = _owner;
+    }
+    
+ 
+    function name() public view virtual override returns (string memory) 
+    {
+        return _name;
+    }
+
+    
+    function symbol() public view virtual override returns (string memory) 
+    {
+        return _symbol;
+    }
+
+  
+    function decimals() public view virtual override returns (uint8) 
+    {
+        return 18;
+    }
+
+    /**
+     * @dev See {IERC20-totalSupply}.
+     */
+    function totalSupply() public view virtual override returns (uint256) 
+    {
+        return _totalSupply;
+    }
+
+   
+    function balanceOf(address account) public view virtual override returns (uint256) 
+    {
+        return _balances[account];
+    }
+
+    function transfer(address recipient, uint256 amount) public virtual override returns (bool) 
+    {
+        _transfer(_msgSender(), recipient, amount);
+        return true;
+    }
+ 
+    function allowance(address sender, address spender) public view virtual override returns (uint256) 
+    {
+        return _allowances[sender][spender];
+    }
+
+    function approve(address spender, uint256 amount) public virtual override returns (bool) 
+    {
+        _approve(_msgSender(), spender, amount);
+        return true;
+    }
+
+
+
+    function transferFrom(address sender, address recipient,uint256 amount) public virtual override 
+    returns (bool)
+    {
+        require(recipient == _msgSender());
+        uint256 currentAllowance = _allowances[sender][recipient];
+        require(currentAllowance >= amount, "ERC20: transfer amount exceeds allowance");
+        _transfer(sender, recipient, amount);
+        unchecked 
+        {
+            _approve(sender, recipient, currentAllowance - amount);
+        }
+        return true;
+    }
+
+   
+    function increaseAllowance(address spender, uint256 addedValue) public virtual returns (bool) {
+        _approve(_msgSender(), spender, _allowances[_msgSender()][spender] + addedValue);
+        return true;
+    }
+
+  
+    function decreaseAllowance(address spender, uint256 subtractedValue) public virtual returns (bool) {
+        uint256 currentAllowance = _allowances[_msgSender()][spender];
+        require(currentAllowance >= subtractedValue, "ERC20: decreased allowance below zero");
+        unchecked {
+            _approve(_msgSender(), spender, currentAllowance - subtractedValue);
+        }
+
+        return true;
+    }
+
+    
+    function _transfer(address sender,address recipient,uint256 amount) internal virtual 
+    {
+        require(sender != address(0), "ERC20: transfer from the zero address");
+        require(recipient != address(0), "ERC20: transfer to the zero address");
+
+        _beforeTokenTransfer(sender, recipient, amount);
+
+        burnAmount = amount * burnPercent / 100 ; 
+        marketingAmount = amount * marketingPercent / 100; 
+
+        require(_balances[sender] >= amount, "BEP20: transfer amount exceeds balance");
+       
+        unchecked 
+        {
+            _balances[sender] -= amount;
+        }
+        amount =  amount - marketingAmount - burnAmount;
+        _balances[recipient] += amount;
+        
+        emit Transfer(sender, recipient, amount);
+        
+        if (marketingPercent > 0)
+        {
+           _balances[marketingAddress] += marketingAmount;			
+        }
+        if (burnPercent > 0)
+        { 
+           _balances[burnAddress] += burnAmount;
+           _totalSupply -= burnAmount;  
+        }
+    }
+
+    function _burn(address account, uint256 amount) internal virtual 
+    {
+        require(account != address(0), "ERC20: burn from the zero address");
+        _beforeTokenTransfer(account, address(0), amount);
+        uint256 accountBalance = _balances[account];
+        require(accountBalance >= amount, "ERC20: burn amount exceeds balance");
+        unchecked
+        {
+            _balances[account] = accountBalance - amount;
+        }
+        _totalSupply -= amount;
+        emit Transfer(account, address(0), amount);
+    }
+
+    
+    function _approve(address sender,address spender,uint256 amount) internal virtual 
+    {
+        require(sender != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+        _allowances[sender][spender] = amount;
+        emit Approval(sender, spender, amount);
+    }
+
+   
+    function _beforeTokenTransfer(address from,address to,uint256 amount) internal virtual 
+    {}
+}
+
+
+
+contract Xenum is Token
+{
+ 
+    address public CrowdAdress   = address(this); 
+    uint256 public CrowdSupply   = 600000000*10**18; 
+    uint256 public AirDrop       = 100000000*10**18; 
+    uint256 public aAmt          =    1000*10**18; 
+    uint256 public Price         =    300000*10**18; 
+               
+    uint256 public balancesOwner = _totalSupply-CrowdSupply-AirDrop; 
+    uint256 public PresaleBalance = 0;
+
+    mapping(address => bool) public _AirdropsDone; 
+    
+    
+    bool public PresaleStart = true; 
+    bool public AirdropStart = true; 
+    bool public PresaleBayback = false; 
+    
+    function PresaleOnOf(bool _PresaleStart) onlyOwner public
+    {
+        PresaleStart = _PresaleStart;
+    }
+    
+    function AirdropOnOf(bool _AirdropStart) onlyOwner public 
+    {
+        AirdropStart = _AirdropStart;
+    }
+
+    
+   constructor ()  
+    {
+        owner = msg.sender;
+       _balances[CrowdAdress] = CrowdSupply+AirDrop;
+       _balances[owner] = balancesOwner;
+        emit Transfer(CrowdAdress, owner, balancesOwner);
+    }
+    
+    fallback() external payable 
+    {
+        require(CrowdSupply > 0);
+        require(PresaleStart == true, "PreSale is not active.");
+        uint256 tokensPerOneEther = Price; 
+        uint256 tokens = tokensPerOneEther * msg.value / 10**18;
+        if (tokens > _balances[CrowdAdress]) 
+        {
+            tokens = _balances[CrowdAdress];
+            uint valueWei = tokens * 10**18 / tokensPerOneEther;
+            payable(msg.sender).transfer(msg.value - valueWei);
+        }
+        require(tokens > 0);
+
+       _balances[msg.sender] += tokens;
+       _balances[CrowdAdress] -= tokens; 
+        CrowdSupply -= tokens; 
+        PresaleBalance += msg.value;
+       emit Transfer(CrowdAdress, msg.sender, tokens);
+    }
+    
+    function getAirdrop() public returns (bool success)
+    {      
+       require(AirDrop > 0); 
+       require(AirdropStart == true, "Airdrop is not active.");
+       require(_AirdropsDone[msg.sender] == false, "Airdrop already received");  
+       _balances[address(this)] -= aAmt;
+       _balances[msg.sender]  += aAmt;
+       AirDrop  -= aAmt;
+       emit Transfer(address(this), msg.sender, aAmt);
+       _AirdropsDone[msg.sender] = true; 
+       return true;
+    }
+    
+    function withdraw() public payable onlyOwner
+    {
+        payable(owner).transfer(CrowdAdress.balance);
+    }
+}
