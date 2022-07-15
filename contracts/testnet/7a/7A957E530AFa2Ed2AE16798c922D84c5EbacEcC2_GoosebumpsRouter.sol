@@ -1,0 +1,1022 @@
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.7;
+
+import './libraries/GoosebumpsLibrary.sol';
+import './libraries/TransferHelper.sol';
+import './interfaces/IGoosebumpsRouter.sol';
+import './interfaces/IGoosebumpsFactory.sol';
+import './interfaces/IGoosebumpsRouterPair.sol';
+import './interfaces/IGoosebumpsRouterPairs.sol';
+import './interfaces/IERC20.sol';
+import './interfaces/IWETH.sol';
+
+contract GoosebumpsRouter is IGoosebumpsRouter {
+    address public immutable override WETH;
+    address public immutable override baseFactory;
+    address public immutable override routerPairs;
+    address public immutable override feeAggregator;
+
+    modifier ensure(uint256 deadline) {
+        require(deadline >= block.timestamp, 'GoosebumpsRouter: EXPIRED');
+        _;
+    }
+    modifier onlyAggregator() {
+        require(feeAggregator == msg.sender, "GoosebumpsRouter: ONLY_FEE_AGGREGATOR");
+        _;
+    }
+
+    constructor(
+        address _baseFactory,
+        address _routerPairs,
+        address _WETH,
+        address _aggregator
+    ) {
+        WETH = _WETH;
+        baseFactory = _baseFactory;
+        routerPairs = _routerPairs;
+        feeAggregator = _aggregator;
+    }
+
+    receive() external payable {
+        assert(msg.sender == WETH); // only accept ETH via fallback from the WETH contract
+    }
+
+    // **** ADD LIQUIDITY ****
+    function _addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 amountADesired,
+        uint256 amountBDesired,
+        uint256 amountAMin,
+        uint256 amountBMin
+    ) internal virtual returns (uint256 amountA, uint256 amountB) {
+        // create the pair if it doesn't exist yet
+        if (IGoosebumpsFactory(baseFactory).getPair(tokenA, tokenB) == address(0)) {
+            IGoosebumpsFactory(baseFactory).createPair(tokenA, tokenB);
+        }
+        (uint256 reserveA, uint256 reserveB) = IGoosebumpsRouterPairs(routerPairs).getReserves(baseFactory, tokenA, tokenB);
+        if (reserveA == 0 && reserveB == 0) {
+            (amountA, amountB) = (amountADesired, amountBDesired);
+        } else {
+            uint256 amountBOptimal = GoosebumpsLibrary.quote(amountADesired, reserveA, reserveB);
+            if (amountBOptimal <= amountBDesired) {
+                require(amountBOptimal >= amountBMin, 'GoosebumpsRouter: INSUFFICIENT_B_AMOUNT');
+                (amountA, amountB) = (amountADesired, amountBOptimal);
+            } else {
+                uint256 amountAOptimal = GoosebumpsLibrary.quote(amountBDesired, reserveB, reserveA);
+                assert(amountAOptimal <= amountADesired);
+                require(amountAOptimal >= amountAMin, 'GoosebumpsRouter: INSUFFICIENT_A_AMOUNT');
+                (amountA, amountB) = (amountAOptimal, amountBDesired);
+            }
+        }
+    }
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 amountADesired,
+        uint256 amountBDesired,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address to,
+        uint256 deadline
+    ) external virtual override ensure(deadline) 
+    returns (uint256 amountA, uint256 amountB, uint256 liquidity) {
+        (amountA, amountB) = _addLiquidity(tokenA, tokenB, amountADesired, amountBDesired, amountAMin, amountBMin);
+        address pair = IGoosebumpsRouterPairs(routerPairs).pairFor(baseFactory, tokenA, tokenB);
+        TransferHelper.safeTransferFrom(tokenA, msg.sender, pair, amountA);
+        TransferHelper.safeTransferFrom(tokenB, msg.sender, pair, amountB);
+        liquidity = IGoosebumpsRouterPair(pair).mint(to);
+    }
+    function addLiquidityETH(
+        address token,
+        uint256 amountTokenDesired,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
+        address to,
+        uint256 deadline
+    ) external virtual override payable ensure(deadline) 
+    returns (uint256 amountToken, uint256 amountETH, uint256 liquidity) {
+        (amountToken, amountETH) = _addLiquidity(
+            token,
+            WETH,
+            amountTokenDesired,
+            msg.value,
+            amountTokenMin,
+            amountETHMin
+        );
+        address pair = IGoosebumpsRouterPairs(routerPairs).pairFor(baseFactory, token, WETH);
+        TransferHelper.safeTransferFrom(token, msg.sender, pair, amountToken);
+        IWETH(WETH).deposit{value: amountETH}();
+        assert(IWETH(WETH).transfer(pair, amountETH));
+        liquidity = IGoosebumpsRouterPair(pair).mint(to);
+        // refund dust eth, if any
+        if (msg.value > amountETH) TransferHelper.safeTransferETH(msg.sender, msg.value - amountETH);
+    }
+
+    // **** REMOVE LIQUIDITY ****
+    function removeLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 liquidity,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address to,
+        uint256 deadline
+    ) public virtual override ensure(deadline) returns (uint256 amountA, uint256 amountB) {
+        address pair = IGoosebumpsRouterPairs(routerPairs).pairFor(baseFactory, tokenA, tokenB);
+        IGoosebumpsRouterPair(pair).transferFrom(msg.sender, pair, liquidity); // send liquidity to pair
+        (uint256 amount0, uint256 amount1) = IGoosebumpsRouterPair(pair).burn(to);
+        (address token0,) = GoosebumpsLibrary.sortTokens(tokenA, tokenB);
+        (amountA, amountB) = tokenA == token0 ? (amount0, amount1) : (amount1, amount0);
+        require(amountA >= amountAMin, 'GoosebumpsRouter: INSUFFICIENT_A_AMOUNT');
+        require(amountB >= amountBMin, 'GoosebumpsRouter: INSUFFICIENT_B_AMOUNT');
+    }
+    function removeLiquidityETH(
+        address token,
+        uint256 liquidity,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
+        address to,
+        uint256 deadline
+    ) public virtual override ensure(deadline) returns (uint256 amountToken, uint256 amountETH) {
+        (amountToken, amountETH) = removeLiquidity(
+            token,
+            WETH,
+            liquidity,
+            amountTokenMin,
+            amountETHMin,
+            address(this),
+            deadline
+        );
+        TransferHelper.safeTransfer(token, to, amountToken);
+        IWETH(WETH).withdraw(amountETH);
+        TransferHelper.safeTransferETH(to, amountETH);
+    }
+    function removeLiquidityWithPermit(
+        address tokenA,
+        address tokenB,
+        uint256 liquidity,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address to,
+        uint256 deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external virtual override returns (uint256 amountA, uint256 amountB) {
+        permit(tokenA, tokenB, liquidity, deadline, approveMax, v, r ,s);
+        (amountA, amountB) = removeLiquidity(tokenA, tokenB, liquidity, amountAMin, amountBMin, to, deadline);
+    }
+    function removeLiquidityETHWithPermit(
+        address token,
+        uint256 liquidity,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
+        address to,
+        uint256 deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external virtual override returns (uint256 amountToken, uint256 amountETH) {
+        permit(token, WETH, liquidity, deadline, approveMax, v, r ,s);
+        (amountToken, amountETH) = removeLiquidityETH(token, liquidity, amountTokenMin, amountETHMin, to, deadline);
+    }
+
+    // **** REMOVE LIQUIDITY (supporting fee-on-transfer tokens) ****
+    function removeLiquidityETHSupportingFeeOnTransferTokens(
+        address token,
+        uint256 liquidity,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
+        address to,
+        uint256 deadline
+    ) public virtual override ensure(deadline) returns (uint256 amountETH) {
+        (, amountETH) = removeLiquidity(
+            token,
+            WETH,
+            liquidity,
+            amountTokenMin,
+            amountETHMin,
+            address(this),
+            deadline
+        );
+        TransferHelper.safeTransfer(token, to, IERC20(token).balanceOf(address(this)));
+        IWETH(WETH).withdraw(amountETH);
+        TransferHelper.safeTransferETH(to, amountETH);
+    }
+    function removeLiquidityETHWithPermitSupportingFeeOnTransferTokens(
+        address token,
+        uint256 liquidity,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
+        address to,
+        uint256 deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external virtual override returns (uint256 amountETH) {
+        permit(token, WETH, liquidity, deadline, approveMax, v, r ,s);
+        amountETH = removeLiquidityETHSupportingFeeOnTransferTokens(
+            token, liquidity, amountTokenMin, amountETHMin, to, deadline
+        );
+    }
+    /**
+     * @dev to avoids stack too deep errors
+     */
+    function permit(
+        address tokenA,
+        address tokenB,
+        uint256 liquidity,
+        uint256 deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) internal {
+        address pair = IGoosebumpsRouterPairs(routerPairs).pairFor(baseFactory, tokenA, tokenB);
+        uint256 value = approveMax ? type(uint256).max : liquidity;
+        IGoosebumpsRouterPair(pair).permit(msg.sender, address(this), value, deadline, v, r, s);
+    }
+
+    // **** SWAP ****
+    // requires the initial amount to have already been sent to the first pair
+    function _swap(
+        address[] memory factories, 
+        uint256[] memory amounts, 
+        address[] memory path, 
+        address _to, 
+        uint256 feeAmount, 
+        address feeToken
+    ) internal {
+        if (path[0] == feeToken) transferFeeWhenNeeded(msg.sender, feeToken, feeAmount);
+
+        for (uint256 i; i < path.length - 1; i++) {
+            (address input, address output) = (path[i], path[i + 1]);
+            (address token0,) = GoosebumpsLibrary.sortTokens(input, output);
+            uint256 amountOut = amounts[i + 1];
+            address to = i < path.length - 2 
+                ? IGoosebumpsRouterPairs(routerPairs).pairFor(factories[i + 1], output, path[i + 2])
+                : _to;
+            if (output == path[path.length - 1] && output == feeToken)
+                amountOut += feeAmount;
+
+            _trySwap(
+                IGoosebumpsRouterPair(IGoosebumpsRouterPairs(routerPairs).pairFor(factories[i], input, output)),
+                input == token0 ? uint256(0) : amountOut,
+                input == token0 ? amountOut : uint256(0),
+                to
+            );
+
+            if (output == path[path.length - 1] && output == feeToken)
+                transferFeeWhenNeeded(to, feeToken, feeAmount);
+        }
+    }
+    function swapExactTokensForTokens(
+        address[] calldata factories,
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external virtual override ensure(deadline) returns (uint256[] memory amounts) {
+        uint256 feeAmount;
+        address feeToken;
+        (amounts, feeAmount, feeToken) = IGoosebumpsRouterPairs(routerPairs).getAmountsOut(factories, amountIn, path);
+        require(amounts[amounts.length - 1] >= amountOutMin, 'GoosebumpsRouter: INSUFFICIENT_OUTPUT_AMOUNT');
+
+        transferAndSwap(factories, amounts, path, to, feeAmount, feeToken);
+    }
+    function swapTokensForExactTokens(
+        address[] calldata factories,
+        uint256 amountOut,
+        uint256 amountInMax,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external virtual override ensure(deadline) returns (uint256[] memory amounts) {
+        uint256 feeAmount;
+        address feeToken;
+        (amounts, feeAmount, feeToken) = IGoosebumpsRouterPairs(routerPairs).getAmountsIn(factories, amountOut, path);
+
+        uint256 totalAmount0 = amounts[0];
+        if (path[0] == feeToken) totalAmount0 += feeAmount;
+        require(totalAmount0 <= amountInMax, 'GoosebumpsRouter: EXCESSIVE_INPUT_AMOUNT');
+
+        transferAndSwap(factories, amounts, path, to, feeAmount, feeToken);
+    }
+    function swapExactETHForTokens(
+        address[] calldata factories,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external virtual override payable ensure(deadline) returns (uint256[] memory amounts) {
+        require(path[0] == WETH, 'GoosebumpsRouter: INVALID_PATH');
+
+        uint256 feeAmount;
+        address feeToken;
+        (amounts, feeAmount, feeToken) = IGoosebumpsRouterPairs(routerPairs).getAmountsOut(factories, msg.value, path);
+
+        require(amounts[amounts.length - 1] >= amountOutMin, 'GoosebumpsRouter: INSUFFICIENT_OUTPUT_AMOUNT');
+
+        uint256 totalAmount0 = amounts[0];
+        if (path[0] == feeToken) totalAmount0 += feeAmount;
+        IWETH(WETH).deposit{value: totalAmount0}();
+        assert(IWETH(WETH).transfer(IGoosebumpsRouterPairs(routerPairs).pairFor(factories[0], path[0], path[1]), amounts[0]));
+
+        _swap(factories, amounts, path, to, feeAmount, feeToken);
+    }
+    function swapTokensForExactETH(
+        address[] calldata factories,
+        uint256 amountOut,
+        uint256 amountInMax, 
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external virtual override ensure(deadline) returns (uint256[] memory amounts) {
+        require(path[path.length - 1] == WETH, 'GoosebumpsRouter: INVALID_PATH');
+        uint256 feeAmount;
+        address feeToken;
+        (amounts, feeAmount, feeToken) = IGoosebumpsRouterPairs(routerPairs).getAmountsIn(factories, amountOut, path);
+
+        uint256 totalAmount0 = amounts[0];
+        if (path[0] == feeToken) totalAmount0 += feeAmount;
+        require(totalAmount0 <= amountInMax, 'GoosebumpsRouter: EXCESSIVE_INPUT_AMOUNT');
+
+        transferAndSwap(factories, amounts, path, address(this), feeAmount, feeToken);
+
+        IWETH(WETH).withdraw(amounts[amounts.length - 1]);
+        TransferHelper.safeTransferETH(to, amounts[amounts.length - 1]);
+    }
+    function swapExactTokensForETH(
+        address[] calldata factories,
+        uint256 amountIn,
+        uint256 amountOutMin, 
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external virtual override ensure(deadline) returns (uint256[] memory amounts) {
+        require(path[path.length - 1] == WETH, 'GoosebumpsRouter: INVALID_PATH');
+        uint256 feeAmount;
+        address feeToken;
+        (amounts, feeAmount, feeToken) = IGoosebumpsRouterPairs(routerPairs).getAmountsOut(factories, amountIn, path);
+        require(amounts[amounts.length - 1] >= amountOutMin, 'GoosebumpsRouter: INSUFFICIENT_OUTPUT_AMOUNT');
+
+        transferAndSwap(factories, amounts, path, address(this), feeAmount, feeToken);
+
+        IWETH(WETH).withdraw(amounts[amounts.length - 1]);
+        TransferHelper.safeTransferETH(to, amounts[amounts.length - 1]);
+    }
+    function swapETHForExactTokens(
+        address[] calldata factories,
+        uint256 amountOut,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external virtual override payable ensure(deadline) returns (uint256[] memory amounts) {
+        require(path[0] == WETH, 'GoosebumpsRouter: INVALID_PATH');
+
+        uint256 feeAmount;
+        address feeToken;
+        (amounts, feeAmount, feeToken) = IGoosebumpsRouterPairs(routerPairs).getAmountsIn(factories, amountOut, path);
+
+        uint256 totalAmount0 = amounts[0];
+        if (path[0] == feeToken) totalAmount0 += feeAmount;
+        require(totalAmount0 <= msg.value, 'GoosebumpsRouter: EXCESSIVE_INPUT_AMOUNT');
+        IWETH(WETH).deposit{value: totalAmount0}();
+        assert(IWETH(WETH).transfer(IGoosebumpsRouterPairs(routerPairs).pairFor(factories[0], path[0], path[1]), amounts[0]));
+
+        _swap(factories, amounts, path, to, feeAmount, feeToken);
+
+        // refund dust eth, if any
+        if (msg.value > totalAmount0) TransferHelper.safeTransferETH(msg.sender, msg.value - totalAmount0);
+    }
+
+    // **** SWAP (supporting fee-on-transfer tokens) ****
+    // requires the initial amount to have already been sent to the first pair
+    function _swapSupportingFeeOnTransferTokens(address[] memory factories, address[] memory path, address _to) 
+        internal virtual
+    {
+        for (uint256 i; i < path.length - 1; i++) {
+            (address input, address output) = (path[i], path[i + 1]);
+            (address token0,) = GoosebumpsLibrary.sortTokens(input, output);
+            IGoosebumpsRouterPair pair = IGoosebumpsRouterPair(IGoosebumpsRouterPairs(routerPairs).pairFor(factories[i], input, output));
+
+            // fee is only payed on the first or last token
+            address to = i < path.length - 2 
+                ? IGoosebumpsRouterPairs(routerPairs).pairFor(factories[i + 1], output, path[i + 2])
+                : _to;
+            // _trySwap(
+            //     pair,
+            //     input == token0 ? uint256(0) : _getAmountOut(factories[i], pair, input, token0), 
+            //     input == token0 ? _getAmountOut(factories[i], pair, input, token0) : uint256(0),
+            //     to
+            // );
+        }
+    }
+    // function _getAmountOut(address factory, IGoosebumpsRouterPair pair, address input, address token0) 
+    //     internal virtual returns (uint256 amountOutput) 
+    // {
+    //     (uint256 reserve0, uint256 reserve1,) = pair.getReserves();
+    //     uint256 amountInput = IERC20(input).balanceOf(address(pair)) - (input == token0 ? reserve0 : reserve1);
+    //     (amountOutput,) = IGoosebumpsRouterPairs(routerPairs).getAmountOut(
+    //         factory,
+    //         input,
+    //         true, 
+    //         amountInput,
+    //         input == token0 ? reserve0 : reserve1,
+    //         input == token0 ? reserve1 : reserve0
+    //     );
+    // }
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        address[] calldata factories,
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external virtual override ensure(deadline) {
+        (amountIn,) = subtractFee(msg.sender, path[0], amountIn);
+
+        TransferHelper.safeTransferFrom(
+            path[0], msg.sender, IGoosebumpsRouterPairs(routerPairs).pairFor(factories[0], path[0], path[1]), amountIn
+        );
+
+        uint256 balanceBefore = IERC20(path[path.length - 1]).balanceOf(to);
+        _swapSupportingFeeOnTransferTokens(factories, path, to);
+        require(
+            IERC20(path[path.length - 1]).balanceOf(to) - balanceBefore >= amountOutMin,
+            'GoosebumpsRouter: INSUFFICIENT_OUTPUT_AMOUNT'
+        );
+    }
+    function swapExactETHForTokensSupportingFeeOnTransferTokens(
+        address[] calldata factories,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external virtual override payable ensure(deadline) {
+        require(path[0] == WETH, 'GoosebumpsRouter: INVALID_PATH');
+        uint256 amountIn = msg.value;
+        IWETH(WETH).deposit{value: amountIn}();
+        
+        (amountIn,) = subtractFee(msg.sender, WETH, amountIn);
+
+        assert(IWETH(WETH).transfer(IGoosebumpsRouterPairs(routerPairs).pairFor(factories[0], path[0], path[1]), amountIn));
+
+        uint256 balanceBefore = IERC20(path[path.length - 1]).balanceOf(to);
+        _swapSupportingFeeOnTransferTokens(factories, path, to);
+        require(
+            IERC20(path[path.length - 1]).balanceOf(to) - balanceBefore >= amountOutMin,
+            'GoosebumpsRouter: INSUFFICIENT_OUTPUT_AMOUNT'
+        );
+    }
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        address[] calldata factories,
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external virtual override ensure(deadline) {
+        require(path[path.length - 1] == WETH, 'GoosebumpsRouter: INVALID_PATH');
+
+        (amountIn,) = subtractFee(msg.sender, path[0], amountIn);
+        
+        TransferHelper.safeTransferFrom(
+            path[0], msg.sender, IGoosebumpsRouterPairs(routerPairs).pairFor(factories[0], path[0], path[1]), amountIn
+        );
+
+        _swapSupportingFeeOnTransferTokens(factories, path, address(this));
+        uint256 amountOut = IERC20(WETH).balanceOf(address(this));
+        require(amountOut >= amountOutMin, 'GoosebumpsRouter: INSUFFICIENT_OUTPUT_AMOUNT');
+
+        IWETH(WETH).withdraw(amountOut);
+        TransferHelper.safeTransferETH(to, amountOut);
+    }
+    /**
+     * @dev to avoids stack too deep errors
+     */
+    function transferAndSwap(
+        address[] calldata factories,
+        uint256[] memory amounts,
+        address[] calldata path,
+        address to,
+        uint256 feeAmount,
+        address feeToken
+    ) internal {
+        TransferHelper.safeTransferFrom(
+            path[0],
+            msg.sender,
+            IGoosebumpsRouterPairs(routerPairs).pairFor(factories[0], path[0], path[1]),
+            amounts[0]
+        );
+
+        _swap(factories, amounts, path, to, feeAmount, feeToken);
+    }
+    function _trySwap(IGoosebumpsRouterPair pair, uint256 amount0Out, uint256 amount1Out, address to) internal {
+        try pair.swap(amount0Out, amount1Out, to, new bytes(0)) {
+        } catch (bytes memory /*lowLevelData*/) {
+            pair.swap(amount0Out, amount1Out, to);
+        }
+    }
+    function subtractFee(address from, address token, uint256 amount) 
+        internal virtual returns(uint256 amountLeft, uint256 fee) 
+    {
+        (fee, amountLeft) = IFeeAggregator(feeAggregator).calculateFee(token, amount);
+        transferFeeWhenNeeded(from, token, fee);
+    }
+    function transferFeeWhenNeeded(address from, address token, uint256 fee) internal virtual {
+        if (fee > 0) {
+            TransferHelper.safeTransferFrom(token, from, feeAggregator, fee);
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.7;
+
+import '../interfaces/IGoosebumpsPair.sol';
+import '../interfaces/IFeeAggregator.sol';
+
+library GoosebumpsLibrary {
+    // returns sorted token addresses, used to handle return values from pairs sorted in this order
+    function sortTokens(address tokenA, address tokenB) internal pure returns (address token0, address token1) {
+        require(tokenA != tokenB, 'GoosebumpsLibrary: IDENTICAL_ADDRESSES');
+        (token0, token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+        require(token0 != address(0), 'GoosebumpsLibrary: ZERO_ADDRESS');
+    }
+
+    // given some amount of an asset and pair reserves, returns an equivalent amount of the other asset
+    function quote(uint256 amountA, uint256 reserveA, uint256 reserveB) internal pure returns (uint256 amountB) {
+        require(amountA > 0, 'GoosebumpsLibrary: INSUFFICIENT_AMOUNT');
+        require(reserveA > 0 && reserveB > 0, 'GoosebumpsLibrary: INSUFFICIENT_LIQUIDITY');
+        amountB = amountA * reserveB / reserveA;
+    }
+
+    // calculates the CREATE2 address for a pair without making any external calls
+    function pairFor(address factory, bytes32 initPairHash, address tokenA, address tokenB) 
+        internal pure returns (address pair) 
+    {
+        (address token0, address token1) = sortTokens(tokenA, tokenB);
+        pair = address(uint160(uint256(keccak256(abi.encodePacked(
+                hex'ff',
+                factory,
+                keccak256(abi.encodePacked(token0, token1)),
+                initPairHash
+            )))));
+    }
+
+    // fetches and sorts the reserves for a pair
+    function getReserves(address factory, bytes32 initPairHash, address tokenA, address tokenB) internal view returns (uint256 reserveA, uint256 reserveB) {
+        (address token0,) = sortTokens(tokenA, tokenB);
+        (uint256 reserve0, uint256 reserve1,) = IGoosebumpsPair(pairFor(factory, initPairHash, tokenA, tokenB)).getReserves();
+        (reserveA, reserveB) = tokenA == token0 ? (reserve0, reserve1) : (reserve1, reserve0);
+    }
+
+    // given an input amount of an asset and pair reserves, returns the maximum output amount of the other asset
+    function getAmountOut(address feeAggregator, address tokenIn, bool feePayed, uint256 amountIn, uint256 reserveIn, uint256 reserveOut, uint256 lpFee) 
+        internal view returns (uint256 amountOut, uint256 fee)
+    {
+        require(amountIn > 0, 'GoosebumpsLibrary: INSUFFICIENT_INPUT_AMOUNT');
+        require(reserveIn > 0 && reserveOut > 0, 'GoosebumpsLibrary: INSUFFICIENT_LIQUIDITY');
+        if (lpFee == 0) lpFee = 30; // default 0.3% fee
+        if (!feePayed) {
+            (fee,) = IFeeAggregator(feeAggregator).calculateFee(tokenIn, amountIn);
+            amountIn -= fee;
+        }
+        amountIn = amountIn * (10000 - lpFee);
+        uint256 numerator = amountIn * reserveOut;
+        uint256 denominator = reserveIn * 10000 + amountIn;
+        amountOut = numerator / denominator;
+    }
+
+    // given an output amount of an asset and pair reserves, returns a required input amount of the other asset
+    function getAmountIn(address feeAggregator, address tokenOut, bool feePayed,
+                        uint256 amountOut, uint256 reserveIn, uint256 reserveOut, uint256 lpFee) 
+        internal view returns (uint256 amountIn, uint256 fee)
+    {
+        require(amountOut > 0, 'GoosebumpsLibrary: INSUFFICIENT_OUTPUT_AMOUNT');
+        require(reserveIn > 0 && reserveOut > 0, 'GoosebumpsLibrary: INSUFFICIENT_LIQUIDITY');
+        if (lpFee == 0) lpFee = 30; // default 0.3% fee
+        if (!feePayed) {
+            (fee,) = IFeeAggregator(feeAggregator).calculateFee(tokenOut, amountOut);
+            amountOut += fee;
+        }
+        uint256 numerator = reserveIn * amountOut * 10000;
+        uint256 denominator = (reserveOut - amountOut) * (10000 - lpFee);
+        amountIn = numerator / denominator + 1;
+    }
+
+    // performs chained getAmountOut calculations on any number of pairs
+    function getAmountsOut(
+        address feeAggregator,
+        address[] memory factories,
+        bytes32[] memory initPairHashes,
+        uint256 amountIn,
+        address[] memory path,
+        uint256[] memory lpFees
+    ) internal view returns (uint256[] memory amounts, uint256 feeAmount, address feeToken) {
+        require(path.length >= 2, 'GoosebumpsLibrary: INVALID_PATH');
+        amounts = new uint256[](path.length);
+        amounts[0] = amountIn;
+        uint256 feeAmountTmp;
+        for (uint256 i = 0; i < path.length - 1; i++) {
+            (uint256 reserveIn, uint256 reserveOut) = 
+                getReserves(factories[i], initPairHashes[i], path[i], path[i + 1]);
+            (amounts[i + 1], feeAmountTmp) = getAmountOut(feeAggregator, path[i], 
+                feeAmount > 0 || i > 0, amounts[i], reserveIn, reserveOut, lpFees[i]);
+            if (feeAmountTmp > 0) {
+                amounts[i] -= feeAmountTmp;
+                feeToken = path[i];
+                feeAmount = feeAmountTmp;
+            }
+        }
+
+        if (feeAmount == 0) {
+            (feeAmountTmp,) = IFeeAggregator(feeAggregator)
+                .calculateFee(path[path.length - 1], amounts[amounts.length - 1]);
+            if (feeAmountTmp > 0) {
+                amounts[amounts.length - 1] -= feeAmountTmp;
+                feeToken = path[path.length - 1];
+                feeAmount = feeAmountTmp;
+            }
+        }
+    }
+
+    // performs chained getAmountIn calculations on any number of pairs
+    function getAmountsIn(
+        address feeAggregator,
+        address[] memory factories,
+        bytes32[] memory initPairHashes,
+        uint256 amountOut,
+        address[] memory path,
+        uint256[] memory lpFees
+    ) internal view returns (uint256[] memory amounts, uint256 feeAmount, address feeToken) {
+        require(path.length >= 2, 'GoosebumpsLibrary: INVALID_PATH');
+        amounts = new uint256[](path.length);
+        amounts[amounts.length - 1] = amountOut;
+        uint256 feeAmountTmp;
+        for (uint256 i = path.length - 1; i > 0; i--) {
+            (uint256 reserveIn, uint256 reserveOut) = 
+                getReserves(factories[i - 1], initPairHashes[i - 1], path[i - 1], path[i]);
+            (amounts[i - 1], feeAmountTmp) = getAmountIn(feeAggregator, path[i], 
+                feeAmount > 0 || i < amounts.length - 1, amounts[i], reserveIn, reserveOut, lpFees[i - 1]);
+            if (feeAmountTmp > 0) {
+                feeToken = path[i];
+                feeAmount = feeAmountTmp;
+            }
+        }
+
+        if (feeAmount == 0) {
+            (feeAmountTmp,) = IFeeAggregator(feeAggregator).calculateFee(path[0], amounts[0]);
+            if (feeAmountTmp > 0) {
+                feeToken = path[0];
+                feeAmount = feeAmountTmp;
+            }
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.7;
+
+// helper methods for interacting with ERC20 tokens and sending ETH that do not consistently return true/false
+library TransferHelper {
+    function safeApprove(address token, address to, uint256 value) internal {
+        // bytes4(keccak256(bytes('approve(address,uint256)')));
+        (bool success, bytes memory data) = token.call(abi.encodeWithSelector(0x095ea7b3, to, value));
+        require(success && (data.length == 0 || abi.decode(data, (bool))), 'TransferHelper: APPROVE_FAILED');
+    }
+
+    function safeTransfer(address token, address to, uint256 value) internal {
+        // bytes4(keccak256(bytes('transfer(address,uint256)')));
+        (bool success, bytes memory data) = token.call(abi.encodeWithSelector(0xa9059cbb, to, value));
+        require(success && (data.length == 0 || abi.decode(data, (bool))), 'TransferHelper: TRANSFER_FAILED');
+    }
+
+    function safeTransferFrom(address token, address from, address to, uint256 value) internal {
+        // bytes4(keccak256(bytes('transferFrom(address,address,uint256)')));
+        (bool success, bytes memory data) = token.call(abi.encodeWithSelector(0x23b872dd, from, to, value));
+        require(success && (data.length == 0 || abi.decode(data, (bool))), 'TransferHelper: TRANSFER_FROM_FAILED');
+    }
+
+    function safeTransferETH(address to, uint256 value) internal {
+        (bool success,) = to.call{value:value}(new bytes(0));
+        require(success, 'TransferHelper: ETH_TRANSFER_FAILED');
+    }
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.7;
+
+interface IGoosebumpsRouter {
+    function WETH() external returns (address);
+    function baseFactory() external returns (address);
+    function routerPairs() external returns (address);
+    function feeAggregator() external returns (address);
+
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 amountADesired,
+        uint256 amountBDesired,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address to,
+        uint256 deadline
+    ) external returns (uint256 amountA, uint256 amountB, uint256 liquidity);
+    function addLiquidityETH(
+        address token,
+        uint256 amountTokenDesired,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
+        address to,
+        uint256 deadline
+    ) external payable returns (uint256 amountToken, uint256 amountETH, uint256 liquidity);
+    function removeLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 liquidity,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address to,
+        uint256 deadline
+    ) external returns (uint256 amountA, uint256 amountB);
+    function removeLiquidityETH(
+        address token,
+        uint256 liquidity,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
+        address to,
+        uint256 deadline
+    ) external returns (uint256 amountToken, uint256 amountETH);
+    function removeLiquidityWithPermit(
+        address tokenA,
+        address tokenB,
+        uint256 liquidity,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address to,
+        uint256 deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint256 amountA, uint256 amountB);
+    function removeLiquidityETHWithPermit(
+        address token,
+        uint256 liquidity,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
+        address to,
+        uint256 deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint256 amountToken, uint256 amountETH);
+    function swapExactTokensForTokens(
+        address[] calldata factories,
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+    function swapTokensForExactTokens(
+        address[] calldata factories,
+        uint256 amountOut,
+        uint256 amountInMax,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+    function swapExactETHForTokens(
+        address[] calldata factories,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external payable returns (uint256[] memory amounts);
+    function swapTokensForExactETH(
+        address[] calldata factories,
+        uint256 amountOut,
+        uint256 amountInMax,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+    function swapExactTokensForETH(
+        address[] calldata factories,
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+    function swapETHForExactTokens(
+        address[] calldata factories, 
+        uint256 amountOut,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external payable returns (uint256[] memory amounts);
+
+    function removeLiquidityETHSupportingFeeOnTransferTokens(
+        address token,
+        uint256 liquidity,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
+        address to,
+        uint256 deadline
+    ) external returns (uint256 amountETH);
+    function removeLiquidityETHWithPermitSupportingFeeOnTransferTokens(
+        address token,
+        uint256 liquidity,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
+        address to,
+        uint256 deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint256 amountETH);
+
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        address[] calldata factories,
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external;
+    function swapExactETHForTokensSupportingFeeOnTransferTokens(
+        address[] calldata factories,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external payable;
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        address[] calldata factories,
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external;
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.7;
+
+interface IGoosebumpsFactory {
+    event PairCreated(address indexed token0, address indexed token1, address pair, uint256);
+
+    function feeTo() external view returns (address);
+    function feeToSetter() external view returns (address);
+
+    function getPair(address tokenA, address tokenB) external view returns (address pair);
+    function allPairs(uint256) external view returns (address pair);
+    function allPairsLength() external view returns (uint256);
+
+    function createPair(address tokenA, address tokenB) external returns (address pair);
+
+    function setFeeTo(address) external;
+    function setFeeToSetter(address) external;
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.7;
+
+import "./IGoosebumpsPair.sol";
+
+interface IGoosebumpsRouterPair is IGoosebumpsPair {
+    function swap(uint amount0Out, uint amount1Out, address to) external;
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.7;
+
+interface IGoosebumpsRouterPairs {
+    function feeAggregator() external returns (address);
+
+    function pairFor(address factory, address tokenA, address tokenB) external view returns (address pair);
+    function getReserves(address factory, address tokenA, address tokenB) 
+        external view returns (uint256 reserveA, uint256 reserveB);
+    function getAmountOut(address factory, address tokenIn, uint256 amountIn, 
+        uint256 reserveIn, uint256 reserveOut) 
+        external view returns (uint256 amountOut, uint256 fee);
+    function getAmountOut(address factory, address tokenIn, bool feePayed, uint256 amountIn, 
+        uint256 reserveIn, uint256 reserveOut)
+        external view returns (uint256 amountOut, uint256 fee);
+    function getAmountIn(address factory, address tokenOut, uint256 amountOut, 
+        uint256 reserveIn, uint256 reserveOut) 
+        external view returns (uint256 amountIn, uint256 fee);
+    function getAmountIn(address factory, address tokenOut, bool feePayed, uint256 amountOut, 
+        uint256 reserveIn, uint256 reserveOut) 
+        external view returns (uint256 amountIn, uint256 fee);
+    function getAmountsOut(address[] calldata _factories, uint256 amountIn, address[] calldata path) 
+        external view returns (uint256[] memory amounts, uint256 feePayed, address feeToken);
+    function getAmountsIn(address[] calldata _factories, uint256 amountOut, address[] calldata path) 
+        external view returns (uint256[] memory amounts, uint256 feePayed, address feeToken);
+
+    function setFeeAggregator(address aggregator) external;
+    function setFactory(address _factory, bytes32 initHash) external returns (bool);
+    function removeFactory(address _factory) external returns (bool);
+    function hasFactory(address _factory) external view returns (bool);
+    function allFactories() external view returns (address[] memory);
+    function setLPFee(address _factory, uint256 fee) external;
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.7;
+
+interface IERC20 {
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    function name() external view returns (string memory);
+    function symbol() external view returns (string memory);
+    function decimals() external view returns (uint8);
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address owner) external view returns (uint256);
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    function approve(address spender, uint256 value) external returns (bool);
+    function transfer(address to, uint256 value) external returns (bool);
+    function transferFrom(address from, address to, uint256 value) external returns (bool);
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.7;
+
+interface IWETH {
+    function deposit() external payable;
+    function transfer(address to, uint256 value) external returns (bool);
+    function withdraw(uint256) external;
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.7;
+
+interface IGoosebumpsPair {
+    event Approval(address indexed owner, address indexed spender, uint value);
+    event Transfer(address indexed from, address indexed to, uint value);
+
+    function name() external pure returns (string memory);
+    function symbol() external pure returns (string memory);
+    function decimals() external pure returns (uint8);
+    function totalSupply() external view returns (uint);
+    function balanceOf(address owner) external view returns (uint);
+    function allowance(address owner, address spender) external view returns (uint);
+
+    function approve(address spender, uint value) external returns (bool);
+    function transfer(address to, uint value) external returns (bool);
+    function transferFrom(address from, address to, uint value) external returns (bool);
+
+    function DOMAIN_SEPARATOR() external view returns (bytes32);
+    function PERMIT_TYPEHASH() external pure returns (bytes32);
+    function nonces(address owner) external view returns (uint);
+
+    function permit(address owner, address spender, uint value, uint deadline, uint8 v, bytes32 r, bytes32 s) external;
+
+    event Mint(address indexed sender, uint amount0, uint amount1);
+    event Burn(address indexed sender, uint amount0, uint amount1, address indexed to);
+    event Swap(
+        address indexed sender,
+        uint amount0In,
+        uint amount1In,
+        uint amount0Out,
+        uint amount1Out,
+        address indexed to
+    );
+    event Sync(uint112 reserve0, uint112 reserve1);
+
+    function MINIMUM_LIQUIDITY() external pure returns (uint);
+    function factory() external view returns (address);
+    function token0() external view returns (address);
+    function token1() external view returns (address);
+    function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
+    function price0CumulativeLast() external view returns (uint);
+    function price1CumulativeLast() external view returns (uint);
+    function kLast() external view returns (uint);
+
+    function mint(address to) external returns (uint liquidity);
+    function burn(address to) external returns (uint amount0, uint amount1);
+    function swap(uint amount0Out, uint amount1Out, address to, bytes calldata data) external;
+    function skim(address to) external;
+    function sync() external;
+
+    function initialize(address, address) external;
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.7;
+
+interface IFeeAggregator {
+    function feeTokens() external view returns (address[] memory);
+    function isFeeToken(address token) external view returns (bool);
+    function calculateFee(uint256 amount) external view returns (uint256 fee, uint256 amountLeft);
+    function calculateFee(address token, uint256 amount) external view returns (uint256 fee, uint256 amountLeft);
+
+    function addFeeToken(address token) external;
+    function addFeeTokens(address[] calldata tokens) external;
+    function removeFeeToken(address token) external;
+    function setGoosebumpsFee(uint256 fee) external;
+}
