@@ -1,0 +1,1951 @@
+//SPDX-License-Identifier: GPL-3.0
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/AddressUpgradeable.sol";
+
+import {IStakeManager} from "./interfaces/IStakeManager.sol";
+import {IBnbX} from "./interfaces/IBnbX.sol";
+import {ITokenHub} from "./interfaces/ITokenHub.sol";
+
+/**
+ * @title Stake Manager Contract
+ * @dev Handles Staking of BNB on BSC
+ */
+contract StakeManager is
+    IStakeManager,
+    Initializable,
+    PausableUpgradeable,
+    AccessControlUpgradeable
+{
+    using SafeERC20Upgradeable for IERC20Upgradeable;
+
+    uint256 public depositsDelegated; // total BNB delegated to validators on Beacon Chain
+    uint256 public depositsInContract; // total BNB deposited in contract but not yet transferred to relayer for moving to BC.
+    uint256 public depositsBridgingOut; // total BNB in relayer while transfering BSC -> BC
+    uint256 public totalBnbXToBurn;
+    uint256 public totalClaimableBnb; // total BNB available to be claimed and resides in contract
+
+    uint256 public nextDelegateUUID;
+    uint256 public nextUndelegateUUID;
+    uint256 public minDelegateThreshold;
+    uint256 public minUndelegateThreshold;
+
+    address private bnbX;
+    address private bcDepositWallet;
+    address private tokenHub;
+
+    bool private isDelegationPending; // initial default value false
+
+    mapping(uint256 => BotDelegateRequest) private uuidToBotDelegateRequestMap;
+    mapping(uint256 => BotUndelegateRequest)
+        private uuidToBotUndelegateRequestMap;
+    mapping(address => WithdrawalRequest[]) private userWithdrawalRequests;
+
+    uint256 public constant TEN_DECIMALS = 1e10;
+    bytes32 public constant BOT = keccak256("BOT");
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    /**
+     * @param _bnbX - Address of BnbX Token on Binance Smart Chain
+     * @param _manager - Address of the manager
+     * @param _tokenHub - Address of the manager
+     * @param _bcDepositWallet - Beck32 decoding of Address of deposit Bot Wallet on Beacon Chain with `0x` prefix
+     * @param _bot - Address of the Bot
+     */
+    function initialize(
+        address _bnbX,
+        address _manager,
+        address _tokenHub,
+        address _bcDepositWallet,
+        address _bot
+    ) external override initializer {
+        __AccessControl_init();
+        __Pausable_init();
+
+        require(
+            ((_bnbX != address(0)) &&
+                (_manager != address(0)) &&
+                (_tokenHub != address(0)) &&
+                (_bcDepositWallet != address(0)) &&
+                (_bot != address(0))),
+            "zero address provided"
+        );
+
+        _setupRole(DEFAULT_ADMIN_ROLE, _manager);
+        _setupRole(BOT, _bot);
+
+        bnbX = _bnbX;
+        tokenHub = _tokenHub;
+        bcDepositWallet = _bcDepositWallet;
+        minDelegateThreshold = 1e18;
+        minUndelegateThreshold = 1e18;
+    }
+
+    ////////////////////////////////////////////////////////////
+    /////                                                    ///
+    /////              ***Deposit Flow***                    ///
+    /////                                                    ///
+    ////////////////////////////////////////////////////////////
+
+    /**
+     * @dev Allows user to deposit Bnb at BSC and mints BnbX for the user
+     */
+    function deposit() external payable override whenNotPaused {
+        uint256 amount = msg.value;
+        require(amount > 0, "Invalid Amount");
+
+        uint256 bnbXToMint = convertBnbToBnbX(amount);
+
+        depositsInContract += amount;
+
+        IBnbX(bnbX).mint(msg.sender, bnbXToMint);
+    }
+
+    /**
+     * @dev Allows bot to transfer users' funds from this contract to botDepositWallet at Beacon Chain
+     * @return _uuid - unique id against which this transfer event was logged
+     * @return _amount - Amount of funds transferred for staking
+     * @notice Use `getBotDelegateRequest` function to get more details of the logged data
+     */
+    function startDelegation()
+        external
+        payable
+        override
+        whenNotPaused
+        onlyRole(BOT)
+        returns (uint256 _uuid, uint256 _amount)
+    {
+        require(!isDelegationPending, "Previous Delegation Pending");
+
+        uint256 tokenHubRelayFee = getTokenHubRelayFee();
+        uint256 relayFeeReceived = msg.value;
+        _amount = depositsInContract - (depositsInContract % TEN_DECIMALS);
+
+        require(
+            relayFeeReceived >= tokenHubRelayFee,
+            "Require More Relay Fee, Check getTokenHubRelayFee"
+        );
+        require(_amount >= minDelegateThreshold, "Insufficient Deposit Amount");
+
+        _uuid = nextDelegateUUID++; // post-increment : assigns the current value first and then increments
+        uuidToBotDelegateRequestMap[_uuid] = BotDelegateRequest({
+            startTime: block.timestamp,
+            endTime: 0,
+            amount: _amount
+        });
+        depositsBridgingOut += _amount;
+        depositsInContract -= _amount;
+
+        isDelegationPending = true;
+
+        // sends funds to BC
+        _tokenHubTransferOut(_amount, relayFeeReceived);
+    }
+
+    function retryTransferOut(uint256 _uuid)
+        external
+        payable
+        override
+        whenNotPaused
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        uint256 tokenHubRelayFee = getTokenHubRelayFee();
+        uint256 relayFeeReceived = msg.value;
+        require(
+            relayFeeReceived >= tokenHubRelayFee,
+            "Require More Relay Fee, Check getTokenHubRelayFee"
+        );
+
+        BotDelegateRequest
+            storage botDelegateRequest = uuidToBotDelegateRequestMap[_uuid];
+
+        require(
+            isDelegationPending &&
+                (botDelegateRequest.startTime != 0) &&
+                (botDelegateRequest.endTime == 0),
+            "Invalid UUID"
+        );
+
+        uint256 extraBNB = getExtraBnbInContract();
+        require(
+            (botDelegateRequest.amount == depositsBridgingOut) &&
+                (depositsBridgingOut <= extraBNB),
+            "Invalid BridgingOut Amount"
+        );
+        _tokenHubTransferOut(depositsBridgingOut, relayFeeReceived);
+    }
+
+    /**
+     * @dev Allows bot to mark the delegateRequest as complete and update the state variables
+     * @param _uuid - unique id for which the delgation was completed
+     * @notice Use `getBotDelegateRequest` function to get more details of the logged data
+     */
+    function completeDelegation(uint256 _uuid)
+        external
+        override
+        whenNotPaused
+        onlyRole(BOT)
+    {
+        require(
+            (uuidToBotDelegateRequestMap[_uuid].amount > 0) &&
+                (uuidToBotDelegateRequestMap[_uuid].endTime == 0),
+            "Invalid UUID"
+        );
+
+        uuidToBotDelegateRequestMap[_uuid].endTime = block.timestamp;
+        uint256 amount = uuidToBotDelegateRequestMap[_uuid].amount;
+        depositsBridgingOut -= amount;
+        depositsDelegated += amount;
+
+        isDelegationPending = false;
+        emit Delegate(_uuid, amount);
+    }
+
+    /**
+     * @dev Allows bot to update the contract regarding the rewards
+     * @param _amount - Amount of reward
+     */
+    function addRestakingRewards(uint256 _amount)
+        external
+        override
+        whenNotPaused
+        onlyRole(BOT)
+    {
+        require(_amount > 0, "No reward");
+        require(depositsDelegated > 0, "No funds delegated");
+
+        depositsDelegated += _amount;
+
+        emit Redelegate(_amount);
+    }
+
+    ////////////////////////////////////////////////////////////
+    /////                                                    ///
+    /////              ***Withdraw Flow***                   ///
+    /////                                                    ///
+    ////////////////////////////////////////////////////////////
+
+    /**
+     * @dev Allows user to request for unstake/withdraw funds
+     * @param _amountInBnbX - Amount of BnbX to swap for withdraw
+     * @notice User must have approved this contract to spend BnbX
+     */
+    function requestWithdraw(uint256 _amountInBnbX)
+        external
+        override
+        whenNotPaused
+    {
+        require(_amountInBnbX > 0, "Invalid Amount");
+
+        totalBnbXToBurn += _amountInBnbX;
+        uint256 totalBnbToWithdraw = convertBnbXToBnb(totalBnbXToBurn);
+        require(
+            totalBnbToWithdraw <= depositsDelegated,
+            "Not enough BNB to withdraw"
+        );
+
+        userWithdrawalRequests[msg.sender].push(
+            WithdrawalRequest({
+                uuid: nextUndelegateUUID,
+                amountInBnbX: _amountInBnbX,
+                startTime: block.timestamp
+            })
+        );
+
+        IERC20Upgradeable(bnbX).safeTransferFrom(
+            msg.sender,
+            address(this),
+            _amountInBnbX
+        );
+        emit RequestWithdraw(msg.sender, _amountInBnbX);
+    }
+
+    function claimWithdraw(uint256 _idx) external override whenNotPaused {
+        address user = msg.sender;
+        WithdrawalRequest[] storage userRequests = userWithdrawalRequests[user];
+
+        require(_idx < userRequests.length, "Invalid index");
+
+        WithdrawalRequest storage withdrawRequest = userRequests[_idx];
+        uint256 uuid = withdrawRequest.uuid;
+        uint256 amountInBnbX = withdrawRequest.amountInBnbX;
+
+        BotUndelegateRequest
+            storage botUndelegateRequest = uuidToBotUndelegateRequestMap[uuid];
+        require(botUndelegateRequest.endTime != 0, "Not able to claim yet");
+        userRequests[_idx] = userRequests[userRequests.length - 1];
+        userRequests.pop();
+
+        uint256 totalBnbToWithdraw_ = botUndelegateRequest.amount;
+        uint256 totalBnbXToBurn_ = botUndelegateRequest.amountInBnbX;
+        uint256 amount = (totalBnbToWithdraw_ * amountInBnbX) /
+            totalBnbXToBurn_;
+
+        totalClaimableBnb -= amount;
+        AddressUpgradeable.sendValue(payable(user), amount);
+
+        emit ClaimWithdrawal(user, _idx, amount);
+    }
+
+    /**
+     * @dev Bot uses this function to get amount of BNB to withdraw
+     * @return _uuid - unique id against which this Undelegation event was logged
+     * @return _amount - Amount of funds required to Unstake
+     * @notice Use `getBotUndelegateRequest` function to get more details of the logged data
+     */
+    function startUndelegation()
+        external
+        override
+        whenNotPaused
+        onlyRole(BOT)
+        returns (uint256 _uuid, uint256 _amount)
+    {
+        _uuid = nextUndelegateUUID++; // post-increment : assigns the current value first and then increments
+        uint256 totalBnbXToBurn_ = totalBnbXToBurn; // To avoid Reentrancy attack
+        _amount = convertBnbXToBnb(totalBnbXToBurn_);
+        _amount -= _amount % TEN_DECIMALS;
+
+        require(
+            _amount >= minUndelegateThreshold,
+            "Insufficient Withdraw Amount"
+        );
+
+        uuidToBotUndelegateRequestMap[_uuid] = BotUndelegateRequest({
+            startTime: 0,
+            endTime: 0,
+            amount: _amount,
+            amountInBnbX: totalBnbXToBurn_
+        });
+
+        depositsDelegated -= _amount;
+        totalBnbXToBurn = 0;
+
+        IBnbX(bnbX).burn(address(this), totalBnbXToBurn_);
+    }
+
+    /**
+     * @dev Allows Bot to communicate regarding start of Undelegation Event at Beacon Chain
+     * @param _uuid - unique id against which this Undelegation event was logged
+     */
+    function undelegationStarted(uint256 _uuid)
+        external
+        override
+        whenNotPaused
+        onlyRole(BOT)
+    {
+        BotUndelegateRequest
+            storage botUndelegateRequest = uuidToBotUndelegateRequestMap[_uuid];
+        require(
+            (botUndelegateRequest.amount > 0) &&
+                (botUndelegateRequest.startTime == 0),
+            "Invalid UUID"
+        );
+
+        botUndelegateRequest.startTime = block.timestamp;
+    }
+
+    /**
+     * @dev Bot uses this function to send unstaked funds to this contract and
+     * communicate regarding completion of Undelegation Event
+     * @param _uuid - unique id against which this Undelegation event was logged
+     * @notice Use `getBotUndelegateRequest` function to get more details of the logged data
+     * @notice send exact amount of BNB
+     */
+    function completeUndelegation(uint256 _uuid)
+        external
+        payable
+        override
+        whenNotPaused
+        onlyRole(BOT)
+    {
+        BotUndelegateRequest
+            storage botUndelegateRequest = uuidToBotUndelegateRequestMap[_uuid];
+        require(
+            (botUndelegateRequest.startTime != 0) &&
+                (botUndelegateRequest.endTime == 0),
+            "Invalid UUID"
+        );
+
+        uint256 amount = msg.value;
+        require(amount == botUndelegateRequest.amount, "Insufficient Fund");
+        botUndelegateRequest.endTime = block.timestamp;
+        totalClaimableBnb += botUndelegateRequest.amount;
+
+        emit Undelegate(_uuid, amount);
+    }
+
+    ////////////////////////////////////////////////////////////
+    /////                                                    ///
+    /////                 ***Setters***                      ///
+    /////                                                    ///
+    ////////////////////////////////////////////////////////////
+
+    function setBotRole(address _address)
+        external
+        override
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(_address != address(0), "zero address provided");
+
+        _setupRole(BOT, _address);
+
+        emit SetBotRole(_address);
+    }
+
+    function revokeBotRole(address _address)
+        external
+        override
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(_address != address(0), "zero address provided");
+
+        _revokeRole(BOT, _address);
+
+        emit RevokeBotRole(_address);
+    }
+
+    /// @param _address - Beck32 decoding of Address of deposit Bot Wallet on Beacon Chain with `0x` prefix
+    function setBCDepositWallet(address _address)
+        external
+        override
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(bcDepositWallet != _address, "Old address == new address");
+        require(_address != address(0), "zero address provided");
+
+        bcDepositWallet = _address;
+
+        emit SetBCDepositWallet(_address);
+    }
+
+    function setMinDelegateThreshold(uint256 _minDelegateThreshold)
+        external
+        override
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(_minDelegateThreshold > 0, "Invalid Threshold");
+        minDelegateThreshold = _minDelegateThreshold;
+    }
+
+    function setMinUndelegateThreshold(uint256 _minUndelegateThreshold)
+        external
+        override
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(_minUndelegateThreshold > 0, "Invalid Threshold");
+        minUndelegateThreshold = _minUndelegateThreshold;
+    }
+
+    ////////////////////////////////////////////////////////////
+    /////                                                    ///
+    /////                 ***Getters***                      ///
+    /////                                                    ///
+    ////////////////////////////////////////////////////////////
+
+    function getTotalPooledBnb() public view override returns (uint256) {
+        return (depositsDelegated + depositsBridgingOut + depositsInContract);
+    }
+
+    function getContracts()
+        external
+        view
+        override
+        returns (
+            address _bnbX,
+            address _tokenHub,
+            address _bcDepositWallet
+        )
+    {
+        _bnbX = bnbX;
+        _tokenHub = tokenHub;
+        _bcDepositWallet = bcDepositWallet;
+    }
+
+    /**
+     * @return relayFee required by TokenHub contract to transfer funds from BSC -> BC
+     */
+    function getTokenHubRelayFee() public view override returns (uint256) {
+        return ITokenHub(tokenHub).relayFee();
+    }
+
+    function getBotDelegateRequest(uint256 _uuid)
+        external
+        view
+        override
+        returns (BotDelegateRequest memory)
+    {
+        return uuidToBotDelegateRequestMap[_uuid];
+    }
+
+    function getBotUndelegateRequest(uint256 _uuid)
+        external
+        view
+        override
+        returns (BotUndelegateRequest memory)
+    {
+        return uuidToBotUndelegateRequestMap[_uuid];
+    }
+
+    /**
+     * @dev Retrieves all withdrawal requests initiated by the given address
+     * @param _address - Address of an user
+     * @return userWithdrawalRequests array of user withdrawal requests
+     */
+    function getUserWithdrawalRequests(address _address)
+        external
+        view
+        override
+        returns (WithdrawalRequest[] memory)
+    {
+        return userWithdrawalRequests[_address];
+    }
+
+    /**
+     * @dev Checks if the withdrawRequest is ready to claim
+     * @param _user - Address of the user who raised WithdrawRequest
+     * @param _idx - index of request in UserWithdrawls Array
+     * @return _isClaimable - if the withdraw is ready to claim yet
+     * @return _amount - Amount of BNB user would receive on withdraw claim
+     * @notice Use `getUserWithdrawalRequests` to get the userWithdrawlRequests Array
+     */
+    function getUserRequestStatus(address _user, uint256 _idx)
+        external
+        view
+        override
+        returns (bool _isClaimable, uint256 _amount)
+    {
+        WithdrawalRequest[] storage userRequests = userWithdrawalRequests[
+            _user
+        ];
+
+        require(_idx < userRequests.length, "Invalid index");
+
+        WithdrawalRequest storage withdrawRequest = userRequests[_idx];
+        uint256 uuid = withdrawRequest.uuid;
+        uint256 amountInBnbX = withdrawRequest.amountInBnbX;
+
+        BotUndelegateRequest
+            storage botUndelegateRequest = uuidToBotUndelegateRequestMap[uuid];
+
+        // bot has triggered startUndelegation
+        if (botUndelegateRequest.amount > 0) {
+            uint256 totalBnbToWithdraw_ = botUndelegateRequest.amount;
+            uint256 totalBnbXToBurn_ = botUndelegateRequest.amountInBnbX;
+            _amount = (totalBnbToWithdraw_ * amountInBnbX) / totalBnbXToBurn_;
+        }
+        // bot has not triggered startUndelegation yet
+        else {
+            _amount = convertBnbXToBnb(amountInBnbX);
+        }
+        _isClaimable = (botUndelegateRequest.endTime != 0);
+    }
+
+    function getBnbXWithdrawLimit()
+        external
+        view
+        override
+        returns (uint256 _bnbXWithdrawLimit)
+    {
+        _bnbXWithdrawLimit =
+            convertBnbToBnbX(depositsDelegated) -
+            totalBnbXToBurn;
+    }
+
+    function getExtraBnbInContract()
+        public
+        view
+        override
+        returns (uint256 _extraBnb)
+    {
+        _extraBnb =
+            address(this).balance -
+            depositsInContract -
+            totalClaimableBnb;
+    }
+
+    ////////////////////////////////////////////////////////////
+    /////                                                    ///
+    /////            ***Helpers & Utilities***               ///
+    /////                                                    ///
+    ////////////////////////////////////////////////////////////
+
+    function _tokenHubTransferOut(uint256 _amount, uint256 _relayFee) private {
+        // have experimented with 13 hours and it worked
+        uint64 expireTime = uint64(block.timestamp + 1 hours);
+        ITokenHub(tokenHub).transferOut{value: (_amount + _relayFee)}(
+            address(0),
+            bcDepositWallet,
+            _amount,
+            expireTime
+        );
+
+        emit TransferOut(_amount);
+    }
+
+    /**
+     * @dev Calculates amount of BnbX for `_amount` Bnb
+     */
+    function convertBnbToBnbX(uint256 _amount)
+        public
+        view
+        override
+        returns (uint256)
+    {
+        uint256 totalShares = IBnbX(bnbX).totalSupply();
+        totalShares = totalShares == 0 ? 1 : totalShares;
+
+        uint256 totalPooledBnb = getTotalPooledBnb();
+        totalPooledBnb = totalPooledBnb == 0 ? 1 : totalPooledBnb;
+
+        uint256 amountInBnbX = (_amount * totalShares) / totalPooledBnb;
+
+        return amountInBnbX;
+    }
+
+    /**
+     * @dev Calculates amount of Bnb for `_amountInBnbX` BnbX
+     */
+    function convertBnbXToBnb(uint256 _amountInBnbX)
+        public
+        view
+        override
+        returns (uint256)
+    {
+        uint256 totalShares = IBnbX(bnbX).totalSupply();
+        totalShares = totalShares == 0 ? 1 : totalShares;
+
+        uint256 totalPooledBnb = getTotalPooledBnb();
+        totalPooledBnb = totalPooledBnb == 0 ? 1 : totalPooledBnb;
+
+        uint256 amountInBnb = (_amountInBnbX * totalPooledBnb) / totalShares;
+
+        return amountInBnb;
+    }
+
+    /**
+     * @dev Flips the pause state
+     */
+    function togglePause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        paused() ? _unpause() : _pause();
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.6.0) (proxy/utils/Initializable.sol)
+
+pragma solidity ^0.8.2;
+
+import "../../utils/AddressUpgradeable.sol";
+
+/**
+ * @dev This is a base contract to aid in writing upgradeable contracts, or any kind of contract that will be deployed
+ * behind a proxy. Since proxied contracts do not make use of a constructor, it's common to move constructor logic to an
+ * external initializer function, usually called `initialize`. It then becomes necessary to protect this initializer
+ * function so it can only be called once. The {initializer} modifier provided by this contract will have this effect.
+ *
+ * The initialization functions use a version number. Once a version number is used, it is consumed and cannot be
+ * reused. This mechanism prevents re-execution of each "step" but allows the creation of new initialization steps in
+ * case an upgrade adds a module that needs to be initialized.
+ *
+ * For example:
+ *
+ * [.hljs-theme-light.nopadding]
+ * ```
+ * contract MyToken is ERC20Upgradeable {
+ *     function initialize() initializer public {
+ *         __ERC20_init("MyToken", "MTK");
+ *     }
+ * }
+ * contract MyTokenV2 is MyToken, ERC20PermitUpgradeable {
+ *     function initializeV2() reinitializer(2) public {
+ *         __ERC20Permit_init("MyToken");
+ *     }
+ * }
+ * ```
+ *
+ * TIP: To avoid leaving the proxy in an uninitialized state, the initializer function should be called as early as
+ * possible by providing the encoded function call as the `_data` argument to {ERC1967Proxy-constructor}.
+ *
+ * CAUTION: When used with inheritance, manual care must be taken to not invoke a parent initializer twice, or to ensure
+ * that all initializers are idempotent. This is not verified automatically as constructors are by Solidity.
+ *
+ * [CAUTION]
+ * ====
+ * Avoid leaving a contract uninitialized.
+ *
+ * An uninitialized contract can be taken over by an attacker. This applies to both a proxy and its implementation
+ * contract, which may impact the proxy. To prevent the implementation contract from being used, you should invoke
+ * the {_disableInitializers} function in the constructor to automatically lock it when it is deployed:
+ *
+ * [.hljs-theme-light.nopadding]
+ * ```
+ * /// @custom:oz-upgrades-unsafe-allow constructor
+ * constructor() {
+ *     _disableInitializers();
+ * }
+ * ```
+ * ====
+ */
+abstract contract Initializable {
+    /**
+     * @dev Indicates that the contract has been initialized.
+     * @custom:oz-retyped-from bool
+     */
+    uint8 private _initialized;
+
+    /**
+     * @dev Indicates that the contract is in the process of being initialized.
+     */
+    bool private _initializing;
+
+    /**
+     * @dev Triggered when the contract has been initialized or reinitialized.
+     */
+    event Initialized(uint8 version);
+
+    /**
+     * @dev A modifier that defines a protected initializer function that can be invoked at most once. In its scope,
+     * `onlyInitializing` functions can be used to initialize parent contracts. Equivalent to `reinitializer(1)`.
+     */
+    modifier initializer() {
+        bool isTopLevelCall = _setInitializedVersion(1);
+        if (isTopLevelCall) {
+            _initializing = true;
+        }
+        _;
+        if (isTopLevelCall) {
+            _initializing = false;
+            emit Initialized(1);
+        }
+    }
+
+    /**
+     * @dev A modifier that defines a protected reinitializer function that can be invoked at most once, and only if the
+     * contract hasn't been initialized to a greater version before. In its scope, `onlyInitializing` functions can be
+     * used to initialize parent contracts.
+     *
+     * `initializer` is equivalent to `reinitializer(1)`, so a reinitializer may be used after the original
+     * initialization step. This is essential to configure modules that are added through upgrades and that require
+     * initialization.
+     *
+     * Note that versions can jump in increments greater than 1; this implies that if multiple reinitializers coexist in
+     * a contract, executing them in the right order is up to the developer or operator.
+     */
+    modifier reinitializer(uint8 version) {
+        bool isTopLevelCall = _setInitializedVersion(version);
+        if (isTopLevelCall) {
+            _initializing = true;
+        }
+        _;
+        if (isTopLevelCall) {
+            _initializing = false;
+            emit Initialized(version);
+        }
+    }
+
+    /**
+     * @dev Modifier to protect an initialization function so that it can only be invoked by functions with the
+     * {initializer} and {reinitializer} modifiers, directly or indirectly.
+     */
+    modifier onlyInitializing() {
+        require(_initializing, "Initializable: contract is not initializing");
+        _;
+    }
+
+    /**
+     * @dev Locks the contract, preventing any future reinitialization. This cannot be part of an initializer call.
+     * Calling this in the constructor of a contract will prevent that contract from being initialized or reinitialized
+     * to any version. It is recommended to use this to lock implementation contracts that are designed to be called
+     * through proxies.
+     */
+    function _disableInitializers() internal virtual {
+        _setInitializedVersion(type(uint8).max);
+    }
+
+    function _setInitializedVersion(uint8 version) private returns (bool) {
+        // If the contract is initializing we ignore whether _initialized is set in order to support multiple
+        // inheritance patterns, but we only do this in the context of a constructor, and for the lowest level
+        // of initializers, because in other contexts the contract may have been reentered.
+        if (_initializing) {
+            require(
+                version == 1 && !AddressUpgradeable.isContract(address(this)),
+                "Initializable: contract is already initialized"
+            );
+            return false;
+        } else {
+            require(_initialized < version, "Initializable: contract is already initialized");
+            _initialized = version;
+            return true;
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (security/Pausable.sol)
+
+pragma solidity ^0.8.0;
+
+import "../utils/ContextUpgradeable.sol";
+import "../proxy/utils/Initializable.sol";
+
+/**
+ * @dev Contract module which allows children to implement an emergency stop
+ * mechanism that can be triggered by an authorized account.
+ *
+ * This module is used through inheritance. It will make available the
+ * modifiers `whenNotPaused` and `whenPaused`, which can be applied to
+ * the functions of your contract. Note that they will not be pausable by
+ * simply including this module, only once the modifiers are put in place.
+ */
+abstract contract PausableUpgradeable is Initializable, ContextUpgradeable {
+    /**
+     * @dev Emitted when the pause is triggered by `account`.
+     */
+    event Paused(address account);
+
+    /**
+     * @dev Emitted when the pause is lifted by `account`.
+     */
+    event Unpaused(address account);
+
+    bool private _paused;
+
+    /**
+     * @dev Initializes the contract in unpaused state.
+     */
+    function __Pausable_init() internal onlyInitializing {
+        __Pausable_init_unchained();
+    }
+
+    function __Pausable_init_unchained() internal onlyInitializing {
+        _paused = false;
+    }
+
+    /**
+     * @dev Returns true if the contract is paused, and false otherwise.
+     */
+    function paused() public view virtual returns (bool) {
+        return _paused;
+    }
+
+    /**
+     * @dev Modifier to make a function callable only when the contract is not paused.
+     *
+     * Requirements:
+     *
+     * - The contract must not be paused.
+     */
+    modifier whenNotPaused() {
+        require(!paused(), "Pausable: paused");
+        _;
+    }
+
+    /**
+     * @dev Modifier to make a function callable only when the contract is paused.
+     *
+     * Requirements:
+     *
+     * - The contract must be paused.
+     */
+    modifier whenPaused() {
+        require(paused(), "Pausable: not paused");
+        _;
+    }
+
+    /**
+     * @dev Triggers stopped state.
+     *
+     * Requirements:
+     *
+     * - The contract must not be paused.
+     */
+    function _pause() internal virtual whenNotPaused {
+        _paused = true;
+        emit Paused(_msgSender());
+    }
+
+    /**
+     * @dev Returns to normal state.
+     *
+     * Requirements:
+     *
+     * - The contract must be paused.
+     */
+    function _unpause() internal virtual whenPaused {
+        _paused = false;
+        emit Unpaused(_msgSender());
+    }
+
+    /**
+     * @dev This empty reserved space is put in place to allow future versions to add new
+     * variables without shifting down storage in the inheritance chain.
+     * See https://docs.openzeppelin.com/contracts/4.x/upgradeable#storage_gaps
+     */
+    uint256[49] private __gap;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.6.0) (access/AccessControl.sol)
+
+pragma solidity ^0.8.0;
+
+import "./IAccessControlUpgradeable.sol";
+import "../utils/ContextUpgradeable.sol";
+import "../utils/StringsUpgradeable.sol";
+import "../utils/introspection/ERC165Upgradeable.sol";
+import "../proxy/utils/Initializable.sol";
+
+/**
+ * @dev Contract module that allows children to implement role-based access
+ * control mechanisms. This is a lightweight version that doesn't allow enumerating role
+ * members except through off-chain means by accessing the contract event logs. Some
+ * applications may benefit from on-chain enumerability, for those cases see
+ * {AccessControlEnumerable}.
+ *
+ * Roles are referred to by their `bytes32` identifier. These should be exposed
+ * in the external API and be unique. The best way to achieve this is by
+ * using `public constant` hash digests:
+ *
+ * ```
+ * bytes32 public constant MY_ROLE = keccak256("MY_ROLE");
+ * ```
+ *
+ * Roles can be used to represent a set of permissions. To restrict access to a
+ * function call, use {hasRole}:
+ *
+ * ```
+ * function foo() public {
+ *     require(hasRole(MY_ROLE, msg.sender));
+ *     ...
+ * }
+ * ```
+ *
+ * Roles can be granted and revoked dynamically via the {grantRole} and
+ * {revokeRole} functions. Each role has an associated admin role, and only
+ * accounts that have a role's admin role can call {grantRole} and {revokeRole}.
+ *
+ * By default, the admin role for all roles is `DEFAULT_ADMIN_ROLE`, which means
+ * that only accounts with this role will be able to grant or revoke other
+ * roles. More complex role relationships can be created by using
+ * {_setRoleAdmin}.
+ *
+ * WARNING: The `DEFAULT_ADMIN_ROLE` is also its own admin: it has permission to
+ * grant and revoke this role. Extra precautions should be taken to secure
+ * accounts that have been granted it.
+ */
+abstract contract AccessControlUpgradeable is Initializable, ContextUpgradeable, IAccessControlUpgradeable, ERC165Upgradeable {
+    function __AccessControl_init() internal onlyInitializing {
+    }
+
+    function __AccessControl_init_unchained() internal onlyInitializing {
+    }
+    struct RoleData {
+        mapping(address => bool) members;
+        bytes32 adminRole;
+    }
+
+    mapping(bytes32 => RoleData) private _roles;
+
+    bytes32 public constant DEFAULT_ADMIN_ROLE = 0x00;
+
+    /**
+     * @dev Modifier that checks that an account has a specific role. Reverts
+     * with a standardized message including the required role.
+     *
+     * The format of the revert reason is given by the following regular expression:
+     *
+     *  /^AccessControl: account (0x[0-9a-f]{40}) is missing role (0x[0-9a-f]{64})$/
+     *
+     * _Available since v4.1._
+     */
+    modifier onlyRole(bytes32 role) {
+        _checkRole(role);
+        _;
+    }
+
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        return interfaceId == type(IAccessControlUpgradeable).interfaceId || super.supportsInterface(interfaceId);
+    }
+
+    /**
+     * @dev Returns `true` if `account` has been granted `role`.
+     */
+    function hasRole(bytes32 role, address account) public view virtual override returns (bool) {
+        return _roles[role].members[account];
+    }
+
+    /**
+     * @dev Revert with a standard message if `_msgSender()` is missing `role`.
+     * Overriding this function changes the behavior of the {onlyRole} modifier.
+     *
+     * Format of the revert message is described in {_checkRole}.
+     *
+     * _Available since v4.6._
+     */
+    function _checkRole(bytes32 role) internal view virtual {
+        _checkRole(role, _msgSender());
+    }
+
+    /**
+     * @dev Revert with a standard message if `account` is missing `role`.
+     *
+     * The format of the revert reason is given by the following regular expression:
+     *
+     *  /^AccessControl: account (0x[0-9a-f]{40}) is missing role (0x[0-9a-f]{64})$/
+     */
+    function _checkRole(bytes32 role, address account) internal view virtual {
+        if (!hasRole(role, account)) {
+            revert(
+                string(
+                    abi.encodePacked(
+                        "AccessControl: account ",
+                        StringsUpgradeable.toHexString(uint160(account), 20),
+                        " is missing role ",
+                        StringsUpgradeable.toHexString(uint256(role), 32)
+                    )
+                )
+            );
+        }
+    }
+
+    /**
+     * @dev Returns the admin role that controls `role`. See {grantRole} and
+     * {revokeRole}.
+     *
+     * To change a role's admin, use {_setRoleAdmin}.
+     */
+    function getRoleAdmin(bytes32 role) public view virtual override returns (bytes32) {
+        return _roles[role].adminRole;
+    }
+
+    /**
+     * @dev Grants `role` to `account`.
+     *
+     * If `account` had not been already granted `role`, emits a {RoleGranted}
+     * event.
+     *
+     * Requirements:
+     *
+     * - the caller must have ``role``'s admin role.
+     */
+    function grantRole(bytes32 role, address account) public virtual override onlyRole(getRoleAdmin(role)) {
+        _grantRole(role, account);
+    }
+
+    /**
+     * @dev Revokes `role` from `account`.
+     *
+     * If `account` had been granted `role`, emits a {RoleRevoked} event.
+     *
+     * Requirements:
+     *
+     * - the caller must have ``role``'s admin role.
+     */
+    function revokeRole(bytes32 role, address account) public virtual override onlyRole(getRoleAdmin(role)) {
+        _revokeRole(role, account);
+    }
+
+    /**
+     * @dev Revokes `role` from the calling account.
+     *
+     * Roles are often managed via {grantRole} and {revokeRole}: this function's
+     * purpose is to provide a mechanism for accounts to lose their privileges
+     * if they are compromised (such as when a trusted device is misplaced).
+     *
+     * If the calling account had been revoked `role`, emits a {RoleRevoked}
+     * event.
+     *
+     * Requirements:
+     *
+     * - the caller must be `account`.
+     */
+    function renounceRole(bytes32 role, address account) public virtual override {
+        require(account == _msgSender(), "AccessControl: can only renounce roles for self");
+
+        _revokeRole(role, account);
+    }
+
+    /**
+     * @dev Grants `role` to `account`.
+     *
+     * If `account` had not been already granted `role`, emits a {RoleGranted}
+     * event. Note that unlike {grantRole}, this function doesn't perform any
+     * checks on the calling account.
+     *
+     * [WARNING]
+     * ====
+     * This function should only be called from the constructor when setting
+     * up the initial roles for the system.
+     *
+     * Using this function in any other way is effectively circumventing the admin
+     * system imposed by {AccessControl}.
+     * ====
+     *
+     * NOTE: This function is deprecated in favor of {_grantRole}.
+     */
+    function _setupRole(bytes32 role, address account) internal virtual {
+        _grantRole(role, account);
+    }
+
+    /**
+     * @dev Sets `adminRole` as ``role``'s admin role.
+     *
+     * Emits a {RoleAdminChanged} event.
+     */
+    function _setRoleAdmin(bytes32 role, bytes32 adminRole) internal virtual {
+        bytes32 previousAdminRole = getRoleAdmin(role);
+        _roles[role].adminRole = adminRole;
+        emit RoleAdminChanged(role, previousAdminRole, adminRole);
+    }
+
+    /**
+     * @dev Grants `role` to `account`.
+     *
+     * Internal function without access restriction.
+     */
+    function _grantRole(bytes32 role, address account) internal virtual {
+        if (!hasRole(role, account)) {
+            _roles[role].members[account] = true;
+            emit RoleGranted(role, account, _msgSender());
+        }
+    }
+
+    /**
+     * @dev Revokes `role` from `account`.
+     *
+     * Internal function without access restriction.
+     */
+    function _revokeRole(bytes32 role, address account) internal virtual {
+        if (hasRole(role, account)) {
+            _roles[role].members[account] = false;
+            emit RoleRevoked(role, account, _msgSender());
+        }
+    }
+
+    /**
+     * @dev This empty reserved space is put in place to allow future versions to add new
+     * variables without shifting down storage in the inheritance chain.
+     * See https://docs.openzeppelin.com/contracts/4.x/upgradeable#storage_gaps
+     */
+    uint256[49] private __gap;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.6.0) (token/ERC20/IERC20.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20Upgradeable {
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `to`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `from` to `to` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (token/ERC20/utils/SafeERC20.sol)
+
+pragma solidity ^0.8.0;
+
+import "../IERC20Upgradeable.sol";
+import "../../../utils/AddressUpgradeable.sol";
+
+/**
+ * @title SafeERC20
+ * @dev Wrappers around ERC20 operations that throw on failure (when the token
+ * contract returns false). Tokens that return no value (and instead revert or
+ * throw on failure) are also supported, non-reverting calls are assumed to be
+ * successful.
+ * To use this library you can add a `using SafeERC20 for IERC20;` statement to your contract,
+ * which allows you to call the safe operations as `token.safeTransfer(...)`, etc.
+ */
+library SafeERC20Upgradeable {
+    using AddressUpgradeable for address;
+
+    function safeTransfer(
+        IERC20Upgradeable token,
+        address to,
+        uint256 value
+    ) internal {
+        _callOptionalReturn(token, abi.encodeWithSelector(token.transfer.selector, to, value));
+    }
+
+    function safeTransferFrom(
+        IERC20Upgradeable token,
+        address from,
+        address to,
+        uint256 value
+    ) internal {
+        _callOptionalReturn(token, abi.encodeWithSelector(token.transferFrom.selector, from, to, value));
+    }
+
+    /**
+     * @dev Deprecated. This function has issues similar to the ones found in
+     * {IERC20-approve}, and its usage is discouraged.
+     *
+     * Whenever possible, use {safeIncreaseAllowance} and
+     * {safeDecreaseAllowance} instead.
+     */
+    function safeApprove(
+        IERC20Upgradeable token,
+        address spender,
+        uint256 value
+    ) internal {
+        // safeApprove should only be called when setting an initial allowance,
+        // or when resetting it to zero. To increase and decrease it, use
+        // 'safeIncreaseAllowance' and 'safeDecreaseAllowance'
+        require(
+            (value == 0) || (token.allowance(address(this), spender) == 0),
+            "SafeERC20: approve from non-zero to non-zero allowance"
+        );
+        _callOptionalReturn(token, abi.encodeWithSelector(token.approve.selector, spender, value));
+    }
+
+    function safeIncreaseAllowance(
+        IERC20Upgradeable token,
+        address spender,
+        uint256 value
+    ) internal {
+        uint256 newAllowance = token.allowance(address(this), spender) + value;
+        _callOptionalReturn(token, abi.encodeWithSelector(token.approve.selector, spender, newAllowance));
+    }
+
+    function safeDecreaseAllowance(
+        IERC20Upgradeable token,
+        address spender,
+        uint256 value
+    ) internal {
+        unchecked {
+            uint256 oldAllowance = token.allowance(address(this), spender);
+            require(oldAllowance >= value, "SafeERC20: decreased allowance below zero");
+            uint256 newAllowance = oldAllowance - value;
+            _callOptionalReturn(token, abi.encodeWithSelector(token.approve.selector, spender, newAllowance));
+        }
+    }
+
+    /**
+     * @dev Imitates a Solidity high-level call (i.e. a regular function call to a contract), relaxing the requirement
+     * on the return value: the return value is optional (but if data is returned, it must not be false).
+     * @param token The token targeted by the call.
+     * @param data The call data (encoded using abi.encode or one of its variants).
+     */
+    function _callOptionalReturn(IERC20Upgradeable token, bytes memory data) private {
+        // We need to perform a low level call here, to bypass Solidity's return data size checking mechanism, since
+        // we're implementing it ourselves. We use {Address.functionCall} to perform this call, which verifies that
+        // the target address contains contract code and also asserts for success in the low-level call.
+
+        bytes memory returndata = address(token).functionCall(data, "SafeERC20: low-level call failed");
+        if (returndata.length > 0) {
+            // Return data is optional
+            require(abi.decode(returndata, (bool)), "SafeERC20: ERC20 operation did not succeed");
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.5.0) (utils/Address.sol)
+
+pragma solidity ^0.8.1;
+
+/**
+ * @dev Collection of functions related to the address type
+ */
+library AddressUpgradeable {
+    /**
+     * @dev Returns true if `account` is a contract.
+     *
+     * [IMPORTANT]
+     * ====
+     * It is unsafe to assume that an address for which this function returns
+     * false is an externally-owned account (EOA) and not a contract.
+     *
+     * Among others, `isContract` will return false for the following
+     * types of addresses:
+     *
+     *  - an externally-owned account
+     *  - a contract in construction
+     *  - an address where a contract will be created
+     *  - an address where a contract lived, but was destroyed
+     * ====
+     *
+     * [IMPORTANT]
+     * ====
+     * You shouldn't rely on `isContract` to protect against flash loan attacks!
+     *
+     * Preventing calls from contracts is highly discouraged. It breaks composability, breaks support for smart wallets
+     * like Gnosis Safe, and does not provide security since it can be circumvented by calling from a contract
+     * constructor.
+     * ====
+     */
+    function isContract(address account) internal view returns (bool) {
+        // This method relies on extcodesize/address.code.length, which returns 0
+        // for contracts in construction, since the code is only stored at the end
+        // of the constructor execution.
+
+        return account.code.length > 0;
+    }
+
+    /**
+     * @dev Replacement for Solidity's `transfer`: sends `amount` wei to
+     * `recipient`, forwarding all available gas and reverting on errors.
+     *
+     * https://eips.ethereum.org/EIPS/eip-1884[EIP1884] increases the gas cost
+     * of certain opcodes, possibly making contracts go over the 2300 gas limit
+     * imposed by `transfer`, making them unable to receive funds via
+     * `transfer`. {sendValue} removes this limitation.
+     *
+     * https://diligence.consensys.net/posts/2019/09/stop-using-soliditys-transfer-now/[Learn more].
+     *
+     * IMPORTANT: because control is transferred to `recipient`, care must be
+     * taken to not create reentrancy vulnerabilities. Consider using
+     * {ReentrancyGuard} or the
+     * https://solidity.readthedocs.io/en/v0.5.11/security-considerations.html#use-the-checks-effects-interactions-pattern[checks-effects-interactions pattern].
+     */
+    function sendValue(address payable recipient, uint256 amount) internal {
+        require(address(this).balance >= amount, "Address: insufficient balance");
+
+        (bool success, ) = recipient.call{value: amount}("");
+        require(success, "Address: unable to send value, recipient may have reverted");
+    }
+
+    /**
+     * @dev Performs a Solidity function call using a low level `call`. A
+     * plain `call` is an unsafe replacement for a function call: use this
+     * function instead.
+     *
+     * If `target` reverts with a revert reason, it is bubbled up by this
+     * function (like regular Solidity function calls).
+     *
+     * Returns the raw returned data. To convert to the expected return value,
+     * use https://solidity.readthedocs.io/en/latest/units-and-global-variables.html?highlight=abi.decode#abi-encoding-and-decoding-functions[`abi.decode`].
+     *
+     * Requirements:
+     *
+     * - `target` must be a contract.
+     * - calling `target` with `data` must not revert.
+     *
+     * _Available since v3.1._
+     */
+    function functionCall(address target, bytes memory data) internal returns (bytes memory) {
+        return functionCall(target, data, "Address: low-level call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`], but with
+     * `errorMessage` as a fallback revert reason when `target` reverts.
+     *
+     * _Available since v3.1._
+     */
+    function functionCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, 0, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but also transferring `value` wei to `target`.
+     *
+     * Requirements:
+     *
+     * - the calling contract must have an ETH balance of at least `value`.
+     * - the called Solidity function must be `payable`.
+     *
+     * _Available since v3.1._
+     */
+    function functionCallWithValue(
+        address target,
+        bytes memory data,
+        uint256 value
+    ) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, value, "Address: low-level call with value failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCallWithValue-address-bytes-uint256-}[`functionCallWithValue`], but
+     * with `errorMessage` as a fallback revert reason when `target` reverts.
+     *
+     * _Available since v3.1._
+     */
+    function functionCallWithValue(
+        address target,
+        bytes memory data,
+        uint256 value,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        require(address(this).balance >= value, "Address: insufficient balance for call");
+        require(isContract(target), "Address: call to non-contract");
+
+        (bool success, bytes memory returndata) = target.call{value: value}(data);
+        return verifyCallResult(success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but performing a static call.
+     *
+     * _Available since v3.3._
+     */
+    function functionStaticCall(address target, bytes memory data) internal view returns (bytes memory) {
+        return functionStaticCall(target, data, "Address: low-level static call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-string-}[`functionCall`],
+     * but performing a static call.
+     *
+     * _Available since v3.3._
+     */
+    function functionStaticCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal view returns (bytes memory) {
+        require(isContract(target), "Address: static call to non-contract");
+
+        (bool success, bytes memory returndata) = target.staticcall(data);
+        return verifyCallResult(success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Tool to verifies that a low level call was successful, and revert if it wasn't, either by bubbling the
+     * revert reason using the provided one.
+     *
+     * _Available since v4.3._
+     */
+    function verifyCallResult(
+        bool success,
+        bytes memory returndata,
+        string memory errorMessage
+    ) internal pure returns (bytes memory) {
+        if (success) {
+            return returndata;
+        } else {
+            // Look for revert reason and bubble it up if present
+            if (returndata.length > 0) {
+                // The easiest way to bubble the revert reason is using memory via assembly
+
+                assembly {
+                    let returndata_size := mload(returndata)
+                    revert(add(32, returndata), returndata_size)
+                }
+            } else {
+                revert(errorMessage);
+            }
+        }
+    }
+}
+
+//SPDX-License-Identifier: GPL-3.0
+pragma solidity ^0.8.0;
+
+interface IStakeManager {
+    struct BotDelegateRequest {
+        uint256 startTime;
+        uint256 endTime;
+        uint256 amount;
+    }
+
+    struct BotUndelegateRequest {
+        uint256 startTime;
+        uint256 endTime;
+        uint256 amount;
+        uint256 amountInBnbX;
+    }
+
+    struct WithdrawalRequest {
+        uint256 uuid;
+        uint256 amountInBnbX;
+        uint256 startTime;
+    }
+
+    function initialize(
+        address _bnbX,
+        address _manager,
+        address _tokenHub,
+        address _bcDepositWallet,
+        address _bot
+    ) external;
+
+    function deposit() external payable;
+
+    function startDelegation()
+        external
+        payable
+        returns (uint256 _uuid, uint256 _amount);
+
+    function retryTransferOut(uint256 _uuid) external payable;
+
+    function completeDelegation(uint256 _uuid) external;
+
+    function addRestakingRewards(uint256 _amount) external;
+
+    function requestWithdraw(uint256 _amountInBnbX) external;
+
+    function claimWithdraw(uint256 _idx) external;
+
+    function startUndelegation()
+        external
+        returns (uint256 _uuid, uint256 _amount);
+
+    function undelegationStarted(uint256 _uuid) external;
+
+    function completeUndelegation(uint256 _uuid) external payable;
+
+    function setBotRole(address _address) external;
+
+    function revokeBotRole(address _address) external;
+
+    function setBCDepositWallet(address _address) external;
+
+    function setMinDelegateThreshold(uint256 _minDelegateThreshold) external;
+
+    function setMinUndelegateThreshold(uint256 _minUndelegateThreshold)
+        external;
+
+    function getTotalPooledBnb() external view returns (uint256);
+
+    function getContracts()
+        external
+        view
+        returns (
+            address _bnbX,
+            address _tokenHub,
+            address _bcDepositWallet
+        );
+
+    function getTokenHubRelayFee() external view returns (uint256);
+
+    function getBotDelegateRequest(uint256 _uuid)
+        external
+        view
+        returns (BotDelegateRequest memory);
+
+    function getBotUndelegateRequest(uint256 _uuid)
+        external
+        view
+        returns (BotUndelegateRequest memory);
+
+    function getUserWithdrawalRequests(address _address)
+        external
+        view
+        returns (WithdrawalRequest[] memory);
+
+    function getUserRequestStatus(address _user, uint256 _idx)
+        external
+        view
+        returns (bool _isClaimable, uint256 _amount);
+
+    function getBnbXWithdrawLimit()
+        external
+        view
+        returns (uint256 _bnbXWithdrawLimit);
+
+    function getExtraBnbInContract() external view returns (uint256 _extraBnb);
+
+    function convertBnbToBnbX(uint256 _amount) external view returns (uint256);
+
+    function convertBnbXToBnb(uint256 _amountInBnbX)
+        external
+        view
+        returns (uint256);
+
+    event Delegate(uint256 _uuid, uint256 _amount);
+    event TransferOut(uint256 _amount);
+    event SetBotRole(address indexed _address);
+    event RevokeBotRole(address indexed _address);
+    event SetBCDepositWallet(address indexed _address);
+    event RequestWithdraw(address indexed _account, uint256 _amountInBnbX);
+    event ClaimWithdrawal(
+        address indexed _account,
+        uint256 _idx,
+        uint256 _amount
+    );
+    event Undelegate(uint256 _uuid, uint256 _amount);
+    event Redelegate(uint256 _amount);
+}
+
+// SPDX-License-Identifier: GPL-3.0
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+
+/// @title BnbX interface
+interface IBnbX is IERC20Upgradeable {
+    function initialize(address _manager) external;
+
+    function mint(address _account, uint256 _amount) external;
+
+    function burn(address _account, uint256 _amount) external;
+
+    function setStakeManager(address _address) external;
+
+    event SetStakeManager(address indexed _address);
+}
+
+//SPDX-License-Identifier: GPL-3.0
+pragma solidity ^0.8.0;
+
+/**
+ * @title binance TokenHub interface
+ * @dev Helps in cross-chain transfers (BSC -> BC)
+ */
+interface ITokenHub {
+    function relayFee() external view returns (uint256);
+
+    function transferOut(
+        address contractAddr,
+        address recipient,
+        uint256 amount,
+        uint64 expireTime
+    ) external payable returns (bool);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
+
+pragma solidity ^0.8.0;
+import "../proxy/utils/Initializable.sol";
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract ContextUpgradeable is Initializable {
+    function __Context_init() internal onlyInitializing {
+    }
+
+    function __Context_init_unchained() internal onlyInitializing {
+    }
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+
+    /**
+     * @dev This empty reserved space is put in place to allow future versions to add new
+     * variables without shifting down storage in the inheritance chain.
+     * See https://docs.openzeppelin.com/contracts/4.x/upgradeable#storage_gaps
+     */
+    uint256[50] private __gap;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (access/IAccessControl.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev External interface of AccessControl declared to support ERC165 detection.
+ */
+interface IAccessControlUpgradeable {
+    /**
+     * @dev Emitted when `newAdminRole` is set as ``role``'s admin role, replacing `previousAdminRole`
+     *
+     * `DEFAULT_ADMIN_ROLE` is the starting admin for all roles, despite
+     * {RoleAdminChanged} not being emitted signaling this.
+     *
+     * _Available since v3.1._
+     */
+    event RoleAdminChanged(bytes32 indexed role, bytes32 indexed previousAdminRole, bytes32 indexed newAdminRole);
+
+    /**
+     * @dev Emitted when `account` is granted `role`.
+     *
+     * `sender` is the account that originated the contract call, an admin role
+     * bearer except when using {AccessControl-_setupRole}.
+     */
+    event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
+
+    /**
+     * @dev Emitted when `account` is revoked `role`.
+     *
+     * `sender` is the account that originated the contract call:
+     *   - if using `revokeRole`, it is the admin role bearer
+     *   - if using `renounceRole`, it is the role bearer (i.e. `account`)
+     */
+    event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
+
+    /**
+     * @dev Returns `true` if `account` has been granted `role`.
+     */
+    function hasRole(bytes32 role, address account) external view returns (bool);
+
+    /**
+     * @dev Returns the admin role that controls `role`. See {grantRole} and
+     * {revokeRole}.
+     *
+     * To change a role's admin, use {AccessControl-_setRoleAdmin}.
+     */
+    function getRoleAdmin(bytes32 role) external view returns (bytes32);
+
+    /**
+     * @dev Grants `role` to `account`.
+     *
+     * If `account` had not been already granted `role`, emits a {RoleGranted}
+     * event.
+     *
+     * Requirements:
+     *
+     * - the caller must have ``role``'s admin role.
+     */
+    function grantRole(bytes32 role, address account) external;
+
+    /**
+     * @dev Revokes `role` from `account`.
+     *
+     * If `account` had been granted `role`, emits a {RoleRevoked} event.
+     *
+     * Requirements:
+     *
+     * - the caller must have ``role``'s admin role.
+     */
+    function revokeRole(bytes32 role, address account) external;
+
+    /**
+     * @dev Revokes `role` from the calling account.
+     *
+     * Roles are often managed via {grantRole} and {revokeRole}: this function's
+     * purpose is to provide a mechanism for accounts to lose their privileges
+     * if they are compromised (such as when a trusted device is misplaced).
+     *
+     * If the calling account had been granted `role`, emits a {RoleRevoked}
+     * event.
+     *
+     * Requirements:
+     *
+     * - the caller must be `account`.
+     */
+    function renounceRole(bytes32 role, address account) external;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Strings.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev String operations.
+ */
+library StringsUpgradeable {
+    bytes16 private constant _HEX_SYMBOLS = "0123456789abcdef";
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` decimal representation.
+     */
+    function toString(uint256 value) internal pure returns (string memory) {
+        // Inspired by OraclizeAPI's implementation - MIT licence
+        // https://github.com/oraclize/ethereum-api/blob/b42146b063c7d6ee1358846c198246239e9360e8/oraclizeAPI_0.4.25.sol
+
+        if (value == 0) {
+            return "0";
+        }
+        uint256 temp = value;
+        uint256 digits;
+        while (temp != 0) {
+            digits++;
+            temp /= 10;
+        }
+        bytes memory buffer = new bytes(digits);
+        while (value != 0) {
+            digits -= 1;
+            buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
+            value /= 10;
+        }
+        return string(buffer);
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation.
+     */
+    function toHexString(uint256 value) internal pure returns (string memory) {
+        if (value == 0) {
+            return "0x00";
+        }
+        uint256 temp = value;
+        uint256 length = 0;
+        while (temp != 0) {
+            length++;
+            temp >>= 8;
+        }
+        return toHexString(value, length);
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation with fixed length.
+     */
+    function toHexString(uint256 value, uint256 length) internal pure returns (string memory) {
+        bytes memory buffer = new bytes(2 * length + 2);
+        buffer[0] = "0";
+        buffer[1] = "x";
+        for (uint256 i = 2 * length + 1; i > 1; --i) {
+            buffer[i] = _HEX_SYMBOLS[value & 0xf];
+            value >>= 4;
+        }
+        require(value == 0, "Strings: hex length insufficient");
+        return string(buffer);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/ERC165.sol)
+
+pragma solidity ^0.8.0;
+
+import "./IERC165Upgradeable.sol";
+import "../../proxy/utils/Initializable.sol";
+
+/**
+ * @dev Implementation of the {IERC165} interface.
+ *
+ * Contracts that want to implement ERC165 should inherit from this contract and override {supportsInterface} to check
+ * for the additional interface id that will be supported. For example:
+ *
+ * ```solidity
+ * function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+ *     return interfaceId == type(MyInterface).interfaceId || super.supportsInterface(interfaceId);
+ * }
+ * ```
+ *
+ * Alternatively, {ERC165Storage} provides an easier to use but more expensive implementation.
+ */
+abstract contract ERC165Upgradeable is Initializable, IERC165Upgradeable {
+    function __ERC165_init() internal onlyInitializing {
+    }
+
+    function __ERC165_init_unchained() internal onlyInitializing {
+    }
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        return interfaceId == type(IERC165Upgradeable).interfaceId;
+    }
+
+    /**
+     * @dev This empty reserved space is put in place to allow future versions to add new
+     * variables without shifting down storage in the inheritance chain.
+     * See https://docs.openzeppelin.com/contracts/4.x/upgradeable#storage_gaps
+     */
+    uint256[50] private __gap;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/IERC165.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC165 standard, as defined in the
+ * https://eips.ethereum.org/EIPS/eip-165[EIP].
+ *
+ * Implementers can declare support of contract interfaces, which can then be
+ * queried by others ({ERC165Checker}).
+ *
+ * For an implementation, see {ERC165}.
+ */
+interface IERC165Upgradeable {
+    /**
+     * @dev Returns true if this contract implements the interface defined by
+     * `interfaceId`. See the corresponding
+     * https://eips.ethereum.org/EIPS/eip-165#how-interfaces-are-identified[EIP section]
+     * to learn more about how these ids are created.
+     *
+     * This function call must use less than 30 000 gas.
+     */
+    function supportsInterface(bytes4 interfaceId) external view returns (bool);
+}
