@@ -1,0 +1,1713 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-07-17
+*/
+
+// File: @openzeppelin/contracts/security/ReentrancyGuard.sol
+
+
+// OpenZeppelin Contracts v4.4.1 (security/ReentrancyGuard.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Contract module that helps prevent reentrant calls to a function.
+ *
+ * Inheriting from `ReentrancyGuard` will make the {nonReentrant} modifier
+ * available, which can be applied to functions to make sure there are no nested
+ * (reentrant) calls to them.
+ *
+ * Note that because there is a single `nonReentrant` guard, functions marked as
+ * `nonReentrant` may not call one another. This can be worked around by making
+ * those functions `private`, and then adding `external` `nonReentrant` entry
+ * points to them.
+ *
+ * TIP: If you would like to learn more about reentrancy and alternative ways
+ * to protect against it, check out our blog post
+ * https://blog.openzeppelin.com/reentrancy-after-istanbul/[Reentrancy After Istanbul].
+ */
+abstract contract ReentrancyGuard {
+    // Booleans are more expensive than uint256 or any type that takes up a full
+    // word because each write operation emits an extra SLOAD to first read the
+    // slot's contents, replace the bits taken up by the boolean, and then write
+    // back. This is the compiler's defense against contract upgrades and
+    // pointer aliasing, and it cannot be disabled.
+
+    // The values being non-zero value makes deployment a bit more expensive,
+    // but in exchange the refund on every call to nonReentrant will be lower in
+    // amount. Since refunds are capped to a percentage of the total
+    // transaction's gas, it is best to keep them low in cases like this one, to
+    // increase the likelihood of the full refund coming into effect.
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
+
+    uint256 private _status;
+
+    constructor() {
+        _status = _NOT_ENTERED;
+    }
+
+    /**
+     * @dev Prevents a contract from calling itself, directly or indirectly.
+     * Calling a `nonReentrant` function from another `nonReentrant`
+     * function is not supported. It is possible to prevent this from happening
+     * by making the `nonReentrant` function external, and making it call a
+     * `private` function that does the actual work.
+     */
+    modifier nonReentrant() {
+        // On the first call to nonReentrant, _notEntered will be true
+        require(_status != _ENTERED, "ReentrancyGuard: reentrant call");
+
+        // Any calls to nonReentrant after this point will fail
+        _status = _ENTERED;
+
+        _;
+
+        // By storing the original value once again, a refund is triggered (see
+        // https://eips.ethereum.org/EIPS/eip-2200)
+        _status = _NOT_ENTERED;
+    }
+}
+
+// File: @openzeppelin/contracts/utils/math/SafeMath.sol
+
+
+// OpenZeppelin Contracts (last updated v4.6.0) (utils/math/SafeMath.sol)
+
+pragma solidity ^0.8.0;
+
+// CAUTION
+// This version of SafeMath should only be used with Solidity 0.8 or later,
+// because it relies on the compiler's built in overflow checks.
+
+/**
+ * @dev Wrappers over Solidity's arithmetic operations.
+ *
+ * NOTE: `SafeMath` is generally not needed starting with Solidity 0.8, since the compiler
+ * now has built in overflow checking.
+ */
+library SafeMath {
+    /**
+     * @dev Returns the addition of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryAdd(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            uint256 c = a + b;
+            if (c < a) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function trySub(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b > a) return (false, 0);
+            return (true, a - b);
+        }
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMul(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            // Gas optimization: this is cheaper than requiring 'a' not being zero, but the
+            // benefit is lost if 'b' is also tested.
+            // See: https://github.com/OpenZeppelin/openzeppelin-contracts/pull/522
+            if (a == 0) return (true, 0);
+            uint256 c = a * b;
+            if (c / a != b) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the division of two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryDiv(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a / b);
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMod(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a % b);
+        }
+    }
+
+    /**
+     * @dev Returns the addition of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `+` operator.
+     *
+     * Requirements:
+     *
+     * - Addition cannot overflow.
+     */
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting on
+     * overflow (when the result is negative).
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a - b;
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `*` operator.
+     *
+     * Requirements:
+     *
+     * - Multiplication cannot overflow.
+     */
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a * b;
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator.
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a / b;
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting when dividing by zero.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a % b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting with custom message on
+     * overflow (when the result is negative).
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {trySub}.
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b <= a, errorMessage);
+            return a - b;
+        }
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting with custom message on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator. Note: this function uses a
+     * `revert` opcode (which leaves remaining gas untouched) while Solidity
+     * uses an invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a / b;
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting with custom message when dividing by zero.
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {tryMod}.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a % b;
+        }
+    }
+}
+
+// File: @openzeppelin/contracts/utils/introspection/IERC165.sol
+
+
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/IERC165.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC165 standard, as defined in the
+ * https://eips.ethereum.org/EIPS/eip-165[EIP].
+ *
+ * Implementers can declare support of contract interfaces, which can then be
+ * queried by others ({ERC165Checker}).
+ *
+ * For an implementation, see {ERC165}.
+ */
+interface IERC165 {
+    /**
+     * @dev Returns true if this contract implements the interface defined by
+     * `interfaceId`. See the corresponding
+     * https://eips.ethereum.org/EIPS/eip-165#how-interfaces-are-identified[EIP section]
+     * to learn more about how these ids are created.
+     *
+     * This function call must use less than 30 000 gas.
+     */
+    function supportsInterface(bytes4 interfaceId) external view returns (bool);
+}
+
+// File: @openzeppelin/contracts/token/ERC721/IERC721.sol
+
+
+// OpenZeppelin Contracts (last updated v4.6.0) (token/ERC721/IERC721.sol)
+
+pragma solidity ^0.8.0;
+
+
+/**
+ * @dev Required interface of an ERC721 compliant contract.
+ */
+interface IERC721 is IERC165 {
+    /**
+     * @dev Emitted when `tokenId` token is transferred from `from` to `to`.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+
+    /**
+     * @dev Emitted when `owner` enables `approved` to manage the `tokenId` token.
+     */
+    event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId);
+
+    /**
+     * @dev Emitted when `owner` enables or disables (`approved`) `operator` to manage all of its assets.
+     */
+    event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
+
+    /**
+     * @dev Returns the number of tokens in ``owner``'s account.
+     */
+    function balanceOf(address owner) external view returns (uint256 balance);
+
+    /**
+     * @dev Returns the owner of the `tokenId` token.
+     *
+     * Requirements:
+     *
+     * - `tokenId` must exist.
+     */
+    function ownerOf(uint256 tokenId) external view returns (address owner);
+
+    /**
+     * @dev Safely transfers `tokenId` token from `from` to `to`.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `tokenId` token must exist and be owned by `from`.
+     * - If the caller is not `from`, it must be approved to move this token by either {approve} or {setApprovalForAll}.
+     * - If `to` refers to a smart contract, it must implement {IERC721Receiver-onERC721Received}, which is called upon a safe transfer.
+     *
+     * Emits a {Transfer} event.
+     */
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 tokenId,
+        bytes calldata data
+    ) external;
+
+    /**
+     * @dev Safely transfers `tokenId` token from `from` to `to`, checking first that contract recipients
+     * are aware of the ERC721 protocol to prevent tokens from being forever locked.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `tokenId` token must exist and be owned by `from`.
+     * - If the caller is not `from`, it must be have been allowed to move this token by either {approve} or {setApprovalForAll}.
+     * - If `to` refers to a smart contract, it must implement {IERC721Receiver-onERC721Received}, which is called upon a safe transfer.
+     *
+     * Emits a {Transfer} event.
+     */
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 tokenId
+    ) external;
+
+    /**
+     * @dev Transfers `tokenId` token from `from` to `to`.
+     *
+     * WARNING: Usage of this method is discouraged, use {safeTransferFrom} whenever possible.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `tokenId` token must be owned by `from`.
+     * - If the caller is not `from`, it must be approved to move this token by either {approve} or {setApprovalForAll}.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 tokenId
+    ) external;
+
+    /**
+     * @dev Gives permission to `to` to transfer `tokenId` token to another account.
+     * The approval is cleared when the token is transferred.
+     *
+     * Only a single account can be approved at a time, so approving the zero address clears previous approvals.
+     *
+     * Requirements:
+     *
+     * - The caller must own the token or be an approved operator.
+     * - `tokenId` must exist.
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address to, uint256 tokenId) external;
+
+    /**
+     * @dev Approve or remove `operator` as an operator for the caller.
+     * Operators can call {transferFrom} or {safeTransferFrom} for any token owned by the caller.
+     *
+     * Requirements:
+     *
+     * - The `operator` cannot be the caller.
+     *
+     * Emits an {ApprovalForAll} event.
+     */
+    function setApprovalForAll(address operator, bool _approved) external;
+
+    /**
+     * @dev Returns the account approved for `tokenId` token.
+     *
+     * Requirements:
+     *
+     * - `tokenId` must exist.
+     */
+    function getApproved(uint256 tokenId) external view returns (address operator);
+
+    /**
+     * @dev Returns if the `operator` is allowed to manage all of the assets of `owner`.
+     *
+     * See {setApprovalForAll}
+     */
+    function isApprovedForAll(address owner, address operator) external view returns (bool);
+}
+
+// File: @openzeppelin/contracts/utils/Context.sol
+
+
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+
+// File: @openzeppelin/contracts/access/Ownable.sol
+
+
+// OpenZeppelin Contracts v4.4.1 (access/Ownable.sol)
+
+pragma solidity ^0.8.0;
+
+
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owner.
+     */
+    constructor() {
+        _transferOwnership(_msgSender());
+    }
+
+    /**
+     * @dev Returns the address of the current owner.
+     */
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    /**
+     * @dev Throws if called by any account other than the owner.
+     */
+    modifier onlyOwner() {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    /**
+     * @dev Leaves the contract without owner. It will not be possible to call
+     * `onlyOwner` functions anymore. Can only be called by the current owner.
+     *
+     * NOTE: Renouncing ownership will leave the contract without an owner,
+     * thereby removing any functionality that is only available to the owner.
+     */
+    function renounceOwnership() public virtual onlyOwner {
+        _transferOwnership(address(0));
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Can only be called by the current owner.
+     */
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _transferOwnership(newOwner);
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Internal function without access restriction.
+     */
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
+
+// File: @openzeppelin/contracts/token/ERC20/IERC20.sol
+
+
+// OpenZeppelin Contracts (last updated v4.6.0) (token/ERC20/IERC20.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20 {
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `to`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `from` to `to` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+}
+
+// File: contracts/MarketTokenRegistry.sol
+
+
+pragma solidity ^0.8.4;
+
+
+
+error TokenNotExist(address token);
+error TokenExist(address token);
+
+contract MarketTokenRegistry is Ownable {
+    event TokenAdded(address token);
+    event TokenRemoved(address token);
+
+    mapping(address => bool) private _paymentTokens;
+
+    // LUST address on BSC testnet
+    // https://testnet.bscscan.com/address/0x9D8229cBf08B40B0Dd36bdD344d55495113f05f3
+    address internal constant LUST =
+        address(0x5FbDB2315678afecb367f032d93F642f64180aa3);
+
+    // LWAP address on BSC testnet
+    // https://testnet.bscscan.com/address/0x00460933FEA5cf36BeB3a0054ae5b4384E1C8b83
+    address internal constant LWAP =
+        address(0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512);
+
+    constructor() {
+        _paymentTokens[LUST] = true;
+        _paymentTokens[LWAP] = true;
+    }
+
+    function addPaymentToken(address token) external onlyOwner {
+        if (!_isTokenPayment(token)) {
+            _paymentTokens[token] = true;
+            emit TokenAdded(token);
+        } else {
+            revert TokenExist(token);
+        }
+    }
+
+    function removePaymentToken(address token) external onlyOwner {
+        if (_isTokenPayment(token)) {
+            _paymentTokens[token] = false;
+            emit TokenRemoved(token);
+        } else {
+            revert TokenNotExist(token);
+        }
+    }
+
+    function _isTokenPayment(address token) internal view returns (bool) {
+        return _paymentTokens[token];
+    }
+}
+
+// File: @openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol
+
+
+// OpenZeppelin Contracts v4.4.1 (token/ERC20/extensions/IERC20Metadata.sol)
+
+pragma solidity ^0.8.0;
+
+
+/**
+ * @dev Interface for the optional metadata functions from the ERC20 standard.
+ *
+ * _Available since v4.1._
+ */
+interface IERC20Metadata is IERC20 {
+    /**
+     * @dev Returns the name of the token.
+     */
+    function name() external view returns (string memory);
+
+    /**
+     * @dev Returns the symbol of the token.
+     */
+    function symbol() external view returns (string memory);
+
+    /**
+     * @dev Returns the decimals places of the token.
+     */
+    function decimals() external view returns (uint8);
+}
+
+// File: @openzeppelin/contracts/token/ERC20/ERC20.sol
+
+
+// OpenZeppelin Contracts (last updated v4.6.0) (token/ERC20/ERC20.sol)
+
+pragma solidity ^0.8.0;
+
+
+
+
+/**
+ * @dev Implementation of the {IERC20} interface.
+ *
+ * This implementation is agnostic to the way tokens are created. This means
+ * that a supply mechanism has to be added in a derived contract using {_mint}.
+ * For a generic mechanism see {ERC20PresetMinterPauser}.
+ *
+ * TIP: For a detailed writeup see our guide
+ * https://forum.zeppelin.solutions/t/how-to-implement-erc20-supply-mechanisms/226[How
+ * to implement supply mechanisms].
+ *
+ * We have followed general OpenZeppelin Contracts guidelines: functions revert
+ * instead returning `false` on failure. This behavior is nonetheless
+ * conventional and does not conflict with the expectations of ERC20
+ * applications.
+ *
+ * Additionally, an {Approval} event is emitted on calls to {transferFrom}.
+ * This allows applications to reconstruct the allowance for all accounts just
+ * by listening to said events. Other implementations of the EIP may not emit
+ * these events, as it isn't required by the specification.
+ *
+ * Finally, the non-standard {decreaseAllowance} and {increaseAllowance}
+ * functions have been added to mitigate the well-known issues around setting
+ * allowances. See {IERC20-approve}.
+ */
+contract ERC20 is Context, IERC20, IERC20Metadata {
+    mapping(address => uint256) private _balances;
+
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    uint256 private _totalSupply;
+
+    string private _name;
+    string private _symbol;
+
+    /**
+     * @dev Sets the values for {name} and {symbol}.
+     *
+     * The default value of {decimals} is 18. To select a different value for
+     * {decimals} you should overload it.
+     *
+     * All two of these values are immutable: they can only be set once during
+     * construction.
+     */
+    constructor(string memory name_, string memory symbol_) {
+        _name = name_;
+        _symbol = symbol_;
+    }
+
+    /**
+     * @dev Returns the name of the token.
+     */
+    function name() public view virtual override returns (string memory) {
+        return _name;
+    }
+
+    /**
+     * @dev Returns the symbol of the token, usually a shorter version of the
+     * name.
+     */
+    function symbol() public view virtual override returns (string memory) {
+        return _symbol;
+    }
+
+    /**
+     * @dev Returns the number of decimals used to get its user representation.
+     * For example, if `decimals` equals `2`, a balance of `505` tokens should
+     * be displayed to a user as `5.05` (`505 / 10 ** 2`).
+     *
+     * Tokens usually opt for a value of 18, imitating the relationship between
+     * Ether and Wei. This is the value {ERC20} uses, unless this function is
+     * overridden;
+     *
+     * NOTE: This information is only used for _display_ purposes: it in
+     * no way affects any of the arithmetic of the contract, including
+     * {IERC20-balanceOf} and {IERC20-transfer}.
+     */
+    function decimals() public view virtual override returns (uint8) {
+        return 18;
+    }
+
+    /**
+     * @dev See {IERC20-totalSupply}.
+     */
+    function totalSupply() public view virtual override returns (uint256) {
+        return _totalSupply;
+    }
+
+    /**
+     * @dev See {IERC20-balanceOf}.
+     */
+    function balanceOf(address account) public view virtual override returns (uint256) {
+        return _balances[account];
+    }
+
+    /**
+     * @dev See {IERC20-transfer}.
+     *
+     * Requirements:
+     *
+     * - `to` cannot be the zero address.
+     * - the caller must have a balance of at least `amount`.
+     */
+    function transfer(address to, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        _transfer(owner, to, amount);
+        return true;
+    }
+
+    /**
+     * @dev See {IERC20-allowance}.
+     */
+    function allowance(address owner, address spender) public view virtual override returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    /**
+     * @dev See {IERC20-approve}.
+     *
+     * NOTE: If `amount` is the maximum `uint256`, the allowance is not updated on
+     * `transferFrom`. This is semantically equivalent to an infinite approval.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     */
+    function approve(address spender, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, amount);
+        return true;
+    }
+
+    /**
+     * @dev See {IERC20-transferFrom}.
+     *
+     * Emits an {Approval} event indicating the updated allowance. This is not
+     * required by the EIP. See the note at the beginning of {ERC20}.
+     *
+     * NOTE: Does not update the allowance if the current allowance
+     * is the maximum `uint256`.
+     *
+     * Requirements:
+     *
+     * - `from` and `to` cannot be the zero address.
+     * - `from` must have a balance of at least `amount`.
+     * - the caller must have allowance for ``from``'s tokens of at least
+     * `amount`.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) public virtual override returns (bool) {
+        address spender = _msgSender();
+        _spendAllowance(from, spender, amount);
+        _transfer(from, to, amount);
+        return true;
+    }
+
+    /**
+     * @dev Atomically increases the allowance granted to `spender` by the caller.
+     *
+     * This is an alternative to {approve} that can be used as a mitigation for
+     * problems described in {IERC20-approve}.
+     *
+     * Emits an {Approval} event indicating the updated allowance.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     */
+    function increaseAllowance(address spender, uint256 addedValue) public virtual returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, allowance(owner, spender) + addedValue);
+        return true;
+    }
+
+    /**
+     * @dev Atomically decreases the allowance granted to `spender` by the caller.
+     *
+     * This is an alternative to {approve} that can be used as a mitigation for
+     * problems described in {IERC20-approve}.
+     *
+     * Emits an {Approval} event indicating the updated allowance.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     * - `spender` must have allowance for the caller of at least
+     * `subtractedValue`.
+     */
+    function decreaseAllowance(address spender, uint256 subtractedValue) public virtual returns (bool) {
+        address owner = _msgSender();
+        uint256 currentAllowance = allowance(owner, spender);
+        require(currentAllowance >= subtractedValue, "ERC20: decreased allowance below zero");
+        unchecked {
+            _approve(owner, spender, currentAllowance - subtractedValue);
+        }
+
+        return true;
+    }
+
+    /**
+     * @dev Moves `amount` of tokens from `sender` to `recipient`.
+     *
+     * This internal function is equivalent to {transfer}, and can be used to
+     * e.g. implement automatic token fees, slashing mechanisms, etc.
+     *
+     * Emits a {Transfer} event.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `from` must have a balance of at least `amount`.
+     */
+    function _transfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(to != address(0), "ERC20: transfer to the zero address");
+
+        _beforeTokenTransfer(from, to, amount);
+
+        uint256 fromBalance = _balances[from];
+        require(fromBalance >= amount, "ERC20: transfer amount exceeds balance");
+        unchecked {
+            _balances[from] = fromBalance - amount;
+        }
+        _balances[to] += amount;
+
+        emit Transfer(from, to, amount);
+
+        _afterTokenTransfer(from, to, amount);
+    }
+
+    /** @dev Creates `amount` tokens and assigns them to `account`, increasing
+     * the total supply.
+     *
+     * Emits a {Transfer} event with `from` set to the zero address.
+     *
+     * Requirements:
+     *
+     * - `account` cannot be the zero address.
+     */
+    function _mint(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: mint to the zero address");
+
+        _beforeTokenTransfer(address(0), account, amount);
+
+        _totalSupply += amount;
+        _balances[account] += amount;
+        emit Transfer(address(0), account, amount);
+
+        _afterTokenTransfer(address(0), account, amount);
+    }
+
+    /**
+     * @dev Destroys `amount` tokens from `account`, reducing the
+     * total supply.
+     *
+     * Emits a {Transfer} event with `to` set to the zero address.
+     *
+     * Requirements:
+     *
+     * - `account` cannot be the zero address.
+     * - `account` must have at least `amount` tokens.
+     */
+    function _burn(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: burn from the zero address");
+
+        _beforeTokenTransfer(account, address(0), amount);
+
+        uint256 accountBalance = _balances[account];
+        require(accountBalance >= amount, "ERC20: burn amount exceeds balance");
+        unchecked {
+            _balances[account] = accountBalance - amount;
+        }
+        _totalSupply -= amount;
+
+        emit Transfer(account, address(0), amount);
+
+        _afterTokenTransfer(account, address(0), amount);
+    }
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the `owner` s tokens.
+     *
+     * This internal function is equivalent to `approve`, and can be used to
+     * e.g. set automatic allowances for certain subsystems, etc.
+     *
+     * Emits an {Approval} event.
+     *
+     * Requirements:
+     *
+     * - `owner` cannot be the zero address.
+     * - `spender` cannot be the zero address.
+     */
+    function _approve(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        require(owner != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    /**
+     * @dev Updates `owner` s allowance for `spender` based on spent `amount`.
+     *
+     * Does not update the allowance amount in case of infinite allowance.
+     * Revert if not enough allowance is available.
+     *
+     * Might emit an {Approval} event.
+     */
+    function _spendAllowance(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        uint256 currentAllowance = allowance(owner, spender);
+        if (currentAllowance != type(uint256).max) {
+            require(currentAllowance >= amount, "ERC20: insufficient allowance");
+            unchecked {
+                _approve(owner, spender, currentAllowance - amount);
+            }
+        }
+    }
+
+    /**
+     * @dev Hook that is called before any transfer of tokens. This includes
+     * minting and burning.
+     *
+     * Calling conditions:
+     *
+     * - when `from` and `to` are both non-zero, `amount` of ``from``'s tokens
+     * will be transferred to `to`.
+     * - when `from` is zero, `amount` tokens will be minted for `to`.
+     * - when `to` is zero, `amount` of ``from``'s tokens will be burned.
+     * - `from` and `to` are never both zero.
+     *
+     * To learn more about hooks, head to xref:ROOT:extending-contracts.adoc#using-hooks[Using Hooks].
+     */
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+
+    /**
+     * @dev Hook that is called after any transfer of tokens. This includes
+     * minting and burning.
+     *
+     * Calling conditions:
+     *
+     * - when `from` and `to` are both non-zero, `amount` of ``from``'s tokens
+     * has been transferred to `to`.
+     * - when `from` is zero, `amount` tokens have been minted for `to`.
+     * - when `to` is zero, `amount` of ``from``'s tokens have been burned.
+     * - `from` and `to` are never both zero.
+     *
+     * To learn more about hooks, head to xref:ROOT:extending-contracts.adoc#using-hooks[Using Hooks].
+     */
+    function _afterTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+}
+
+// File: contracts/Market.sol
+
+
+pragma solidity ^0.8.4;
+
+
+
+
+
+
+contract Market is MarketTokenRegistry, ReentrancyGuard {
+    event UpdatePlatformFee(uint256 pFee);
+    event UpdatePlatformFeeRecipient(address pFeeRec);
+
+    address payable internal platformFeeRec;
+    address payable internal marketAddress;
+    uint256 internal platformFee = 3;
+    uint256 private maxRoyalty = 10;
+
+    bytes4 internal constant INTERFACE_ID_ERC721 = 0x80ac58cd;
+
+    mapping(address => mapping(uint256 => address)) internal minters;
+    mapping(address => mapping(uint256 => uint256)) internal royalties;
+
+    constructor() {
+        platformFeeRec = payable(_msgSender());
+        marketAddress = payable(address(this));
+    }
+
+    function _getNow() internal view returns (uint256) {
+        return block.timestamp;
+    }
+
+    function updatePlatformFee(uint256 _pFee) external onlyOwner {
+        platformFee = _pFee;
+        emit UpdatePlatformFee(_pFee);
+    }
+
+    function withdrawMarket(address _token) external onlyOwner {
+        if (_token == address(0)) {
+            (bool os, ) = payable(platformFeeRec).call{
+                value: address(this).balance
+            }("");
+            require(os);
+        } else {
+            require(
+                ERC20(_token).transferFrom(
+                    address(this),
+                    platformFeeRec,
+                    address(this).balance
+                )
+            );
+        }
+    }
+
+    function setMaxMintRoyalty(uint256 _royalty) external onlyOwner {
+        maxRoyalty = _royalty;
+    }
+
+    function _addNewMinter(
+        address _minter,
+        address _nft,
+        uint256 _tokenId
+    ) internal {
+        minters[_nft][_tokenId] = _minter;
+    }
+
+    function getTokenMinter(address _nft, uint256 _tokenId)
+        internal
+        view
+        returns (address)
+    {
+        return minters[_nft][_tokenId];
+    }
+
+    function _setTokenRoyalty(
+        address _nft,
+        uint256 _tokenId,
+        uint256 _royalty
+    ) internal {
+        require(_royalty <= maxRoyalty);
+        royalties[_nft][_tokenId] = _royalty;
+    }
+
+    function _getTokenRoyalty(address _nft, uint256 _tokenId)
+        internal
+        view
+        returns (uint256)
+    {
+        return royalties[_nft][_tokenId];
+    }
+}
+
+// File: contracts/LNFTMarketAuction.sol
+
+
+pragma solidity ^0.8.4;
+
+
+error ValueIsLowerThanAuctionFee();
+error PaymentTokenIsNotAccepted();
+error AuctionIsFinished();
+error AuctionIsExist();
+error EndTimeStampIsNotCorrect(uint256 _endTimestamp);
+error BidAmountIsLowerThanMinAmount();
+error ValueIsLowerThanBidAmount();
+
+contract LNFTMarketAuction is Market {
+    using SafeMath for uint256;
+
+    event PauseAuctionToggled(bool isPaused);
+
+    event AuctionCreated(
+        address indexed nftAddress,
+        uint256 indexed tokenId,
+        address paymentToken,
+        uint256 reservePrice,
+        uint256 startTimestamp,
+        uint256 endTimestamp
+    );
+
+    event UpdateAuctionStartTime(
+        address indexed nftAddress,
+        uint256 indexed tokenId,
+        uint256 startTime
+    );
+
+    event UpdateAuctionEndTime(
+        address indexed nftAddress,
+        uint256 indexed tokenId,
+        uint256 endTime
+    );
+
+    event UpdateAuctionReservePrice(
+        address indexed nftAddress,
+        uint256 indexed tokenId,
+        address paymentToken,
+        uint256 reservePrice
+    );
+
+    event UpdateMinBidIncrement(uint256 minBidIncrement);
+    event UpdateBidWithdrawalLockTime(uint256 bidWithdrawalLockTime);
+
+    event BidPlaced(
+        address indexed nftAddress,
+        uint256 indexed tokenId,
+        address indexed bidder,
+        uint256 bid
+    );
+
+    event BidWithdrawn(
+        address indexed nftAddress,
+        uint256 indexed tokenId,
+        address indexed bidder,
+        uint256 bid
+    );
+
+    event BidRefunded(
+        address indexed nftAddress,
+        uint256 indexed tokenId,
+        address indexed bidder,
+        uint256 bid
+    );
+
+    event AuctionResulted(
+        address oldOwner,
+        address indexed nftAddress,
+        uint256 indexed tokenId,
+        address indexed winner,
+        address payToken,
+        uint256 winningBid
+    );
+
+    event AuctionCancelled(
+        address indexed nftAddress,
+        uint256 indexed tokenId,
+        address indexed owner
+    );
+
+    struct Auction {
+        address payable owner;
+        address paymentToken;
+        uint256 reservePrice;
+        uint256 startTime;
+        uint256 endTime;
+        bool isFulfilled;
+    }
+
+    struct HighestBid {
+        address payable bidder;
+        uint256 bid;
+        uint256 lastBidTime;
+    }
+
+    mapping(address => mapping(uint256 => Auction)) public auctions;
+    mapping(address => mapping(uint256 => HighestBid)) public highestBids;
+
+    uint256 private expectedBidInc = 5;
+    uint256 private auctionDuration = 600;
+
+    constructor() Market() {}
+
+    function setBidInc(uint256 _expectedBid) external onlyOwner {
+        expectedBidInc = _expectedBid;
+        emit UpdateMinBidIncrement(_expectedBid);
+    }
+
+    receive() external payable {}
+
+    function createAuction(
+        address _nftAddress,
+        uint256 _tokenId,
+        address _paymentToken,
+        uint256 _reservePrice,
+        uint256 _startTimestamp,
+        uint256 _endTimestamp
+    ) external payable {
+        require(
+            IERC721(_nftAddress).ownerOf(_tokenId) == _msgSender(),
+            "ownerOf this tokenId is not the msgSender"
+        );
+
+        require(
+            IERC721(_nftAddress).isApprovedForAll(_msgSender(), marketAddress),
+            "msgSender must approve marketAddress"
+        );
+
+        if (_isTokenPayment(_paymentToken) || _paymentToken == address(0)) {
+            uint256 auctionFee;
+            if (_paymentToken == LUST || _paymentToken == LWAP) {
+                auctionFee = 0;
+            } else {
+                auctionFee = _reservePrice.mul(platformFee).div(100);
+                if (msg.value < auctionFee) {
+                    revert ValueIsLowerThanAuctionFee();
+                }
+
+                (bool success, ) = owner().call{value: msg.value}("");
+                require(success, "Transfer failed");
+            }
+        } else {
+            revert PaymentTokenIsNotAccepted();
+        }
+
+        if (auctions[_nftAddress][_tokenId].endTime > _getNow()) {
+            revert AuctionIsExist();
+        }
+
+        if (_startTimestamp < _getNow()) {
+            revert AuctionIsExist();
+        }
+
+        uint256 endTimeMax = 604800; // 1 week
+        if (_endTimestamp != 0) {
+            if (_endTimestamp <= _startTimestamp.add(auctionDuration)) {
+                revert EndTimeStampIsNotCorrect(_endTimestamp);
+            }
+
+            require(
+                _endTimestamp <= _getNow() + endTimeMax,
+                "now + endTime must equal or bigger than _endTimestamp"
+            );
+        } else {
+            _endTimestamp = _getNow() + endTimeMax;
+        }
+
+        auctions[_nftAddress][_tokenId] = Auction({
+            owner: payable(_msgSender()),
+            paymentToken: _paymentToken,
+            reservePrice: _reservePrice,
+            startTime: _startTimestamp,
+            endTime: _endTimestamp,
+            isFulfilled: false
+        });
+
+        emit AuctionCreated(
+            _nftAddress,
+            _tokenId,
+            _paymentToken,
+            _reservePrice,
+            _startTimestamp,
+            _endTimestamp
+        );
+    }
+
+    function placeBid(
+        address _nftAddress,
+        uint256 _tokenId,
+        uint256 _bidAmount
+    ) external payable nonReentrant {
+        Auction storage auction = auctions[_nftAddress][_tokenId];
+
+        require(
+            IERC721(_nftAddress).ownerOf(_tokenId) != _msgSender(),
+            "caller must not be the owner"
+        );
+        require(_getNow() >= auction.startTime, "Auction is not started");
+        require(_getNow() < auction.endTime, "Auction is ended");
+
+        HighestBid storage highestBid = highestBids[_nftAddress][_tokenId];
+        if (highestBid.bid != 0) {
+            uint256 neededBidAmount = highestBid.bid.mul(expectedBidInc).div(
+                100
+            );
+            uint256 minBidRequired = highestBid.bid.add(neededBidAmount);
+
+            if (_bidAmount < minBidRequired) {
+                revert BidAmountIsLowerThanMinAmount();
+            }
+        } else {
+            require(
+                _bidAmount >= auction.reservePrice,
+                "BidAmount is Lower than reservePrice"
+            );
+        }
+
+        if (auction.paymentToken == LUST || auction.paymentToken == LWAP) {
+            require(
+                _sendToken(
+                    auction.paymentToken,
+                    _msgSender(),
+                    address(this),
+                    _bidAmount
+                ),
+                "Token Transfer failed"
+            );
+        } else {
+            if (msg.value < _bidAmount) {
+                revert ValueIsLowerThanBidAmount();
+            }
+
+            (bool success, ) = payable(address(this)).call{value: msg.value}(
+                ""
+            );
+            require(success, "Transfer failed");
+        }
+
+        if (auction.paymentToken == LUST || auction.paymentToken == LWAP) {
+            require(
+                _sendToken(
+                    auction.paymentToken,
+                    address(this),
+                    highestBid.bidder,
+                    highestBid.bid
+                ),
+                "Token Transfer failed"
+            );
+        } else {
+            (bool successRefund, ) = highestBid.bidder.call{
+                value: highestBid.bid
+            }("");
+            require(successRefund, "Transfer failed");
+        }
+        emit BidRefunded(
+            _nftAddress,
+            _tokenId,
+            highestBid.bidder,
+            highestBid.bid
+        );
+
+        highestBid.bidder = payable(_msgSender());
+        highestBid.bid = _bidAmount;
+        highestBid.lastBidTime = _getNow();
+
+        emit BidPlaced(_nftAddress, _tokenId, _msgSender(), _bidAmount);
+    }
+
+    function withdrawBid(address _nftAddress, uint256 _tokenId)
+        external
+        payable
+        nonReentrant
+    {
+        Auction storage auction = auctions[_nftAddress][_tokenId];
+        HighestBid storage highestBid = highestBids[_nftAddress][_tokenId];
+
+        require(highestBid.bidder == _msgSender());
+
+        uint256 _endTime = auctions[_nftAddress][_tokenId].endTime;
+
+        require(_getNow() < _endTime);
+
+        uint256 previousBid = highestBid.bid;
+
+        if (auction.paymentToken == LUST || auction.paymentToken == LWAP) {
+            require(
+                _sendToken(
+                    auction.paymentToken,
+                    address(this),
+                    highestBid.bidder,
+                    highestBid.bid
+                ),
+                "Token Transfer failed"
+            );
+        } else {
+            (bool successRefund, ) = highestBid.bidder.call{
+                value: highestBid.bid
+            }("");
+            require(successRefund);
+        }
+        emit BidRefunded(
+            _nftAddress,
+            _tokenId,
+            highestBid.bidder,
+            highestBid.bid
+        );
+        delete highestBids[_nftAddress][_tokenId];
+
+        emit BidWithdrawn(_nftAddress, _tokenId, _msgSender(), previousBid);
+    }
+
+    function resultAuction(address _nftAddress, uint256 _tokenId)
+        external
+        nonReentrant
+    {
+        Auction storage auction = auctions[_nftAddress][_tokenId];
+
+        require(
+            (IERC721(_nftAddress).ownerOf(_tokenId) == _msgSender() &&
+                _msgSender() == auction.owner),
+            "msgSender must be ownerOf this TokenId and auction"
+        );
+
+        require(
+            auction.endTime > 0 && !auction.isFulfilled,
+            "endTime is 0 or auction isFulfilled"
+        );
+
+        HighestBid storage highestBid = highestBids[_nftAddress][_tokenId];
+        address payable winner = highestBid.bidder;
+        uint256 winningBid = highestBid.bid;
+
+        require(winner != address(0), "winner is zero address ");
+        require(
+            winningBid >= auction.reservePrice,
+            "winningBid must be greater than reservePrice"
+        );
+
+        require(
+            IERC721(_nftAddress).isApprovedForAll(_msgSender(), marketAddress),
+            "msgSender must approve the marketAddress"
+        );
+
+        auction.isFulfilled = true;
+
+        delete highestBids[_nftAddress][_tokenId];
+
+        uint256 payAmount;
+
+        if (winningBid > auction.reservePrice) {
+            uint256 amountAboveReservePrice = winningBid.sub(
+                auction.reservePrice
+            );
+
+            uint256 platformFeeAboveReserve = amountAboveReservePrice
+                .mul(platformFee)
+                .div(100);
+
+            if (auction.paymentToken != LUST && auction.paymentToken != LWAP) {
+                (bool platformTransferSuccess, ) = payable(address(this)).call{
+                    value: platformFeeAboveReserve
+                }("");
+                require(platformTransferSuccess, "platformTransfer failed");
+            }
+
+            payAmount = winningBid.sub(platformFeeAboveReserve);
+        } else {
+            payAmount = winningBid;
+        }
+
+        address payable minter = payable(getTokenMinter(_nftAddress, _tokenId));
+        uint256 royal = _getTokenRoyalty(_nftAddress, _tokenId);
+
+        if (minter != address(0) && royal != 0) {
+            uint256 royaltyFee = payAmount.mul(royal).div(100);
+
+            if (auction.paymentToken == LUST || auction.paymentToken == LWAP) {
+                require(
+                    ERC20(auction.paymentToken).transfer(minter, royaltyFee)
+                );
+            } else {
+                (bool royaltyTransferSuccess, ) = payable(minter).call{
+                    value: royaltyFee
+                }("");
+                require(royaltyTransferSuccess, "royaltyTransfer failed");
+            }
+            payAmount = payAmount.sub(royaltyFee);
+        }
+        if (payAmount > 0) {
+            if (auction.paymentToken == LUST || auction.paymentToken == LWAP) {
+                require(
+                    ERC20(auction.paymentToken).transfer(
+                        auction.owner,
+                        payAmount
+                    )
+                );
+            } else {
+                (bool ownerTransferSuccess, ) = auction.owner.call{
+                    value: payAmount
+                }("");
+                require(ownerTransferSuccess, "ownerTransfer failed");
+            }
+        }
+
+        IERC721(_nftAddress).safeTransferFrom(
+            IERC721(_nftAddress).ownerOf(_tokenId),
+            winner,
+            _tokenId
+        );
+
+        emit AuctionResulted(
+            _msgSender(),
+            _nftAddress,
+            _tokenId,
+            winner,
+            auction.paymentToken,
+            winningBid
+        );
+
+        delete auctions[_nftAddress][_tokenId];
+    }
+
+    function cancelAuction(address _nftAddress, uint256 _tokenId)
+        external
+        nonReentrant
+    {
+        Auction storage auction = auctions[_nftAddress][_tokenId];
+
+        require(
+            (IERC721(_nftAddress).ownerOf(_tokenId) == _msgSender() &&
+                _msgSender() == auction.owner),
+            "msgSender must be ownerOf this TokenId and auction"
+        );
+
+        require(
+            auction.endTime > 0 && !auction.isFulfilled,
+            "endTime is 0 or auction isFulfilled"
+        );
+
+        HighestBid storage highestBid = highestBids[_nftAddress][_tokenId];
+        if (highestBid.bidder != address(0)) {
+            if (auction.paymentToken == LUST || auction.paymentToken == LWAP) {
+                require(
+                    _sendToken(
+                        auction.paymentToken,
+                        address(this),
+                        highestBid.bidder,
+                        highestBid.bid
+                    ),
+                    "Token Transfer failed"
+                );
+            } else {
+                (bool successRefund, ) = highestBid.bidder.call{
+                    value: highestBid.bid
+                }("");
+                require(successRefund);
+            }
+            emit BidRefunded(
+                _nftAddress,
+                _tokenId,
+                highestBid.bidder,
+                highestBid.bid
+            );
+
+            delete highestBids[_nftAddress][_tokenId];
+        }
+
+        delete auctions[_nftAddress][_tokenId];
+
+        emit AuctionCancelled(_nftAddress, _tokenId, _msgSender());
+    }
+
+    function _sendToken(
+        address _token,
+        address _from,
+        address _to,
+        uint256 _amount
+    ) private returns (bool) {
+        bool isSent = ERC20(_token).transferFrom(_from, _to, _amount);
+        return isSent;
+    }
+}
