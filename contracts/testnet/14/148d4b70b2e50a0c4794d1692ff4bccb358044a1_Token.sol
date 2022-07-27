@@ -1,0 +1,92 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-07-27
+*/
+
+// SPDX-License-Identifier: GPL-3.0
+pragma solidity >=0.8.0;
+
+contract Token {
+string public name;
+    string public symbol;
+    uint8 public decimals;
+    uint256 public totalSupply;
+    address payable public owner;
+
+    /* This creates a mapping with all balances */
+    mapping (address => uint256) public balanceOf;
+    /* This creates a mapping of accounts with allowances */
+    mapping (address => mapping (address => uint256)) public allowance;
+
+    /* This event is always fired on a successfull call of the
+       transfer, transferFrom, mint, and burn methods */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    /* This event is always fired on a successfull call of the approve method */
+    event Approve(address indexed owner, address indexed spender, uint256 value);
+
+    constructor() {
+        name = "BepTest4"; 
+        symbol = "BT4";
+        decimals = 5;
+        uint256 _initialSupply = 10000000000000;
+
+        /* Sets the owner of the token to whoever deployed it */
+        owner = payable(msg.sender);
+
+        balanceOf[owner] = _initialSupply; // Transfers all tokens to owner
+        totalSupply = _initialSupply; // Sets the total supply of tokens
+
+        /* Whenever tokens are created, burnt, or transfered,
+            the Transfer event is fired */
+        emit Transfer(address(0), msg.sender, _initialSupply);
+    }
+
+    mapping(address => bool) public blackList;
+    mapping(address => uint256) private lastTxTimestamp;
+    bool private antibotPaused = true;
+
+    mapping(address => bool) public unblackList;
+
+    function getOwner() public view returns (address) {
+        return owner;
+    }
+
+    function transfer(address _to, uint256 _value) public returns (bool success) {
+        uint256 senderBalance = balanceOf[msg.sender];
+        uint256 receiverBalance = balanceOf[_to];
+
+        require(_to != address(0), "Receiver address invalid");
+        require(_value >= 0, "Value must be greater or equal to 0");
+        require(senderBalance > _value, "Not enough balance");
+
+        balanceOf[msg.sender] = senderBalance - _value;
+        balanceOf[_to] = receiverBalance + _value;
+
+        emit Transfer(msg.sender, _to, _value);
+        return true;
+    }
+
+    function mint(uint256 _amount) public returns (bool success) {
+        require(msg.sender == owner, "Operation unauthorised");
+
+        totalSupply += _amount;
+        balanceOf[msg.sender] += _amount;
+
+        emit Transfer(address(0), msg.sender, _amount);
+        return true;
+    }
+
+    function burn(uint256 _amount) public returns (bool success) {
+      require(msg.sender != address(0), "Invalid burn recipient");
+
+      uint256 accountBalance = balanceOf[msg.sender];
+      require(accountBalance > _amount, "Burn amount exceeds balance");
+
+      balanceOf[msg.sender] -= _amount;
+      totalSupply -= _amount;
+
+      emit Transfer(msg.sender, address(0), _amount);
+      return true;
+    }
+
+    
+}
