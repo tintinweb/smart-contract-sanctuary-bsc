@@ -1,0 +1,238 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-07-30
+*/
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.10;
+interface BEP20 {
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address recipient, uint256 amount) external returns (bool);
+    function allowance(address owner, address spender) external view returns (uint256);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
+    function decimals() external view returns (uint8);
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        uint256 c = a + b;
+        require(c >= a, "SafeMath: addition overflow");
+        return c;
+    }
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return sub(a, b, "SafeMath: subtraction overflow");
+    }
+    function sub(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b <= a, errorMessage);
+        uint256 c = a - b;
+        return c;
+    }
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        if (a == 0) {
+            return 0;
+        }
+        uint256 c = a * b;
+        require(c / a == b, "SafeMath: multiplication overflow");
+        return c;
+    }
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return div(a, b, "SafeMath: division by zero");
+    }
+    function div(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b > 0, errorMessage);
+        uint256 c = a / b;
+        return c;
+    }
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return mod(a, b, "SafeMath: modulo by zero");
+    }
+    function mod(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b != 0, errorMessage);
+        return a % b;
+    }
+}
+contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+    function _msgData() internal view virtual returns (bytes calldata) {
+        this;
+        return msg.data;
+    }
+} 
+contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    constructor() {
+        _transferOwnership(_msgSender());
+    }
+
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    modifier onlyOwner() {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _transferOwnership(newOwner);
+    }
+
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
+
+contract oxybuysell is Ownable {
+    using SafeMath for uint256;
+    BEP20 public token;
+    BEP20 public busdToken;
+    address admin;
+    uint256 public pause = 1;
+    uint256 public tokenBuyprice = 17600000000000000;
+    uint256 public min = 5000000000000000000 ;
+    uint256 public max = 500000000000000000000;
+    uint256 public tokenSellprice = 5;
+    uint256 public totalbuytoken;
+    uint256 public totalselltoken;
+    uint256 public totalreceivebusd;
+    uint256 public totalsendbusd;
+    struct Userstate {
+        address _address;
+        uint256 _totalbuytoken;
+        uint256 _totalselltoken;
+        uint256 _totalsendbusd;
+        uint256 _totalreceivebusd;
+        uint256 _totaltransaction;
+    }
+
+    struct Transaction {
+        address _address;
+        uint256 _value;
+        uint256 _amount;
+        uint _timestamp;
+        string _stat;
+        uint256 _rate;
+    }
+    Transaction[] public transaction;
+    mapping(address => Userstate) public userstate;
+    constructor(BEP20 _token, BEP20 _btoken) {
+        require(_token != BEP20(address(0)));
+        require(_btoken != BEP20(address(0)));
+        token = _token;
+        busdToken = _btoken;
+    }
+    receive () external payable {}
+    function buyoxy(address _receiver,uint256 _amount) public payable {
+        uint256 decimal = 1000000000000000000;
+        require(_amount >= min && _amount <= max,"Error1");
+        require(_amount > 0, "Error2");
+        require(pause == 1, "Error3");
+        uint256 totalbtoken = ((_amount * decimal) / tokenBuyprice);
+        require(token.balanceOf(address(this)) >= totalbtoken,"Token not available.");
+        _processPurchase(_receiver, totalbtoken, _amount);
+        transaction.push(
+            Transaction({
+                _address : _receiver,
+                _value : totalbtoken,
+                _amount : _amount,
+                _timestamp : block.timestamp,
+                _stat : "Buy",
+                _rate : tokenBuyprice
+            })
+        );
+        userstate[_receiver]._address = _receiver;
+        userstate[_receiver]._totaltransaction = userstate[_receiver]._totaltransaction.add(1);
+        userstate[_receiver]._totalbuytoken = userstate[_receiver]._totalbuytoken.add(totalbtoken);
+        userstate[_receiver]._totalsendbusd = userstate[_receiver]._totalsendbusd.add(_amount);
+        totalbuytoken = totalbuytoken.add(totalbtoken);
+        totalreceivebusd = totalreceivebusd.add(_amount);
+    }
+
+    function selloxy(address _receiver, uint256 _amount) public payable{
+        require(msg.sender == _receiver);
+        // bool status = _preValidatePurchase(_receiver, _value);
+        require(_amount >= min && _amount <= max);
+        require(_amount > 0);
+        require(pause == 1);
+        (uint256 totaltoken, uint256 tokenrate) = _calTotalbusd(_amount);
+        require(busdToken.balanceOf(address(this)) >= totaltoken,"BUSD not available.");
+        _processSell(_receiver, totaltoken, _amount);
+        transaction.push(
+            Transaction({
+                _address : _receiver,
+                _value : totaltoken,
+                _amount : _amount,
+                _timestamp : block.timestamp,
+                _stat : "Sell",
+                _rate : tokenrate
+            })
+        );
+        userstate[_receiver]._address = _receiver;
+        userstate[_receiver]._totaltransaction = userstate[_receiver]._totaltransaction.add(1);
+        userstate[_receiver]._totalselltoken = userstate[_receiver]._totalselltoken.add(totaltoken);
+        userstate[_receiver]._totalreceivebusd = userstate[_receiver]._totalreceivebusd.add(_amount);
+        totalselltoken = totalselltoken.add(totaltoken);
+        totalsendbusd = totalsendbusd.add(_amount);
+    }
+
+    function _calTotalbusd(uint256 _amount) public view returns(uint256, uint256)
+    {
+        uint256 decimal = 1000000000000000000;
+        uint256 countrate = (tokenBuyprice.sub(tokenBuyprice.mul(tokenSellprice).div(100)));
+        uint256 totaltoken = ((_amount * decimal) / countrate);
+        return (totaltoken, countrate);
+    }
+
+    function gettotaltransaction(address _receiver) public view returns(uint256)
+    {
+        return userstate[_receiver]._totaltransaction;
+    }
+
+    function _processPurchase(address _beneficiary, uint256 _tokenAmount, uint256 _amount) internal {
+        require(_beneficiary == msg.sender);
+        busdToken.transferFrom(_beneficiary , address(this), _amount);
+        token.transfer(_beneficiary, _tokenAmount);
+    }
+
+    function _processSell(address _beneficiary, uint256 _tokenAmount, uint256 _amount) internal {
+        require(_beneficiary == msg.sender);
+        token.transferFrom(_beneficiary, address(this), _tokenAmount);
+        busdToken.transfer(_beneficiary , _amount);
+    }
+
+    function recoverBEP20(address tokenAddress, uint256 tokenAmount) public virtual onlyOwner {
+        BEP20(tokenAddress).transfer(owner(), tokenAmount);
+    }
+
+    function updatePrice(uint256 _buyrate) public onlyOwner returns(bool) {
+        tokenBuyprice = _buyrate;
+        return true;
+    }
+    
+    function pausebuysell(uint256 _status) public payable onlyOwner()
+    {   
+        pause = _status;
+    }
+    
+    function updateOther(uint256 _min, uint256 _max, uint256 _priceratio) public payable onlyOwner
+    {
+        min = _min; // add with 18 decimal
+        max = _max; // add with 18 decimal
+        tokenSellprice = _priceratio; // add without decimal
+    }
+    
+    function checkBalance(address _address) public view returns(uint256){
+        return BEP20(_address).balanceOf(address(this));
+    }
+}
