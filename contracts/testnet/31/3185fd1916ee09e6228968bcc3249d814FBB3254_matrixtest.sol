@@ -1,0 +1,254 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-08-11
+*/
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.7;
+
+abstract contract Ownable {
+    address internal owner;
+    constructor(address _owner) { owner = _owner; }
+    modifier onlyOwner() { require(isOwner(msg.sender), "!OWNER"); _; }
+
+    function isOwner(address account) public view returns (bool) {
+        return account == owner;
+    }
+
+    function transferOwnership(address payable adr) public onlyOwner {
+        owner = adr;
+        emit OwnershipTransferred(adr);
+    }
+
+    event OwnershipTransferred(address owner);
+}
+
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        uint256 c = a + b;
+        require(c >= a, "SafeMath: addition overflow");
+        return c;
+    }
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return sub(a, b, "SafeMath: subtraction overflow");
+    }
+    function sub(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b <= a, errorMessage);
+        uint256 c = a - b;
+        return c;
+    }
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        if (a == 0) {
+            return 0;
+        }
+
+        uint256 c = a * b;
+        require(c / a == b, "SafeMath: multiplication overflow");
+        return c;
+    }
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return div(a, b, "SafeMath: division by zero");
+    }
+    function div(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b > 0, errorMessage);
+        uint256 c = a / b;
+        return c;
+    }
+}
+
+contract matrixtest is Ownable {
+  using SafeMath for uint256;
+
+  struct User {
+    bool registered;
+    address referral;
+    mapping(uint256 => bool) activeLevels;
+  }
+
+  struct Matrix {
+    address currentreferral;
+    address[] reffereeLv1;
+    address[] reffereeLv2;
+    address closepart;
+    uint256 partnercount;
+    uint256 reinvest;
+  }
+
+  mapping(address => User) private users;
+  mapping(address => mapping(uint256 => Matrix)) private matrix;
+  
+  uint256 private registered;
+  bool private ispause;
+  bool private reentrantcy;
+
+  mapping(address => uint256) private getidfromaddress;
+  mapping(uint256 => address) private getaddressfromid;
+
+  mapping(uint256 => uint256) private refdividend;
+  mapping(uint256 => uint256) private levelprice;
+
+  modifier noReentrant() {
+    require(!reentrantcy);
+    reentrantcy = true;
+    _;
+    reentrantcy = false;
+  }
+
+  constructor() Ownable(msg.sender) {
+    
+    registeration(address(this),address(0),0);
+
+    refdividend[0] = 400;
+    refdividend[1] = 110;
+    refdividend[2] = 115;
+    refdividend[3] = 125;
+    refdividend[4] = 250;
+
+    levelprice[0] = 100;
+    uint256 i = 0;
+    while (i < 15) {
+      i++;
+      levelprice[i] = levelprice[i-1].mul(2);
+    }
+
+  }
+
+  function isRegistered(address account) external view returns (bool) { return users[account].registered; }
+  function isActiveLevels(address account,uint256 level) external view returns (bool) { return users[account].activeLevels[level]; }
+  function refertoaddress(address account) external view returns (address) { return users[account].referral; }
+  function isPause() external view returns (bool) { return ispause; }
+  function getRefDividend(uint256 level) external view returns (uint256) { return refdividend[level]; }
+  function getLevelPrice(uint256 level) external view returns (uint256) { return levelprice[level]; }
+  function id2address(uint256 id) external view returns (address) { return getaddressfromid[id]; }
+  function address2id(address account) external view returns (uint256) { return getidfromaddress[account]; }
+
+  function switchSystem() external onlyOwner() returns (bool) {
+    ispause = !ispause;
+    return true;
+  }
+
+  function getMatrix(address account,uint256 level) external view returns
+    (
+    address,
+    address[] memory,
+    address[] memory,
+    address,
+    uint256,
+    uint256
+    ) {
+    return (
+      matrix[account][level].currentreferral,
+      matrix[account][level].reffereeLv1,
+      matrix[account][level].reffereeLv2,
+      matrix[account][level].closepart,
+      matrix[account][level].partnercount,
+      matrix[account][level].reinvest
+    );
+  }
+
+  function registerationExt(address account,address ref) external payable noReentrant() returns (bool) {
+    require(!ispause,"registeration fail : contract was temporary pause");
+    require(!users[account].registered,"registeration fail : already registered");
+    require(users[ref].registered,"registeration fail : not found reference in matrix");
+    require(msg.value>=levelprice[1],"registeration fail : ext not enought fund");
+    registeration(account,ref,msg.value);
+    return true;
+  }
+
+  function registerationForce(address account,address ref) external onlyOwner() returns (bool) {
+    require(!users[account].registered,"registeration fail : already registered");
+    require(users[ref].registered,"registeration fail : not found reference in matrix");
+    registeration(account,ref,0);
+    return true;
+  }
+
+  function registeration(address register,address ref,uint256 amount) internal {
+    require(amount<99999);
+    registered = registered.add(1);
+    getidfromaddress[register] = registered;
+    getaddressfromid[registered] = register;
+    users[register].registered = true;
+    users[register].referral = ref;
+    users[register].activeLevels[1] = true;
+    updateMatrixFirst(register,ref,1);
+  }
+
+  function updateMatrixFirst(address register,address ref,uint256 level) internal {
+    if(matrix[ref][level].reffereeLv1.length<2){
+      matrix[ref][level].reffereeLv1.push(register);
+      matrix[register][level].currentreferral = ref;
+    }else{
+      address branch_left = matrix[ref][level].reffereeLv1[0];
+      address branch_right = matrix[ref][level].reffereeLv1[1];
+      if(matrix[branch_left][level].reffereeLv1.length<2){
+        matrix[branch_left][level].reffereeLv1.push(register);
+        matrix[ref][level].reffereeLv2.push(register);
+        matrix[register][level].currentreferral = branch_left;
+      }else if(matrix[branch_right][level].reffereeLv1.length<2){
+        matrix[branch_right][level].reffereeLv1.push(register);
+        matrix[ref][level].reffereeLv2.push(register);
+        matrix[register][level].currentreferral = branch_right;
+        if(matrix[branch_right][level].reffereeLv1.length==2){
+        matrix[ref][level].closepart = register;
+        }
+      }else{
+        address branch_st = matrix[ref][level].reffereeLv2[0];
+        address branch_nd = matrix[ref][level].reffereeLv2[1];
+        address branch_rd = matrix[ref][level].reffereeLv2[2];
+        address branch_th = matrix[ref][level].reffereeLv2[3];
+        if(matrix[branch_st][level].reffereeLv2.length < 4){
+          updateMatrixSecond(register,branch_st,level);
+        }else if(matrix[branch_nd][level].reffereeLv2.length < 4){
+          updateMatrixSecond(register,branch_nd,level);
+        }else if(matrix[branch_rd][level].reffereeLv2.length < 4){
+          updateMatrixSecond(register,branch_rd,level);
+        }else if(matrix[branch_th][level].reffereeLv2.length < 3){
+          updateMatrixSecond(register,branch_th,level);
+        }else if(matrix[branch_th][level].closepart==address(0)){
+          updateMatrixSecond(register,branch_th,level);
+          matrix[ref][level].reffereeLv1 = new address[](0);
+          matrix[ref][level].reffereeLv2 = new address[](0);
+          matrix[ref][level].closepart = address(0);
+          matrix[ref][level].reinvest;
+        }
+      }
+    }
+  }
+
+  function updateMatrixSecond(address register,address ref,uint256 level) internal {
+    if(matrix[ref][level].reffereeLv1.length<2){
+      matrix[ref][level].reffereeLv1.push(register);
+      matrix[register][level].currentreferral = ref;
+    }else{
+      address branch_left = matrix[ref][level].reffereeLv1[0];
+      address branch_right = matrix[ref][level].reffereeLv1[1];
+      if(matrix[branch_left][level].reffereeLv1.length<2){
+        matrix[branch_left][level].reffereeLv1.push(register);
+        matrix[ref][level].reffereeLv2.push(register);
+        matrix[register][level].currentreferral = branch_left;
+      }else if(matrix[branch_right][level].reffereeLv1.length<2){
+        matrix[branch_right][level].reffereeLv1.push(register);
+        matrix[ref][level].reffereeLv2.push(register);
+        matrix[register][level].currentreferral = branch_right;
+        if(matrix[branch_right][level].reffereeLv1.length==2){
+        matrix[ref][level].closepart = register;
+        }
+      }
+    }
+  }
+
+  function safeRecaiver(address account) internal view returns (address) {
+    if(account==address(0)){
+      return owner;
+    }else{
+      return account;
+    }
+  }
+
+  function safeTransfer(address recipient,uint256 amount) internal returns (bool) {
+    (bool success, ) = recipient.call{ value : amount }("");
+    require(success,"safe transfer fail!");
+    return true;
+  }
+
+}
