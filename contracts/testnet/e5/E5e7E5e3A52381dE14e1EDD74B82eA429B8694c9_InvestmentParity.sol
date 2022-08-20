@@ -1,0 +1,5119 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
+import "../main/libraries/SafeBEP20.sol";
+import "../utils/Pausable.sol";
+import "../main/libraries/Math.sol";
+import "../main/Investment.sol";
+import "../main/Admin.sol";
+import "./TokenParity.sol";
+import "./AdminParity.sol";
+
+
+/** 
+* @author Formation.Fi.
+* @notice Implementation of the contract InvestmentParity.
+*/
+
+contract InvestmentParity is   IERC721Receiver, Pausable {
+    using SafeBEP20  for IBEP20 ;
+    using Math for uint256;
+
+    struct Amount {
+        uint256 alpha;
+        uint256 beta;
+        uint256 gamma;
+    }
+
+uint256 public constant COEFF_SCALE_DECIMALS = 1e4;
+uint256 public constant APPROVED_AMOUNT = 1e50;
+uint256 public tolerance = 1e3; 
+uint256 public amountScaleDecimals = 1; 
+uint256 public tokenId;
+Amount public totalAmountToken;
+Amount public totalAmountStable;
+Amount public totalValidatedDeposit;
+Amount public totalValidatedWithdrawal;
+Amount public amountDepositTotalOld;
+Amount public amountWithdrawTotalOld;
+
+Investment public alpha; 
+Investment public  beta;
+Investment public gamma;
+Admin public adminAlpha;
+Admin public adminBeta;
+Admin public adminGamma;
+IBEP20 public tokenAlpha;
+IBEP20  public tokenBeta;    
+IBEP20  public tokenGamma; 
+IBEP20  public  stableToken;  
+AdminParity public admin; 
+TokenParity public  token;
+ 
+
+event DepositRequest(address indexed _user, uint256 _amount, uint256 _choice, 
+    uint256 _weightAlpha, uint256 _weightBeta, uint256 _weightGamma);
+event UpdateRisk(address indexed _user, uint256 _choice, uint256 _weightAlpha, 
+    uint256 _weightBeta, uint256 _weightGamma);
+event WithdrawRequest(address indexed _user, uint256 _taux);
+
+constructor( address _admin, address _alpha, address _beta, address _gamma, 
+        address _adminAlpha,address _adminBeta,address _adminGamma,
+        address _token, address  _stableToken ) {
+
+    require(
+            _alpha != address(0),
+            "Formation.Fi: zero address"
+        );
+    require(
+            _beta != address(0),
+            "Formation.Fi: zero address"
+        );
+    require(
+            _gamma != address(0),
+            "Formation.Fi: zero address"
+
+        );
+
+    require(
+            _adminAlpha != address(0),
+            "Formation.Fi:  zero address"
+        );
+
+    require(
+            _adminBeta != address(0),
+            "Formation.Fi: zero address"
+        );
+
+    require(
+            _adminGamma != address(0),
+            "Formation.Fi: zero address"
+
+        );
+
+    require(
+            _token != address(0),
+            "Formation.Fi: zero address"
+
+        );
+
+    require(
+            _stableToken != address(0),
+            "Formation.Fi: zero address"
+        );
+        admin = AdminParity(_admin);
+        alpha = Investment(_alpha);
+        beta = Investment(_beta);
+        gamma = Investment(_gamma);
+        adminAlpha =Admin(_adminAlpha);
+        adminBeta =Admin(_adminBeta);
+        adminGamma =Admin(_adminGamma);
+        tokenAlpha = alpha.token();
+        tokenBeta = beta.token();
+        tokenGamma = gamma.token();
+        token = TokenParity(_token);
+        stableToken= IBEP20(_stableToken);
+        uint8 _stableTokenDecimals = stableToken.decimals();
+        if (_stableTokenDecimals == 6) {
+           amountScaleDecimals = 1e12;
+        }
+}
+
+modifier onlyManager() {
+        address _manager = admin.manager();
+        require(msg.sender == _manager, "Formation.Fi: no manager");
+        _;
+    }
+
+function depositRequest(address _user, uint256 _amount, uint256 _risk,
+                       uint256 _weightAlpha, uint256 _weightBeta, uint256 _weightGamma) 
+        external whenNotPaused{
+        require((_weightAlpha + _weightBeta + _weightGamma) == COEFF_SCALE_DECIMALS , 
+            "Formation.Fi: sum weights");
+        require(_amount >=  admin.minAmount(), 
+            "Formation.Fi: min amount");
+        require( _risk <= 2, "Formation.Fi: max choice");
+        if (token.balanceOf(_user)==0){
+            tokenId = tokenId +1;
+            token.mint( _user, tokenId, _amount,  _risk, _weightAlpha,
+             _weightBeta , _weightGamma);
+
+        }
+        else {
+            token.updateDepositData( _user, _amount, _risk, _weightAlpha, 
+            _weightBeta , _weightGamma);
+        }
+        stableToken.safeTransferFrom(msg.sender, address(this), _amount/amountScaleDecimals);
+        emit DepositRequest( _user, _amount, _risk, _weightAlpha,  _weightBeta,  _weightGamma);
+        
+}
+
+function withdrawRequest(uint256 _rate) external whenNotPaused {
+        require ((_rate > 0) && ( _rate <=COEFF_SCALE_DECIMALS), 
+            "Formation Fi: not in range");
+        require (token.balanceOf(msg.sender)>0 , 
+        "Formation Fi: no token");
+        token.updateWithdrawtData(msg.sender, _rate);
+        emit WithdrawRequest(msg.sender,  _rate);
+
+    }    
+
+        
+function updateRisk(uint256 _risk, uint256 _weightAlpha, uint256 _weightBeta, 
+        uint256 _weightGamma) external whenNotPaused {
+        require((_weightAlpha + _weightBeta + _weightGamma)== COEFF_SCALE_DECIMALS , 
+        "Formation.Fi: sum weights");
+        require( _risk <=2, "Formation.Fi: max choice");
+        uint256[] memory _price = new uint256[](3);
+        _price[0] = adminAlpha.tokenPrice();
+        _price[1] = adminBeta.tokenPrice();
+        _price[2] = adminGamma.tokenPrice();
+        token.updateRisk(msg.sender, _weightAlpha , _weightBeta , _weightGamma, 
+             _risk, _price);
+        emit UpdateRisk(msg.sender,  _risk,  _weightAlpha,  _weightBeta, _weightGamma);
+
+    }
+
+    function CloseParityPosition(uint256 _tokenId) external {
+        address _owner = token.ownerOf(_tokenId); 
+        require( msg.sender == _owner &&  msg.sender == admin.manager(), 
+        "Formation.Fi: no owner" );
+        token.burn(_owner, _tokenId);
+    }
+
+
+function calculateNetAmountEventAlpha() external onlyManager {
+        uint256  _parityFees;
+        _parityFees = admin.calculateNetDepositAmountAlpha();
+        updateDataFromParity(0);
+        (amountDepositTotalOld.alpha, , ) = admin.amountDepositTotalOld();
+        (amountWithdrawTotalOld.alpha, , ) = admin.amountWithdrawTotalOld();
+        if (_parityFees > 0){
+            stableToken.safeTransfer(adminAlpha.treasury(), _parityFees/amountScaleDecimals);
+        }
+
+}
+
+function calculateNetAmountEventBeta() external onlyManager {
+        uint256  _parityFees;
+        _parityFees = admin.calculateNetDepositAmountBeta();
+        updateDataFromParity(1); 
+        ( ,amountDepositTotalOld.beta,  ) = admin.amountDepositTotalOld();
+        ( ,amountWithdrawTotalOld.beta, ) = admin.amountWithdrawTotalOld();
+        if (_parityFees >0){
+            stableToken.safeTransfer(adminBeta.treasury(), _parityFees/amountScaleDecimals);
+        }
+
+}
+
+function calculateNetAmountEventGamma() external onlyManager {
+        uint256  _parityFees;
+        _parityFees = admin.calculateNetDepositAmountGamma();
+        updateDataFromParity(2); 
+        ( , ,amountDepositTotalOld.gamma) = admin.amountDepositTotalOld();
+        ( , ,amountWithdrawTotalOld.gamma) = admin.amountWithdrawTotalOld();
+        if (_parityFees >0){
+            stableToken.safeTransfer(adminGamma.treasury(), _parityFees/amountScaleDecimals);
+        }
+
+}
+
+function InvestInAlpha() external onlyManager {
+        (uint256 _netDepositInd, , )= admin.netDepositInd();
+         (uint256 _netAmountEvent, , ) = admin.netAmountEvent();
+        if (_netAmountEvent > 0){
+            if (_netDepositInd == 1){
+                if ( stableToken.allowance(address(this), address(alpha))<
+                _netAmountEvent){
+                    stableToken.approve(address(alpha), APPROVED_AMOUNT);
+                }
+                alpha.depositRequest(address(this), _netAmountEvent);
+
+            } 
+            else {
+                if ( tokenAlpha.allowance(address(this),address(alpha))<_netAmountEvent){
+                    tokenAlpha.approve(address(alpha), APPROVED_AMOUNT);
+                }
+                alpha.withdrawRequest(_netAmountEvent);
+            } 
+        }
+}
+
+function InvestInBeta() external onlyManager {
+        ( ,uint256 _netDepositInd, )= admin.netDepositInd();
+        ( ,uint256 _netAmountEvent, ) = admin.netAmountEvent();
+        if (_netAmountEvent > 0){
+            if (_netDepositInd == 1){
+                if ( stableToken.allowance(address(this), address(beta))<
+                _netAmountEvent){
+                    stableToken.approve(address(beta), APPROVED_AMOUNT);
+                }
+                beta.depositRequest(address(this), _netAmountEvent);
+
+            } 
+            else {
+                if ( tokenBeta.allowance(address(this),address(beta))<_netAmountEvent){
+                    tokenBeta.approve(address(beta), APPROVED_AMOUNT);
+                }
+                beta.withdrawRequest(_netAmountEvent);
+            } 
+        }
+}
+
+
+function InvestInGamma() external onlyManager {
+        ( , ,uint256 _netDepositInd)= admin.netDepositInd();
+        ( , ,uint256 _netAmountEvent) = admin.netAmountEvent();
+        if (_netAmountEvent > 0){
+            if (_netDepositInd == 1){
+                if ( stableToken.allowance(address(this), address(gamma))<
+                _netAmountEvent){
+                    stableToken.approve(address(gamma), APPROVED_AMOUNT);
+                }
+                gamma.depositRequest(address(this), _netAmountEvent);
+
+            } 
+            else {
+                if ( tokenGamma.allowance(address(this),address(gamma))<_netAmountEvent){
+                    tokenGamma.approve(address(gamma), APPROVED_AMOUNT);
+                }
+                gamma.withdrawRequest(_netAmountEvent);
+            } 
+        }
+}
+
+function setDataToParity(uint256 _amountMinted, uint256 _amountValidated, 
+        uint256 _netDepositInd, uint256 _id) external {
+        require(_id >= 0 && _id <=2, "Formation.Fi: not in range");    
+        require((_amountMinted > 0) && (_amountValidated > 0), 
+        "Formation.Fi: zero amount");
+        if (_id == 0){  
+        require(msg.sender == address(alpha), 
+        "Formation.Fi: no caller");
+        
+            if (_netDepositInd == 1) {
+                totalAmountToken.alpha += _amountMinted; 
+                totalValidatedDeposit.alpha += _amountValidated; 
+            }
+            else {      
+                totalAmountStable.alpha += _amountMinted; 
+                totalValidatedWithdrawal.alpha += _amountValidated; 
+            }
+        }
+        else if (_id == 1){
+        require(msg.sender == address(beta), 
+        "Formation.Fi: no caller");
+            if (_netDepositInd == 1) {
+                totalAmountToken.beta += _amountMinted; 
+                totalValidatedDeposit.beta += _amountValidated; 
+            }
+            else{      
+                totalAmountStable.beta += _amountMinted; 
+                totalValidatedWithdrawal.beta += _amountValidated; 
+            }
+        }
+
+        else {
+         require(msg.sender == address(gamma), 
+        "Formation.Fi: no caller");
+            if (_netDepositInd == 1) {
+                totalAmountToken.gamma += _amountMinted; 
+                totalValidatedDeposit.gamma += _amountValidated; 
+            }
+            else {      
+                totalAmountStable.gamma += _amountMinted; 
+                totalValidatedWithdrawal.gamma += _amountValidated; 
+            }
+        }        
+}
+
+function distributeAlpha (address[] memory _users) external onlyManager{
+      address _user;
+      (uint256 _depositAlphaTotalOld, , )  = admin.amountDepositTotalOld();
+      (uint256 _withdrawalAlphaTotalOld, , ) = admin.amountWithdrawTotalOld();
+
+      uint256 _alpha;
+      uint256 _alphaTotal;
+      uint256 _depositAlpha; 
+      uint256 _withdrawalAlpha;
+      uint256 _depositAlphaTotal;
+      uint256 _withdrawalAlphaTotal;
+      uint256 _stableAlpha;
+      uint256 _stableAlphaTotal;
+      uint256 _factorFeesDecimals = adminAlpha.FACTOR_FEES_DECIMALS();
+      uint256 _feeRateParity = adminAlpha.depositFeeRateParity();
+
+
+      for (uint256 i = 0; i < _users.length ; ++i) {
+        _user =_users[i];
+        require ( _user!= address(0), 
+        "Formation.Fi: zero address");
+        (_depositAlpha, ,  ) = token.usersDeposit(_user);
+        (_withdrawalAlpha, , ) = token.usersWithdraw(_user);
+        if ((_depositAlphaTotal > 0) && (_depositAlpha > 0)){
+            _alpha = (_depositAlpha * totalAmountToken.alpha )/ _depositAlphaTotalOld;
+            _depositAlpha = (_depositAlpha * totalValidatedDeposit.alpha) / _depositAlphaTotalOld;
+            _alphaTotal += _alpha;
+            _depositAlphaTotal += _depositAlpha;
+            _depositAlpha = _depositAlpha + ((_depositAlpha) * _feeRateParity)
+                /_factorFeesDecimals;
+            token.setusersTokenDeposit( _user, _depositAlpha, 0);
+            token.setusersToken(_user, _alpha, 0);
+        }
+
+        if ((_withdrawalAlphaTotal >0) && (_withdrawalAlpha > 0)){
+            _stableAlpha = ( _withdrawalAlpha * totalAmountStable.alpha) / _withdrawalAlphaTotalOld;
+            _withdrawalAlpha =  (_withdrawalAlpha * totalValidatedWithdrawal.alpha) / _withdrawalAlphaTotalOld;
+            _stableAlphaTotal += _stableAlpha;
+            _withdrawalAlphaTotal +=  _withdrawalAlpha;
+            token.setusersTokenWithdraw(_user, _withdrawalAlpha, 0);
+            stableToken.safeTransfer(_user, _stableAlpha);
+            
+        }
+
+      }
+      totalAmountToken.alpha -= _alphaTotal;
+      totalAmountStable.alpha -=  _stableAlphaTotal;
+      totalValidatedDeposit.alpha -=  _depositAlphaTotal;
+      totalValidatedWithdrawal.alpha -= _withdrawalAlphaTotal;
+      _depositAlphaTotal = _depositAlphaTotal + ((_depositAlphaTotal) * _feeRateParity)
+                /_factorFeesDecimals;
+      amountDepositTotalOld.alpha -= _depositAlphaTotal;
+      amountWithdrawTotalOld.alpha -= _withdrawalAlphaTotal;
+      if(amountDepositTotalOld.alpha ==0){
+        admin.setAmountDepositTotalOld(0);
+      }
+      if(amountWithdrawTotalOld.alpha ==0){
+        admin.setAmountWithdrawTotalOld(0);
+      }
+      
+}
+
+
+function distributeBeta (address [] memory _users) external onlyManager{
+      address _user;
+      (  ,uint256 _depositBetaTotalOld, )  = admin.amountDepositTotalOld();
+      ( ,uint256 _withdrawalBetaTotalOld, )  = admin.amountWithdrawTotalOld();
+      uint256 _beta;
+      uint256 _betaTotal;
+      uint256 _depositBeta; 
+      uint256 _withdrawalBeta;
+      uint256 _depositBetaTotal;
+      uint256 _withdrawalBetaTotal;
+      uint256 _stableBeta;
+      uint256 _stableBetaTotal;
+      uint256 _factorFeesDecimals = adminBeta.FACTOR_FEES_DECIMALS();
+      uint256 _feeRateParity = adminBeta.depositFeeRateParity();
+
+      for (uint256 i = 0; i < _users.length ; ++i) {
+        _user =_users[i];
+        require ( _user!= address(0), 
+        "Formation.Fi: zero address");
+        ( ,_depositBeta,  ) = token.usersDeposit(_user);
+        ( ,_withdrawalBeta, ) = token.usersWithdraw(_user);
+        if ((_depositBetaTotal > 0) && (_depositBeta > 0)){
+            _beta  = (_depositBeta * totalAmountToken.beta )/ _depositBetaTotalOld;
+            _depositBeta = (_depositBeta * totalValidatedDeposit.beta ) / _depositBetaTotalOld;
+            _betaTotal += _beta ;
+            _depositBetaTotal  += _depositBeta;
+            _depositBeta = _depositBeta + ((_depositBeta) * _feeRateParity)
+                /_factorFeesDecimals;
+            token.setusersTokenDeposit( _user, _depositBeta, 1);
+            token.setusersToken(_user, _beta, 1);
+        }
+
+        if ((_withdrawalBetaTotal > 0) && (_withdrawalBeta > 0)){
+            _stableBeta = ( _withdrawalBeta * totalAmountStable.beta) / _withdrawalBetaTotalOld;
+            _withdrawalBeta =  (_withdrawalBeta * totalValidatedWithdrawal.beta) / _withdrawalBetaTotalOld;
+            _stableBetaTotal += _stableBeta;
+            _withdrawalBetaTotal +=  _withdrawalBeta;
+            token.setusersTokenWithdraw(_user, _withdrawalBeta, 1);
+            stableToken.safeTransfer(_user, _stableBeta);
+        }
+
+      }
+      totalAmountToken.beta -= _betaTotal;
+      totalAmountStable.beta -=  _stableBetaTotal;
+      totalValidatedDeposit.beta -=  _depositBetaTotal;
+      totalValidatedWithdrawal.beta -= _withdrawalBetaTotal;
+      _depositBetaTotal = _depositBetaTotal + ((_depositBetaTotal) * _feeRateParity)
+                /_factorFeesDecimals;
+      amountDepositTotalOld.beta -= _depositBetaTotal;
+      amountWithdrawTotalOld.beta -= _withdrawalBetaTotal;
+      if(amountDepositTotalOld.beta ==0){
+        admin.setAmountDepositTotalOld(1);
+      }
+      if(amountWithdrawTotalOld.beta ==0){
+        admin.setAmountWithdrawTotalOld(1);
+      }
+    }
+
+
+function distributeGamma 
+    (address [] memory _users) external onlyManager{
+      address _user;
+      (  , ,uint256 _depositGammaTotalOld) = admin.amountDepositTotalOld();
+      ( , ,uint256 _withdrawalGammaTotalOld) = admin.amountWithdrawTotalOld();
+      uint256 _gamma;
+      uint256 _gammaTotal;
+      uint256 _depositGamma; 
+      uint256 _withdrawalGamma;
+      uint256 _depositGammaTotal;
+      uint256 _withdrawalGammaTotal;
+      uint256 _stableGamma;
+      uint256 _stableGammaTotal;
+      uint256 _factorFeesDecimals = adminBeta.FACTOR_FEES_DECIMALS();
+      uint256 _feeRateParity = adminBeta.depositFeeRateParity();
+      for (uint256 i = 0; i < _users.length ; ++i) {
+        _user =_users[i];
+        require ( _user!= address(0), 
+        "Formation.Fi: zero address");
+        ( , , _depositGamma) = token.usersDeposit(_user);
+        ( , , _withdrawalGamma) = token.usersWithdraw(_user);
+        if ((_depositGammaTotal >0) && (_depositGamma > 0)){
+            _gamma  = (_depositGamma * totalAmountToken.gamma )/ _depositGammaTotalOld;
+            _depositGamma = (_depositGamma * totalValidatedDeposit.gamma ) / _depositGammaTotalOld;
+            _gammaTotal += _gamma ;
+            _depositGammaTotal  += _depositGamma;
+            _depositGamma= _depositGamma + ((_depositGamma) * _feeRateParity)
+                /_factorFeesDecimals;
+            token.setusersTokenDeposit( _user, _depositGamma, 2);
+            token.setusersToken(_user, _gamma, 2);
+        }
+
+        if ((_withdrawalGammaTotal >0) && (_withdrawalGamma > 0)){
+            _stableGamma = ( _withdrawalGamma * totalAmountStable.gamma) / _withdrawalGammaTotalOld;
+            _withdrawalGamma =  (_withdrawalGamma * totalValidatedWithdrawal.gamma) / _withdrawalGammaTotalOld;
+            _stableGammaTotal += _stableGamma;
+            _withdrawalGammaTotal +=  _withdrawalGamma;
+            token.setusersTokenWithdraw(_user, _withdrawalGamma, 2);
+            stableToken.safeTransfer(_user, _stableGamma);
+        }
+
+      }
+      totalAmountToken.gamma -= _gammaTotal;
+      totalAmountStable.gamma -=  _stableGammaTotal;
+      totalValidatedDeposit.gamma -=  _depositGammaTotal;
+      totalValidatedWithdrawal.gamma -= _withdrawalGammaTotal;
+      _depositGammaTotal = _depositGammaTotal + ((_depositGammaTotal) * _feeRateParity)
+                /_factorFeesDecimals;
+      amountDepositTotalOld.gamma -= _depositGammaTotal;
+      amountWithdrawTotalOld.gamma -= _withdrawalGammaTotal;
+      if(amountDepositTotalOld.gamma ==0){
+        admin.setAmountDepositTotalOld(2);
+      }
+      if(amountWithdrawTotalOld.gamma ==0){
+        admin.setAmountWithdrawTotalOld(2);
+      }
+}
+    function updateDataFromParity( uint256 _id) internal {
+        require(_id>= 0 && _id<=2, "Formation.Fi: not in range");  
+        uint256 _totalAmountToken;
+        uint256 _totalAmountStable;
+         if (_id == 0){
+        (_totalAmountToken, , ) =  admin.totalAmountToken();
+        (_totalAmountStable, , ) =  admin.totalAmountStable();
+        require (totalAmountToken.alpha <= tolerance  && totalAmountStable.alpha <= tolerance,
+        "Formation.Fi: event on pending");
+        totalAmountToken.alpha = _totalAmountToken;
+        totalAmountStable.alpha = _totalAmountStable;
+        }
+         else if (_id == 1){
+        ( ,_totalAmountToken, ) =  admin.totalAmountToken();
+        ( ,_totalAmountStable, ) =  admin.totalAmountStable();
+        require (totalAmountToken.beta <=  tolerance  && totalAmountStable.beta <=  tolerance,
+        "Formation.Fi: event on pending");
+        totalAmountToken.beta =  _totalAmountToken;
+        totalAmountStable.beta = _totalAmountStable;
+        }
+        else {
+        ( , ,_totalAmountToken) =  admin.totalAmountToken();
+        ( , ,_totalAmountStable) =  admin.totalAmountStable();
+        require (totalAmountToken.gamma <=  tolerance  && totalAmountStable.gamma <=  tolerance,
+        "Formation.Fi: event on pending");
+        totalAmountToken.gamma = _totalAmountToken;
+        totalAmountStable.gamma = _totalAmountStable;
+        }
+
+   }
+
+    function onERC721Received(
+        address,
+        address,
+        uint256,
+        bytes memory
+    ) public virtual override returns (bytes4) {
+        return this.onERC721Received.selector;
+    }
+
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.0;
+
+/**
+ * @title ERC721 token receiver interface
+ * @dev Interface for any contract that wants to support safeTransfers
+ * from ERC721 asset contracts.
+ */
+interface IERC721Receiver {
+    /**
+     * @dev Whenever an {IERC721} `tokenId` token is transferred to this contract via {IERC721-safeTransferFrom}
+     * by `operator` from `from`, this function is called.
+     *
+     * It must return its Solidity selector to confirm the token transfer.
+     * If any other value is returned or the interface is not implemented by the recipient, the transfer will be reverted.
+     *
+     * The selector can be obtained in Solidity with `IERC721.onERC721Received.selector`.
+     */
+    function onERC721Received(
+        address operator,
+        address from,
+        uint256 tokenId,
+        bytes calldata data
+    ) external returns (bytes4);
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+import "../IBEP20.sol";
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
+
+/**
+ * @title SafeBEP20
+ * @dev Wrappers around BEP20 operations that throw on failure (when the token
+ * contract returns false). Tokens that return no value (and instead revert or
+ * throw on failure) are also supported, non-reverting calls are assumed to be
+ * successful.
+ * To use this library you can add a `using SafeBEP20 for IBEP20;` statement to your contract,
+ * which allows you to call the safe operations as `token.safeTransfer(...)`, etc.
+ */
+library SafeBEP20 {
+    using SafeMath for uint256;
+    using Address for address;
+
+    function safeTransfer(
+        IBEP20 token,
+        address to,
+        uint256 value
+    ) internal {
+        _callOptionalReturn(
+            token,
+            abi.encodeWithSelector(token.transfer.selector, to, value)
+        );
+    }
+
+    function safeTransferFrom(
+        IBEP20 token,
+        address from,
+        address to,
+        uint256 value
+    ) internal {
+        _callOptionalReturn(
+            token,
+            abi.encodeWithSelector(token.transferFrom.selector, from, to, value)
+        );
+    }
+
+    /**
+     * @dev Deprecated. This function has issues similar to the ones found in
+     * {IBEP20-approve}, and its usage is discouraged.
+     *
+     * Whenever possible, use {safeIncreaseAllowance} and
+     * {safeDecreaseAllowance} instead.
+     */
+    function safeApprove(
+        IBEP20 token,
+        address spender,
+        uint256 value
+    ) internal {
+        // safeApprove should only be called when setting an initial allowance,
+        // or when resetting it to zero. To increase and decrease it, use
+        // 'safeIncreaseAllowance' and 'safeDecreaseAllowance'
+        // solhint-disable-next-line max-line-length
+        require(
+            (value == 0) || (token.allowance(address(this), spender) == 0),
+            "SafeBEP20: approve from non-zero to non-zero allowance"
+        );
+        _callOptionalReturn(
+            token,
+            abi.encodeWithSelector(token.approve.selector, spender, value)
+        );
+    }
+
+    function safeIncreaseAllowance(
+        IBEP20 token,
+        address spender,
+        uint256 value
+    ) internal {
+        uint256 newAllowance = token.allowance(address(this), spender).add(
+            value
+        );
+        _callOptionalReturn(
+            token,
+            abi.encodeWithSelector(
+                token.approve.selector,
+                spender,
+                newAllowance
+            )
+        );
+    }
+
+    function safeDecreaseAllowance(
+        IBEP20 token,
+        address spender,
+        uint256 value
+    ) internal {
+        uint256 newAllowance = token.allowance(address(this), spender).sub(
+            value,
+            "SafeBEP20: decreased allowance below zero"
+        );
+        _callOptionalReturn(
+            token,
+            abi.encodeWithSelector(
+                token.approve.selector,
+                spender,
+                newAllowance
+            )
+        );
+    }
+
+    /**
+     * @dev Imitates a Solidity high-level call (i.e. a regular function call to a contract), relaxing the requirement
+     * on the return value: the return value is optional (but if data is returned, it must not be false).
+     * @param token The token targeted by the call.
+     * @param data The call data (encoded using abi.encode or one of its variants).
+     */
+    function _callOptionalReturn(IBEP20 token, bytes memory data) private {
+        // We need to perform a low level call here, to bypass Solidity's return data size checking mechanism, since
+        // we're implementing it ourselves. We use {Address.functionCall} to perform this call, which verifies that
+        // the target address contains contract code and also asserts for success in the low-level call.
+
+        bytes memory returndata = address(token).functionCall(
+            data,
+            "SafeBEP20: low-level call failed"
+        );
+        if (returndata.length > 0) {
+            // Return data is optional
+            // solhint-disable-next-line max-line-length
+            require(
+                abi.decode(returndata, (bool)),
+                "SafeBEP20: BEP20 operation did not succeed"
+            );
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+/**
+ * @title Pausable
+ * @dev Base contract which allows children to implement an emergency stop mechanism.
+ */
+contract Pausable is Ownable {
+    event Pause();
+    event Unpause();
+
+    bool public paused = false;
+
+    /**
+     * @dev Modifier to make a function callable only when the contract is not paused.
+     */
+    modifier whenNotPaused() {
+        require(!paused, "Transaction is not available");
+        _;
+    }
+
+    /**
+     * @dev Modifier to make a function callable only when the contract is paused.
+     */
+    modifier whenPaused() {
+        require(paused, "Transaction is available");
+        _;
+    }
+
+    /**
+     * @dev called by the owner to pause, triggers stopped state
+     */
+    function pause() public onlyOwner whenNotPaused {
+        paused = true;
+        emit Pause();
+    }
+
+    /**
+     * @dev called by the owner to unpause, returns to normal state
+     */
+    function unpause() public onlyOwner whenPaused {
+        paused = false;
+        emit Unpause();
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/math/Math.sol)
+
+pragma solidity ^0.8.4;
+
+/**
+ * @dev Standard math utilities missing in the Solidity language.
+ */
+library Math {
+    /**
+     * @dev Returns the largest of two numbers.
+     */
+    function max(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a >= b ? a : b;
+    }
+
+    /**
+     * @dev Returns the smallest of two numbers.
+     */
+    function min(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a < b ? a : b;
+    }
+
+    /**
+     * @dev Returns the average of two numbers. The result is rounded towards
+     * zero.
+     */
+    function average(uint256 a, uint256 b) internal pure returns (uint256) {
+        // (a + b) / 2 can overflow.
+        return (a & b) + (a ^ b) / 2;
+    }
+
+    /**
+     * @dev Returns the ceiling of the division of two numbers.
+     *
+     * This differs from standard division with `/` in that it rounds up instead
+     * of rounding down.
+     */
+    function ceilDiv(uint256 a, uint256 b) internal pure returns (uint256) {
+        // (a + b - 1) / b can overflow on addition, so we distribute.
+        return a / b + (a % b == 0 ? 0 : 1);
+    }
+
+    /**
+     * @dev Returns the absolute unsigned value of a signed value.
+     */
+    function abs(int256 n) internal pure returns (uint256) {
+        unchecked {
+            // must be unchecked in order to support `n = type(int256).min`
+            return uint256(n >= 0 ? n : -n);
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+import "../utils/Pausable.sol";
+import "./libraries/SafeBEP20.sol";
+import "./libraries/Math.sol";
+import "./Admin.sol";
+import "./Token.sol";
+import "./DepositConfirmation.sol";
+import "./WithdrawalConfirmation.sol";
+import "./SafeHouse.sol";
+
+/** 
+* @author Formation.Fi.
+* @notice Implementation of the contract Investement.
+*/
+
+interface IInvestementParity {
+    function setDataToParity(uint256 _amountMinted, uint256 _amountValidated, 
+        uint256 _netDepositInd, uint256 _id) external;
+}
+
+contract Investment is Pausable {
+    using SafeBEP20 for IBEP20;
+    using Math for uint256;
+
+    uint256 public constant FACTOR_FEES_DECIMAL = 1e4;
+    uint256 public constant FACTOR_PRICE_DECIMALS = 1e6; 
+    uint256 public amountScaleDecimals = 1;
+    uint256 public product;
+    uint256 public maxDepositAmount = 1000000 * 1e18;
+    uint256 public maxWithdrawalAmount = 1000000 * 1e18;
+    uint256 public maxDeposit;
+    uint256 public maxWithdrawal;
+    uint256 public depositFeeRate;
+    uint256 public depositFeeRateParity;
+    uint256 public tokenPrice;
+    uint256 public tokenPriceMean;
+    uint256 public netDepositInd;
+    uint256 public netAmountEvent;
+    uint256 public withdrawalAmountTotal;
+    uint256 public withdrawalAmountTotalOld;
+    uint256 public depositAmountTotal;
+    uint256 public validatedDepositParityStableAmount;
+    uint256 public validatedWithdrawalParityStableAmount;
+    uint256 public validatedDepositParityTokenAmount;
+    uint256 public validatedWithdrawalParityTokenAmount;
+    uint256 public tokenTotalSupply;
+    uint256 public tokenIdDeposit ;
+    uint256 public tokenIdWithdraw;
+    address private treasury;
+    address private safeHouse;
+    address public parity;
+    mapping(address => uint256) private acceptedWithdrawalPerAddress;
+    Admin public admin;
+    IBEP20 public stableToken;
+    Token public token;
+    DepositConfirmation public deposit;
+    WithdrawalConfirmation public withdrawal;
+    IInvestementParity public parityContract;
+    event DepositRequest(address indexed _address, uint256 _amount);
+    event CancelDepositRequest(address indexed _address, uint256 _amount);
+    event WithdrawalRequest(address indexed _address, uint256 _amount);
+    event CancelWithdrawalRequest(address indexed _address, uint256 _amount);
+    event ValidateDeposit(address indexed _address, uint256 _finalizedAmount, uint256 _mintedAmount);
+    event ValidateWithdrawal(address indexed _address, uint256 _finalizedAmount, uint256 _SentAmount);
+   
+    constructor(uint256 _product, address _admin, address _safeHouse, address _stableTokenAddress, 
+        address _token,  address _depositConfirmationAddress, 
+        address __withdrawalConfirmationAddress) {
+        require(_product >= 0 && _product <=2, 
+        "Formation.Fi: not in range"); 
+        require(
+            _admin != address(0),
+            "Formation.Fi: zero address"
+        );
+        require(
+            _safeHouse != address(0),
+            "Formation.Fi:  zero address"
+        );
+        require(
+            _stableTokenAddress != address(0),
+            "Formation.Fi:  zero address"
+        );
+        require(
+           _token != address(0),
+            "Formation.Fi:  zero address"
+        );
+        require(
+           _depositConfirmationAddress != address(0),
+            "Formation.Fi:  zero address"
+        );
+        require(
+            __withdrawalConfirmationAddress != address(0),
+            "Formation.Fi:  zero address"
+        );
+        product = _product;
+        admin = Admin(_admin);
+        safeHouse = _safeHouse;
+        stableToken = IBEP20(_stableTokenAddress);
+        token = Token(_token);
+        deposit = DepositConfirmation(_depositConfirmationAddress);
+        withdrawal = WithdrawalConfirmation(__withdrawalConfirmationAddress);
+        uint8 _stableTokenDecimals = BEP20(_stableTokenAddress).decimals();
+        if (_stableTokenDecimals == 6) {
+           amountScaleDecimals = 1e12;
+        }
+    }
+  
+    modifier onlyManager() {
+        address _manager = admin.manager();
+        require(msg.sender == _manager, "Formation.Fi: no manager");
+        _;
+    }
+
+    modifier cancel() {
+        bool  _isCancel = admin.isCancel();
+        require( _isCancel == true, "Formation.Fi: no cancel");
+        _;
+    }
+
+     /**
+     * @dev Setter functions to update the Portfolio Parameters.
+     */
+    function setMaxDepositAmount(uint256 _maxDepositAmount) external 
+        onlyManager {
+        maxDepositAmount = _maxDepositAmount;
+
+    }
+    function setMaxWithdrawalAmount(uint256 _maxWithdrawalAmount) external 
+        onlyManager{
+         maxWithdrawalAmount = _maxWithdrawalAmount;      
+    }
+
+    function setParity(address _parity) external onlyOwner{
+        require(
+            _parity != address(0),
+            "Formation.Fi: zero address"
+        );
+
+        parity = _parity;
+        parityContract = IInvestementParity(_parity);      
+    }
+
+    function setSafeHouse(address _safeHouse) external onlyOwner{
+          require(
+            _safeHouse != address(0),
+            "Formation.Fi: zero address"
+        );  
+        safeHouse = _safeHouse;
+    }
+     /**
+     * @dev Calculate net deposit indicator
+     */
+    function calculateNetDepositInd( ) public onlyManager {
+        updateAdminData();
+        netDepositInd = admin.calculateNetDepositInd(depositAmountTotal, withdrawalAmountTotal,
+        maxDepositAmount,  maxWithdrawalAmount);
+    }
+
+     /**
+     * @dev Calculate net amount 
+     */
+    function calculateNetAmountEvent( ) public onlyManager {
+        netAmountEvent = admin.calculateNetAmountEvent(depositAmountTotal,  withdrawalAmountTotal,
+        maxDepositAmount,  maxWithdrawalAmount);
+    }
+
+     /**
+     * @dev Calculate the maximum deposit amount to be validated 
+     * by the manager for the users.
+     */
+    function calculateMaxDepositAmount( ) public onlyManager {
+             maxDeposit = Math.min(depositAmountTotal, maxDepositAmount);
+        }
+    
+     /**
+     * @dev Calculate the maximum withdrawal amount to be validated 
+     * by the manager for the users.
+     */
+    function calculateMaxWithdrawAmount( ) public onlyManager {
+        withdrawalAmountTotalOld = withdrawalAmountTotal;
+        maxWithdrawal = Math.min(withdrawalAmountTotal , (maxWithdrawalAmount * FACTOR_PRICE_DECIMALS) / tokenPrice);
+    }
+
+     /**
+     * @dev Calculate the event parameters by the manager. 
+     */
+    function calculateEventParameters( ) external onlyManager {
+        calculateNetDepositInd( );
+        calculateNetAmountEvent( );
+        calculateMaxDepositAmount( );
+        calculateMaxWithdrawAmount( );
+    }
+
+     /**
+     * @dev  Validate the deposit requests of users by the manager.
+     * @param _users the addresses of users.
+     */
+    function validateDeposits( address[] memory _users) external 
+        whenNotPaused onlyManager {
+        uint256 _amountStable;
+        uint256 _amountStableTotal = 0;
+        uint256 _depositToken;
+        uint256 _depositTokenTotal = 0;
+        uint256 _feeStable;
+        uint256 _feeStableTotal = 0;
+        uint256 _tokenIdDeposit;
+        require (_users.length > 0, "Formation.Fi: no user");
+        for (uint256 i = 0; i < _users.length  ; i++) {
+             address _user =_users[i];
+            (  , _amountStable, )= deposit.pendingDepositPerAddress(_user);
+           
+            if (deposit.balanceOf(_user) == 0) {
+                continue;
+              }
+            if (maxDeposit <= _amountStableTotal) {
+                break;
+             }
+             _tokenIdDeposit = deposit.getTokenId(_user);
+             _amountStable = Math.min(maxDeposit  - _amountStableTotal ,  _amountStable);
+             depositAmountTotal =  depositAmountTotal - _amountStable;
+             if (_user == parity) {
+             _feeStable =  (_amountStable * depositFeeRateParity) /
+              FACTOR_FEES_DECIMAL;
+             }
+             else {
+            _feeStable =  (_amountStable * depositFeeRate) /
+              FACTOR_FEES_DECIMAL;
+
+             }
+             _feeStableTotal = _feeStableTotal + _feeStable;
+             _depositToken = (( _amountStable - _feeStable) *
+             FACTOR_PRICE_DECIMALS) / tokenPrice;
+             if ((_user == parity) && ( _amountStable >0)) {
+
+                validatedDepositParityStableAmount  = _amountStable;
+                validatedDepositParityTokenAmount  = _depositToken;
+                parityContract.setDataToParity( _depositToken, _amountStable, 
+                admin.netDepositInd(), product);
+
+             }
+
+             _depositTokenTotal = _depositTokenTotal + _depositToken;
+             _amountStableTotal = _amountStableTotal + _amountStable;
+
+             token.mint(_user, _depositToken);
+             deposit.updateDepositData( _user,  _tokenIdDeposit, _amountStable, false);
+             token.addDeposit(_user,  _depositToken, block.timestamp);
+             emit ValidateDeposit( _user, _amountStable, _depositToken);
+        }
+        maxDeposit = maxDeposit - _amountStableTotal;
+        if (_depositTokenTotal > 0){
+            tokenPriceMean  = (( tokenTotalSupply * tokenPriceMean) + 
+            ( _depositTokenTotal * tokenPrice)) /
+            ( tokenTotalSupply + _depositTokenTotal);
+            admin.updateTokenPriceMean( tokenPriceMean);
+        }
+        
+        if (admin.managementFeesTime() == 0){
+            admin.updateManagementFeeTime(block.timestamp);   
+        }
+        if ( _feeStableTotal > 0){
+           stableToken.safeTransfer( treasury, _feeStableTotal/amountScaleDecimals);
+        }
+    }
+
+    /**
+     * @dev  Validate the withdrawal requests of users by the manager.
+     * @param _users the addresses of users.
+     */
+    function validateWithdrawals(address[] memory _users) external
+        whenNotPaused onlyManager {
+        uint256 tokensToBurn = 0;
+        uint256 _amountLP;
+        uint256 _amountStable;
+        uint256 _tokenIdWithdraw;
+        calculateAcceptedWithdrawalAmount(_users);
+        for (uint256 i = 0; i < _users.length; i++) {
+            address _user =_users[i];
+            if (withdrawal.balanceOf(_user) == 0) {
+                continue;
+            }
+            _amountLP = acceptedWithdrawalPerAddress[_user];
+
+            withdrawalAmountTotal = withdrawalAmountTotal - _amountLP ;
+            _amountStable = (_amountLP *  tokenPrice) / 
+            ( FACTOR_PRICE_DECIMALS * amountScaleDecimals);
+
+            if ((_user == parity) && (_amountLP > 0))  {
+               validatedWithdrawalParityStableAmount  =  _amountStable;
+               validatedWithdrawalParityTokenAmount = _amountLP;
+               parityContract.setDataToParity( _amountStable, _amountLP, 
+                admin.netDepositInd(), product);
+            }
+            stableToken.safeTransfer(_user, _amountStable);
+            _tokenIdWithdraw = withdrawal.getTokenId(_user);
+            withdrawal.updateWithdrawalData( _user,  _tokenIdWithdraw, _amountLP, false);
+            tokensToBurn = tokensToBurn + _amountLP;
+            token.updateTokenData(_user, _amountLP);
+            delete acceptedWithdrawalPerAddress[_user]; 
+            emit ValidateWithdrawal(_user,  _amountLP, _amountStable);
+        }
+        if ((tokensToBurn) > 0){
+           token.burn(address(this), tokensToBurn);
+        }
+        if (withdrawalAmountTotal == 0){
+            withdrawalAmountTotalOld = 0;
+        }
+    }
+
+    /**
+     * @dev  Make a deposit request.
+     * @param _user the addresses of the user.
+     * @param _amount the deposit amount in Stablecoin.
+     */
+    function depositRequest(address _user, uint256 _amount) external whenNotPaused {
+        require(_amount >= admin.minAmount(), 
+        "Formation.Fi: min Amount");
+        if (deposit.balanceOf( _user)==0){
+            tokenIdDeposit = tokenIdDeposit +1;
+            deposit.mint( _user, tokenIdDeposit, _amount);
+        }
+        else {
+            uint256 _tokenIdDeposit = deposit.getTokenId(_user);
+            deposit.updateDepositData (_user,  _tokenIdDeposit, _amount, true);
+        }
+        depositAmountTotal = depositAmountTotal + _amount; 
+        stableToken.safeTransferFrom(msg.sender, address(this), _amount/amountScaleDecimals);
+        emit DepositRequest(_user, _amount);
+    }
+
+    /**
+     * @dev  Cancel the deposit request.
+     * @param _amount the deposit amount to cancel in Stablecoin.
+     */
+    function cancelDepositRequest(uint256 _amount) external whenNotPaused cancel {
+        uint256 _tokenIdDeposit = deposit.getTokenId(msg.sender);
+        require( _tokenIdDeposit > 0, 
+        "Formation.Fi: no deposit request"); 
+        deposit.updateDepositData(msg.sender,  _tokenIdDeposit, _amount, false);
+        depositAmountTotal = depositAmountTotal - _amount; 
+        stableToken.safeTransfer(msg.sender, _amount/amountScaleDecimals);
+        emit CancelDepositRequest(msg.sender, _amount);      
+    }
+    
+     /**
+     * @dev  Make a withdrawal request.
+     * @param _amount the withdrawal amount in Token.
+     */
+    function withdrawRequest(uint256 _amount) external whenNotPaused {
+        require ( _amount > 0, "Formation Fi: zero amount");
+        require(withdrawal.balanceOf(msg.sender) == 0, "Formation.Fi: request on pending");
+        if (msg.sender != parity) {
+        require (token.checklWithdrawalRequest(msg.sender, _amount, admin.lockupPeriodUser()),
+         "Formation.Fi: locked position");
+        }
+        tokenIdWithdraw = tokenIdWithdraw +1;
+        withdrawal.mint(msg.sender, tokenIdWithdraw, _amount);
+        withdrawalAmountTotal = withdrawalAmountTotal + _amount;
+        token.transferFrom(msg.sender, address(this), _amount);
+        emit WithdrawalRequest(msg.sender, _amount);
+         
+    }
+
+     /**
+     * @dev Cancel the withdrawal request.
+     * @param _amount the withdrawal amount in Token.
+     */
+    function cancelWithdrawalRequest( uint256 _amount) external whenNotPaused {
+        require ( _amount > 0, "Formation Fi: zero amount");
+        uint256 _tokenIdWithdraw = withdrawal.getTokenId(msg.sender);
+        require( _tokenIdWithdraw > 0, 
+        "Formation.Fi: no request"); 
+        withdrawal.updateWithdrawalData(msg.sender, _tokenIdWithdraw, _amount, false);
+        withdrawalAmountTotal = withdrawalAmountTotal - _amount;
+        token.transfer(msg.sender, _amount);
+        emit CancelWithdrawalRequest(msg.sender, _amount);
+    }
+    
+    /**
+     * @dev Send Stablecoins to the SafeHouse by the manager.
+     * @param _amount the amount to send.
+     */
+    function sendToSafeHouse(uint256 _amount) external 
+        whenNotPaused onlyManager {
+        require( _amount > 0,  "Formation.Fi: zero amount");
+        uint256 _scaledAmount = _amount/amountScaleDecimals;
+        require(
+            stableToken.balanceOf(address(this)) >= _scaledAmount,
+            "Formation.Fi: exceeds balance"
+        );
+        stableToken.safeTransfer(safeHouse, _scaledAmount);
+    }
+    
+     /**
+     * @dev update data from Admin contract.
+     */
+    function updateAdminData() internal { 
+        depositFeeRate = admin.depositFeeRate();
+        depositFeeRateParity = admin.depositFeeRateParity();
+        tokenPrice = admin.tokenPrice();
+        tokenPriceMean = admin.tokenPriceMean();
+        tokenTotalSupply = token.totalSupply();
+        treasury = admin.treasury();
+    }
+    
+    /**
+     * @dev Calculate the accepted withdrawal amounts for users.
+     * @param _users the addresses of users.
+     */
+    function calculateAcceptedWithdrawalAmount(address[] memory _users) 
+        internal {
+        require (_users.length > 0, "Formation.Fi: no user");
+        uint256 _amountLP;
+        address _user;
+        for (uint256 i = 0; i < _users.length; i++) {
+            _user = _users[i];
+            require( _user!= address(0), "Formation.Fi: zero address");
+            ( , _amountLP, )= withdrawal.pendingWithdrawPerAddress(_user);
+            if (withdrawal.balanceOf(_user) == 0) {
+                continue;
+            }
+           _amountLP = Math.min((maxWithdrawal * _amountLP)/
+           withdrawalAmountTotalOld, _amountLP); 
+           acceptedWithdrawalPerAddress[_user] = _amountLP;
+        }   
+    }
+    
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "./libraries/SafeBEP20.sol";
+import "./Token.sol";
+import "./libraries/Math.sol";
+
+/** 
+* @author Formation.Fi.
+* @notice Implementation of the contract Admin.
+*/
+
+contract Admin is Ownable {
+    using SafeBEP20 for IBEP20;
+    uint256 public constant FACTOR_FEES_DECIMALS = 1e4; 
+    uint256 public constant FACTOR_PRICE_DECIMALS = 1e6;
+    uint256 public constant  SECONDES_PER_YEAR = 365 days; 
+    uint256 public slippageTolerance = 200;
+    uint256 public  amountScaleDecimals = 1; 
+    uint256 public depositFeeRate = 50;  
+    uint256 public depositFeeRateParity= 15; 
+    uint256 public managementFeeRate = 200;
+    uint256 public performanceFeeRate = 2000;
+    uint256 public performanceFees;
+    uint256 public managementFees;
+    uint256 public managementFeesTime = 1659264751;
+    uint256 public tokenPrice = 1006049;
+    uint256 public tokenPriceMean = 1002146;
+    uint256 public minAmount= 100 * 1e18;
+    uint256 public lockupPeriodUser = 604800; 
+    uint public netDepositInd;
+    uint256 public netAmountEvent;
+    address public manager;
+    address public treasury;
+    address public investment;
+    address private safeHouse;
+    bool public isCancel;
+    Token public token;
+    IBEP20 public stableToken;
+
+
+    constructor( address _manager, address _treasury,  address _stableTokenAddress,
+     address _tokenAddress) {
+        require(
+            _manager != address(0),
+            "Formation.Fi: zero address"
+        );
+
+        require(
+           _treasury != address(0),
+            "Formation.Fi:  zero address"
+            );
+
+        require(
+            _stableTokenAddress != address(0),
+            "Formation.Fi:  zero address"
+        );
+
+        require(
+           _tokenAddress != address(0),
+            "Formation.Fi:  zero address"
+        );
+
+        manager = _manager;
+        treasury = _treasury; 
+        stableToken = IBEP20(_stableTokenAddress);
+        token = Token(_tokenAddress);
+        uint8 _stableTokenDecimals = BEP20( _stableTokenAddress).decimals();
+        if ( _stableTokenDecimals == 6) {
+            amountScaleDecimals= 1e12;
+        }
+    }
+
+    modifier onlyinvestment() {
+        require(investment != address(0),
+            "Formation.Fi:  zero address"
+        );
+
+        require(msg.sender == investment,
+             "Formation.Fi:  not investment"
+        );
+        _;
+    }
+
+    modifier onlyManager() {
+        require(msg.sender == manager, 
+        "Formation.Fi: not manager");
+        _;
+    }
+
+     /**
+     * @dev Setter functions to update the Portfolio Parameters.
+     */
+    function setTreasury(address _treasury) external onlyOwner {
+        require(
+            _treasury != address(0),
+            "Formation.Fi: zero address"
+        );
+
+        treasury = _treasury;
+    }
+
+    function setManager(address _manager) external onlyOwner {
+        require(
+            _manager != address(0),
+            "Formation.Fi: zero address"
+        );
+
+        manager = _manager;
+    }
+
+    function setInvestment(address _investment) external onlyOwner {
+        require(
+            _investment!= address(0),
+            "Formation.Fi: zero address"
+        );
+
+        investment = _investment;
+    } 
+
+    function setSafeHouse(address _safeHouse) external onlyOwner {
+        require(
+            _safeHouse!= address(0),
+            "Formation.Fi: zero address"
+        );
+
+        safeHouse = _safeHouse;
+    } 
+
+    function setCancel(bool _cancel) external onlyManager {
+        isCancel= _cancel;
+    }
+  
+    function setLockupPeriodUser(uint256 _lockupPeriodUser) external onlyManager {
+        lockupPeriodUser = _lockupPeriodUser;
+    }
+ 
+    function setDepositFeeRate(uint256 _rate) external onlyManager {
+        depositFeeRate= _rate;
+    }
+
+    function setDepositFeeRateParity(uint256 _rate) external onlyManager {
+        depositFeeRateParity= _rate;
+    }
+
+    function setManagementFeeRate(uint256 _rate) external onlyManager {
+        managementFeeRate = _rate;
+    }
+
+    function setPerformanceFeeRate(uint256 _rate) external onlyManager {
+        performanceFeeRate  = _rate;
+    }
+    function setMinAmount(uint256 _minAmount) external onlyManager {
+        minAmount= _minAmount;
+     }
+
+    function updateTokenPrice(uint256 _price) external onlyManager {
+        require(
+             _price > 0,
+            "Formation.Fi: zero price"
+        );
+
+        tokenPrice = _price;
+    }
+
+    function updateTokenPriceMean(uint256 _price) external onlyinvestment {
+        require(
+             _price > 0,
+            "Formation.Fi: zero price"
+        );
+        tokenPriceMean  = _price;
+    }
+
+    function updateManagementFeeTime(uint256 _time) external onlyinvestment {
+        managementFeesTime = _time;
+    }
+    
+
+     /**
+     * @dev Calculate performance Fees.
+     */
+    function calculatePerformanceFees() external onlyManager {
+        require(performanceFees == 0, "Formation.Fi: fees on pending");
+
+        uint256 _deltaPrice = 0;
+        if (tokenPrice > tokenPriceMean) {
+            _deltaPrice = tokenPrice - tokenPriceMean;
+            tokenPriceMean = tokenPrice;
+            performanceFees = (token.totalSupply() *
+            _deltaPrice * performanceFeeRate) / (tokenPrice * FACTOR_FEES_DECIMALS); 
+        }
+    }
+
+    
+     /**
+     * @dev Calculate management Fees.
+     */
+    function calculateManagementFees() external onlyManager {
+        require(managementFees == 0, "Formation.Fi: fees on pending");
+        if (managementFeesTime!= 0){
+           uint256 _deltaTime;
+           _deltaTime = block.timestamp -  managementFeesTime; 
+           managementFees = (token.totalSupply() * managementFeeRate * _deltaTime ) 
+           /(FACTOR_FEES_DECIMALS * SECONDES_PER_YEAR);
+           managementFeesTime = block.timestamp; 
+        }
+    }
+     
+    /**
+     * @dev Mint Fees.
+     */
+    function mintFees() external onlyManager {
+        require ((performanceFees + managementFees) > 0, "Formation.Fi: zero fees");
+
+        token.mint(treasury, performanceFees + managementFees);
+        performanceFees = 0;
+        managementFees = 0;
+    }
+
+    /**
+     * @dev Calculate net deposit indicator
+     * @param _depositAmountTotal the total requested deposit amount by users.
+     * @param  _withdrawalAmountTotal the total requested withdrawal amount by users.
+     * @param _maxDepositAmount the maximum accepted deposit amount by event.
+     * @param _maxWithdrawalAmount the maximum accepted withdrawal amount by event.
+     * @return net Deposit indicator: 1 if net deposit case, 0 otherwise (net withdrawal case).
+     */
+    function calculateNetDepositInd(uint256 _depositAmountTotal, 
+        uint256 _withdrawalAmountTotal, uint256 _maxDepositAmount, 
+        uint256 _maxWithdrawalAmount) external onlyinvestment returns( uint256) {
+        _depositAmountTotal = Math.min(  _depositAmountTotal,
+         _maxDepositAmount);
+        _withdrawalAmountTotal =  (_withdrawalAmountTotal * tokenPrice) / FACTOR_PRICE_DECIMALS;
+        _withdrawalAmountTotal= Math.min(_withdrawalAmountTotal,
+        _maxWithdrawalAmount);
+        uint256  _depositAmountTotalAfterFees = _depositAmountTotal - 
+        ( _depositAmountTotal * depositFeeRate)/ FACTOR_FEES_DECIMALS;
+        if  ( _depositAmountTotalAfterFees >= _withdrawalAmountTotal ){
+            netDepositInd = 1 ;
+        }
+        else {
+            netDepositInd = 0;
+        }
+        return netDepositInd;
+    }
+
+    /**
+     * @dev Calculate net amount 
+     * @param _depositAmountTotal the total requested deposit amount by users.
+     * @param _withdrawalAmountTotal the total requested withdrawal amount by users.
+     * @param _maxDepositAmount the maximum accepted deposit amount by event.
+     * @param _maxWithdrawalAmount the maximum accepted withdrawal amount by event.
+     * @return net amount.
+     */
+    function calculateNetAmountEvent(uint256 _depositAmountTotal, 
+        uint256 _withdrawalAmountTotal, uint256 _maxDepositAmount, 
+        uint256 _maxWithdrawalAmount) external onlyinvestment returns(uint256) {
+        _depositAmountTotal = Math.min(  _depositAmountTotal,
+         _maxDepositAmount);
+        _withdrawalAmountTotal =  (_withdrawalAmountTotal * tokenPrice) / FACTOR_PRICE_DECIMALS;
+        _withdrawalAmountTotal= Math.min(_withdrawalAmountTotal,
+        _maxWithdrawalAmount);
+         uint256  _depositAmountTotalAfterFees = _depositAmountTotal - 
+        ( _depositAmountTotal * depositFeeRate)/ FACTOR_FEES_DECIMALS;
+        
+        if (netDepositInd == 1) {
+             netAmountEvent =  _depositAmountTotalAfterFees - _withdrawalAmountTotal;
+        }
+        else {
+             netAmountEvent = _withdrawalAmountTotal - _depositAmountTotalAfterFees;
+        
+        }
+        return netAmountEvent;
+    }
+
+    /**
+     * @dev Protect against slippage due to assets sale.
+     * @param _withdrawalAmount the value of sold assets in Stablecoin.
+     * _withdrawalAmount has to be sent to the contract.
+     * treasury has to approve the contract for both Stablecoin and token.
+     * @return Missed amount to send to the contract due to slippage.
+     */
+    function protectAgainstSlippage(uint256 _withdrawalAmount) external onlyManager 
+        returns (uint256) {
+        require(_withdrawalAmount != 0, "Formation.Fi: zero amount");
+
+        require(netDepositInd == 0, "Formation.Fi: no slippage");
+       
+       uint256 _amount = 0; 
+       uint256 _deltaAmount =0;
+       uint256 _slippage = 0;
+       uint256  _tokenAmount = 0;
+       uint256 _balanceTokenTreasury = token.balanceOf(treasury);
+       uint256 _balanceStableTreasury = stableToken.balanceOf(treasury) * amountScaleDecimals;
+      
+        if (_withdrawalAmount< netAmountEvent){
+            _amount = netAmountEvent - _withdrawalAmount;   
+            _slippage = (_amount * FACTOR_FEES_DECIMALS ) / netAmountEvent;
+            if (_slippage >= slippageTolerance) {
+                return netAmountEvent;
+            }
+            else {
+                 _deltaAmount = Math.min( _amount, _balanceStableTreasury);
+                if ( _deltaAmount  > 0){
+                    stableToken.safeTransferFrom(treasury, investment, _deltaAmount/amountScaleDecimals);
+                    _tokenAmount = (_deltaAmount * FACTOR_PRICE_DECIMALS)/tokenPrice;
+                    token.mint(treasury, _tokenAmount);
+                    return _amount - _deltaAmount;
+                }
+                else {
+                     return _amount; 
+                }  
+            }    
+        
+        }
+        else  {
+           _amount = _withdrawalAmount - netAmountEvent;   
+          _tokenAmount = (_amount * FACTOR_PRICE_DECIMALS)/tokenPrice;
+          _tokenAmount = Math.min(_tokenAmount, _balanceTokenTreasury);
+          if (_tokenAmount >0) {
+              _deltaAmount = (_tokenAmount * tokenPrice)/FACTOR_PRICE_DECIMALS;
+              stableToken.safeTransfer(treasury, _deltaAmount/amountScaleDecimals);   
+              token.burn( treasury, _tokenAmount);
+            }
+           if ((_amount - _deltaAmount) > 0) {
+            
+              stableToken.safeTransfer(safeHouse, (_amount - _deltaAmount)/amountScaleDecimals); 
+            }
+        }
+        return 0;
+
+    } 
+
+     /**
+     * @dev Send Stablecoin from the manager to the contract.
+     * @param _amount  tha amount to send.
+     */
+    function sendStableTocontract(uint256 _amount) external 
+     onlyManager {
+      require( _amount > 0,  "Formation.Fi: zero amount");
+
+      stableToken.safeTransferFrom(msg.sender, address(this),
+       _amount/amountScaleDecimals);
+    }
+
+   
+     /**
+     * @dev Send Stablecoin from the contract to the contract investment.
+     */
+    function sendStableFromcontract() external 
+        onlyManager {
+        require(investment != address(0),
+            "Formation.Fi: zero address"
+        );
+         stableToken.safeTransfer(investment, stableToken.balanceOf(address(this)));
+    }
+  
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "../main/libraries/Math.sol";
+
+/** 
+* @author Formation.Fi.
+* @notice Implementation of the contract TokenParity.
+*/
+
+contract TokenParity is ERC721, Ownable {
+    using Math for uint256;
+
+struct Amount {
+    uint256 alpha;
+    uint256 beta;
+    uint256 gamma;
+}
+
+uint256 public constant COEFF_SCALE_DECIMALS = 1e4;
+uint256 public constant FACTOR_PRICE_DECIMALS = 1e6;
+uint256 public amountDepositTotal;
+uint256 public  index;
+Amount public  amountDeposit;
+Amount public  amountWithdraw;
+address public proxy;
+string public baseURI;
+mapping(address => Amount) public usersDeposit;
+mapping(address => Amount) public usersWithdraw;
+mapping(address => Amount) public usersToken;
+mapping(address => Amount) public usersWeights;
+mapping(address => uint256) public usersDepositTotal;
+mapping(address => uint256) public usersRisk;
+mapping(address => uint256) public usersIndex;
+mapping(address => uint256) public tokenIdPerAddress;
+mapping(address => bool) public  whitelist;
+address[] public users;
+
+event MintParity(address indexed _user, uint256 _id);
+event BurnParity(address indexed _user, uint256 _id);
+event UpdateBaseURI( string _baseURI);
+
+     constructor ( )  ERC721("ParityToken", "PARITY"){
+
+    }
+
+    modifier onlyProxy() {
+        require(
+            proxy != address(0),
+            "Formation.Fi: zero address"
+        );
+        require(msg.sender == proxy, 
+            "Formation.Fi: no proxy");
+        _;
+    }
+
+    function getTokenId(address _account) public view returns (uint256) {
+        require(
+           _account!= address(0),
+            "Formation.Fi: zero address"
+
+        );
+        return tokenIdPerAddress[_account];
+
+    }
+
+    function getUsersSize() public view  returns (uint256) {
+        return  users.length;
+    }
+
+    function getUsers() public view returns (address[] memory) {
+        return users;
+    }
+
+    function setProxy(address _proxy) public onlyOwner {
+        require(
+            _proxy != address(0),
+            "Formation.Fi: zero address"
+        );
+        proxy = _proxy;
+    }  
+
+    function setBaseURI(string calldata _tokenURI) external onlyOwner {
+        baseURI = _tokenURI;
+        emit UpdateBaseURI(_tokenURI);
+    }
+
+    function addToWhitelist(address _contract) external onlyOwner {
+        require(
+            _contract!= address(0),
+            "Formation.Fi: zero address"
+        );
+
+        whitelist[_contract] = true;
+    } 
+
+  
+    function removeFromWhitelist(address _contract) external onlyOwner {
+         require(
+            whitelist[_contract] == true,
+            "Formation.Fi: no whitelist"
+        );
+        require(
+            _contract!= address(0),
+            "Formation.Fi: zero address"
+        );
+
+        whitelist[_contract] = false;
+    } 
+
+    function setusersToken(address _user, uint256 _amount, uint256 _id) 
+        external onlyProxy {
+        require(
+            _user != address(0),
+            "Formation.Fi: zero address"
+        );
+        require(_id >= 0 && _id <= 2, 
+        "Formation.Fi: not in range");    
+        if ( _id==0){
+        usersToken[_user].alpha += _amount;
+        }
+        else if ( _id==1) {
+        usersToken[_user].beta += _amount;
+        }
+        else {
+            usersToken[_user].gamma += _amount;
+        }
+    }     
+    function setusersTokenDeposit(address _user, uint256 _amount, uint256 _id) external onlyProxy {
+        require(
+            _user!= address(0),
+            "Formation.Fi: zero address"
+        );
+        require( _id >= 0 && _id <= 2, 
+        "Formation.Fi: not in range");  
+        if ( _id==0){
+        usersDeposit[_user].alpha -= _amount;
+        amountDeposit.alpha -= _amount;
+        }
+        else if ( _id==1) {
+        usersDeposit[_user].beta -= _amount;
+        amountDeposit.beta -= _amount;
+        }
+        else{
+        usersDeposit[_user].gamma -= _amount;
+        amountDeposit.gamma -= _amount;
+        }
+        amountDepositTotal -= _amount;
+
+    }      
+
+    function setusersTokenWithdraw(address _user, uint256 _amount, uint256 _id) 
+        external onlyProxy {
+        require(
+            _user!= address(0),
+            "Formation.Fi: zero address"
+        );
+        require(_id >= 0 && _id <= 2, 
+        "Formation.Fi: not in range"); 
+        if ( _id==0){
+        usersWithdraw[_user].alpha -= _amount;
+        amountWithdraw.alpha -= _amount;
+        }
+        else if ( _id==1) {
+        usersWithdraw[_user].beta -= _amount;
+        amountWithdraw.beta -= _amount;
+        }
+        else{
+        usersWithdraw[_user].gamma -= _amount;
+        amountWithdraw.gamma -= _amount;
+        }
+    }  
+
+    function mint(address _account, uint256 _tokenId, uint256 _amount, 
+            uint256 _risk, uint256 _weightAlpha ,uint256 _weightBeta , 
+            uint256 _weightGamma ) 
+        external onlyProxy {
+        require(
+            _account!= address(0),
+            "Formation.Fi: zero address"
+        );
+        require (balanceOf(_account) == 0, "Formation.Fi: token exists");
+        tokenIdPerAddress[_account] = _tokenId;
+        users.push(_account);
+        usersIndex[_account] = index;
+        index= index + 1;
+        updateDepositData( _account, _amount, _risk, _weightAlpha , _weightBeta, 
+        _weightGamma );
+        _safeMint(_account,  _tokenId);
+        emit MintParity( _account,  _tokenId);
+
+    }
+
+    function burn( address _user, uint256 _tokenId) external onlyProxy {
+        require(
+            _user!= address(0),
+            "Formation.Fi: zero address"
+        );
+        require(usersDeposit[_user].alpha ==0 && usersDeposit[_user].beta ==0 
+        && usersDeposit[_user].gamma == 0, "Formation.Fi: deposit on pending" );
+        require(usersWithdraw[_user].alpha ==0 && usersWithdraw[_user].beta ==0 
+        && usersWithdraw[_user].gamma == 0, "Formation.Fi: withdrawal on pending");
+        require(usersToken[_user].alpha == 0 && usersToken[_user].beta == 0 
+        && usersToken[_user].gamma == 0, "Formation.Fi: withdraw tokens");
+        deleteUser(_user);
+        _burn(_tokenId); 
+        emit BurnParity(_user, _tokenId);
+    }
+
+    function updateDepositData(address _account, uint256 _amount, uint256 _risk,
+        uint256 _weightAlpha, uint256 _weightBeta, uint256 _weightGamma) 
+        public onlyProxy {
+        require(
+            _account!= address(0),
+            "Formation.Fi: zero address"
+        );
+        if ((usersWeights[_account].alpha!=0) || (usersWeights[_account].beta!=0) 
+        || (usersWeights[_account].gamma!=0) ){
+            require((usersWeights[_account].alpha ==  _weightAlpha) && 
+            (usersWeights[_account].beta == _weightBeta) &&
+            (usersWeights[_account].gamma == _weightGamma) &&
+            (usersRisk[_account] == _risk), "Formation.Fi: no user's risk");
+        }
+        else {
+            usersWeights[_account].alpha = _weightAlpha;
+            usersWeights[_account].beta = _weightBeta;
+            usersWeights[_account].gamma = _weightGamma;
+            usersRisk[_account] = _risk;
+        }
+        uint256 _alpha = (_amount * _weightAlpha) / COEFF_SCALE_DECIMALS;
+        uint256 _beta = (_amount * _weightBeta) / COEFF_SCALE_DECIMALS;
+        uint256 _gamma = (_amount * _weightGamma) / COEFF_SCALE_DECIMALS;
+        usersDeposit[_account].alpha += _alpha;
+        usersDeposit[_account].beta +=  _beta;
+        usersDeposit[_account].gamma += _gamma;
+        amountDeposit.alpha += _alpha;
+        amountDeposit.beta += _beta;
+        amountDeposit.gamma += _gamma;
+        usersDepositTotal[_account] += _amount;
+        amountDepositTotal += _amount;
+
+    }
+    function updateRisk(address _account, uint256 _weightAlpha ,uint256 _weightBeta ,
+            uint256 _weightGamma, uint256 _risk, uint256[] memory _price ) public onlyProxy { 
+            require(
+            _account!= address(0),
+            "Formation.Fi: zero address"
+             );
+            require ( (usersWeights[_account].alpha != _weightAlpha) 
+            || (usersWeights[_account].beta != _weightBeta) ||
+            (usersWeights[_account].gamma != _weightGamma) || 
+            ( usersRisk[_account]!= _risk), 
+            "Formation.Fi: same user risk" );
+            if ( (usersWeights[_account].alpha != _weightAlpha) 
+            || (usersWeights[_account].beta != _weightBeta) ||
+            (usersWeights[_account].gamma != _weightGamma)){
+            //Amount memory _usersToken = usersToken[_account];
+            Amount memory  _userDeposit = usersDeposit[_account];
+            Amount memory  _userWithdraw = usersWithdraw[_account];
+            Amount memory _value;
+            _value.alpha = ( usersToken[_account].alpha
+            - _userWithdraw.alpha) * _price[0] + _userDeposit.alpha;
+            _value.beta =   ( usersToken[_account].beta - _userWithdraw.beta) * _price[1] 
+            + _userDeposit.beta;
+            _value.gamma = (usersToken[_account].gamma - _userWithdraw.gamma) * _price[2] 
+            + _userDeposit.gamma;
+            uint256 _valueTotal = _value.alpha + _value.beta + _value.gamma;
+            uint256 _deltaAmount;
+            uint256 _newAmount;
+            uint256 _deltaDepositAmount;
+            
+            _newAmount = (_valueTotal * _weightAlpha) /COEFF_SCALE_DECIMALS;
+            if (_newAmount < _value.alpha){
+                _deltaAmount = (_value.alpha - _newAmount) / FACTOR_PRICE_DECIMALS;
+                _deltaDepositAmount = Math.min( _userDeposit.alpha,
+                _deltaAmount);
+                usersDeposit[_account].alpha -= _deltaDepositAmount;
+                amountDeposit.alpha -= _deltaDepositAmount;
+                amountDepositTotal -= _deltaDepositAmount;
+                _deltaAmount -=  _deltaDepositAmount;
+                _deltaAmount = (_deltaAmount/_price[0]) * FACTOR_PRICE_DECIMALS ;
+                usersWithdraw[_account].alpha += _deltaAmount;
+                amountWithdraw.alpha += _deltaAmount;
+            }
+            else{
+               _deltaAmount = (_newAmount - _value.alpha) / FACTOR_PRICE_DECIMALS;
+               usersDeposit[_account].alpha += _deltaAmount;
+               amountDeposit.alpha += _deltaAmount;
+               amountDepositTotal += _deltaAmount;
+            }
+
+            _newAmount = (_valueTotal *_weightBeta) /COEFF_SCALE_DECIMALS;
+            if (_newAmount < _value.beta){
+                _deltaAmount = (_value.beta - _newAmount) / FACTOR_PRICE_DECIMALS ;
+                _deltaDepositAmount = Math.min( _userDeposit.beta,
+                _deltaAmount);
+                usersDeposit[_account].beta -= _deltaDepositAmount ;
+                amountDeposit.beta -= _deltaDepositAmount;
+                amountDepositTotal -= _deltaDepositAmount;
+                _deltaAmount -= _deltaDepositAmount;
+                _deltaAmount = (_deltaAmount/_price[1]) * FACTOR_PRICE_DECIMALS ;
+                usersWithdraw[_account].beta += _deltaAmount;
+                amountWithdraw.beta += _deltaAmount;
+            }
+           else {
+
+               _deltaAmount = (_newAmount - _value.beta) / FACTOR_PRICE_DECIMALS ;
+               usersDeposit[_account].beta += _deltaAmount;
+               amountDeposit.beta += _deltaAmount;
+               amountDepositTotal += _deltaAmount;
+            }       
+
+            _newAmount = (_valueTotal *_weightGamma) /COEFF_SCALE_DECIMALS;
+
+            if (_newAmount < _value.gamma){
+                _deltaAmount = (_value.gamma - _newAmount) / FACTOR_PRICE_DECIMALS;
+                _deltaDepositAmount = Math.min( _userDeposit.gamma,
+                _deltaAmount);
+                usersDeposit[_account].gamma -= _deltaDepositAmount;
+                amountDeposit.gamma -= _deltaDepositAmount;
+                amountDepositTotal -= _deltaDepositAmount;
+                _deltaAmount -= _deltaDepositAmount;
+                _deltaAmount = (_deltaAmount/_price[2]) * FACTOR_PRICE_DECIMALS;
+                usersWithdraw[_account].gamma += _deltaAmount;
+                amountWithdraw.gamma += _deltaAmount;
+            }
+
+            else{
+
+               _deltaAmount = (_newAmount - _value.gamma ) / FACTOR_PRICE_DECIMALS;
+               usersDeposit[_account].gamma += _deltaAmount;
+               amountDeposit.gamma += _deltaAmount;
+               amountDepositTotal += _deltaAmount;
+            }       
+
+            usersWeights[_account].alpha = _weightAlpha;
+            usersWeights[_account].beta = _weightBeta;
+            usersWeights[_account].gamma = _weightGamma;
+    }
+
+    if (usersRisk[_account]!= _risk){
+        usersRisk[_account]= _risk;
+       } 
+
+    }
+    function updateWithdrawtData(address _account, uint256 _rate) 
+        external onlyProxy {
+        require(
+            _account!= address(0),
+            "Formation.Fi: zero address"
+        );
+        Amount memory _usersToken = usersToken[ _account];
+        if (_usersToken.alpha >0 ){
+            uint256 _alpha = (_usersToken.alpha * _rate)/FACTOR_PRICE_DECIMALS;
+            usersWithdraw[_account].alpha += _alpha;
+            amountWithdraw.alpha += _alpha;
+        }
+
+        if (_usersToken.beta >0 ){
+            uint256 _beta = (_usersToken.beta * _rate)/FACTOR_PRICE_DECIMALS;
+            usersWithdraw[_account].beta += _beta;
+            amountWithdraw.beta += _beta;
+
+        }
+
+        if (_usersToken.gamma >0 ){
+            uint256 _gamma = (_usersToken.gamma * _rate)/FACTOR_PRICE_DECIMALS;
+            usersWithdraw[_account].gamma += _gamma;
+            amountWithdraw.gamma += _gamma;
+        }
+        //if ( _taux == COEFF_SCALE_DECIMALS ){
+           // burn(_tokenId);
+    }  
+
+    function deleteUser(address _account) internal {
+        require(
+           _account!= address(0),
+           "Formation.Fi: zero address"
+        );
+        uint256 _index = usersIndex[_account];
+        uint256 size = users.length -1;
+        users[_index] = users[size];
+        users.pop();
+        delete usersDeposit[_account];
+        delete usersWithdraw[_account];
+        delete usersWeights[_account];
+        delete usersDepositTotal[_account];
+        delete usersRisk[_account];
+        delete usersIndex[_account];
+        delete tokenIdPerAddress[_account];    
+        delete usersToken[_account];
+
+    }
+
+    function _beforeTokenTransfer(
+       address from,
+       address to,
+       uint256 tokenId
+    )   internal virtual override {
+        if ((to != address(0)) && (from != address(0))){
+            require ((to != proxy), 
+            "Formation.Fi: proxy address"
+            );
+            usersToken[to] = usersToken[from];
+            usersDeposit[to] = usersDeposit[from];
+            usersWithdraw[to] =  usersWithdraw[from];
+            usersWeights[to] = usersWeights[from];
+            usersDepositTotal[to] = usersDepositTotal[from];
+            usersRisk[to] = usersRisk[from];
+            usersIndex[to] = usersIndex[from];
+            users[usersIndex[to]] = to;
+            tokenIdPerAddress[to] = tokenId;
+            delete usersDeposit[from];
+            delete usersWithdraw[from];
+            delete usersWeights[from];
+            delete usersDepositTotal[from];
+            delete usersIndex[from];
+            delete usersRisk[from];
+            delete usersToken[from];
+
+        }
+ }
+
+    function _baseURI() internal view override returns (string memory) {
+        return baseURI;
+    }
+
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "../main/libraries/Math.sol";
+import "../main/Investment.sol";
+import "../main/Admin.sol";
+import "./TokenParity.sol";
+
+/** 
+* @author Formation.Fi.
+* @notice Implementation of the contract AdminParity.
+*/
+
+contract AdminParity is Ownable {
+    
+    struct Amount {
+        uint256 alpha;
+        uint256 beta;
+        uint256 gamma;
+    }
+    uint256 public tolerance = 1e3; 
+    uint256 public minAmount= 1000 * 1e18;
+    address public manager;
+    address public investment;
+    Amount public totalAmountToken;
+    Amount public totalAmountStable;
+    Amount public netDepositInd;
+    Amount public netAmountEvent; 
+    Amount public amountDepositTotalOld;
+    Amount public amountWithdrawTotalOld;
+    Admin public adminAlpha;
+    Admin public adminBeta;
+    Admin public adminGamma;
+    TokenParity public token;
+    constructor( address _manager,
+     address _token, address _adminAlpha, address _adminBeta, address _adminGamma) {
+        require(
+            _manager != address(0),
+            "Formation.Fi: zero address"
+        );
+
+        require(
+           _token != address(0),
+            "Formation.Fi:  zero address"
+        );
+
+         require(
+            _adminAlpha != address(0),
+            "Formation.Fi:  zero address"
+        );
+        require(
+            _adminBeta != address(0),
+            "Formation.Fi: zero address"
+        );
+        require(
+            _adminGamma != address(0),
+            "Formation.Fi: zero address"
+        );
+
+        manager = _manager;
+        adminAlpha = Admin(_adminAlpha);
+        adminBeta = Admin(_adminBeta);
+        adminGamma = Admin(_adminGamma);
+        token = TokenParity(_token);
+    }
+
+    modifier onlyInvestment() {
+        require(investment != address(0),
+            "Formation.Fi:  zero address"
+        );
+
+        require(msg.sender == investment,
+             "Formation.Fi:  not investement"
+        );
+        _;
+    }
+
+    modifier onlyManager() {
+        require(msg.sender == manager, 
+        "Formation.Fi: not manager");
+        _;
+    }
+
+     /**
+     * @dev Setter functions to update the Portfolio Parameters.
+     */
+    function setManager(address _manager) external onlyOwner {
+        require(
+            _manager != address(0),
+            "Formation.Fi: zero address"
+        );
+
+        manager = _manager;
+    }
+
+     function setMinAmount(uint256 _minAmount) external onlyManager {
+        minAmount= _minAmount;
+     }
+
+    function setInvestment(address _investment) external onlyOwner {
+        require(
+            _investment!= address(0),
+            "Formation.Fi: zero address"
+        );
+
+        investment = _investment;
+    }
+    
+    function setAmountDepositTotalOld(uint256 _id) external onlyInvestment{
+        require(0 <=_id && _id <=2, 
+            "Formation.Fi: not in range"
+        );
+        if (_id ==0){
+           amountDepositTotalOld.alpha = 0;
+        }
+        else if (_id ==1){
+           amountDepositTotalOld.beta = 0;
+        }
+        else 
+        {
+            amountDepositTotalOld.gamma = 0;
+        }
+       
+    }
+
+    function setAmountWithdrawTotalOld(uint256 _id) external onlyInvestment {
+        require(0 <=_id && _id <=2, 
+            "Formation.Fi: not in range"
+        );
+        if (_id ==0){
+           amountWithdrawTotalOld.alpha = 0;
+        }
+        else if (_id ==1){
+           amountWithdrawTotalOld.beta = 0;
+        }
+        else 
+        {
+            amountWithdrawTotalOld.gamma = 0;
+        }
+       
+    }
+
+    function calculateNetDepositAmountAlpha() external onlyInvestment 
+        returns (uint256 _feesParity) {
+        require(amountDepositTotalOld.alpha <= tolerance && amountWithdrawTotalOld.alpha <= tolerance,
+        "Formation.Fi: event on pending");
+        (uint256 _alphaAmountDepositTotal, , ) = token.amountDeposit();
+        (uint256 _alphaAmountWithdrawTotal, , ) = token.amountWithdraw();
+        amountDepositTotalOld.alpha = _alphaAmountDepositTotal;
+        amountWithdrawTotalOld.alpha = _alphaAmountWithdrawTotal;
+        uint256 _alphaPrice = adminAlpha.tokenPrice();
+        uint256 _factorPriceDecimals = adminAlpha.FACTOR_PRICE_DECIMALS();
+        uint256 _factorFeesDecimals = adminAlpha.FACTOR_FEES_DECIMALS();
+        uint256 _feeRateParity = adminAlpha.depositFeeRateParity();
+        
+        
+        uint256 _fees = ( _alphaAmountDepositTotal * _feeRateParity)
+                / _factorFeesDecimals;
+        uint256 _alphaAmountDepositTotalAfterFees = _alphaAmountDepositTotal - _fees;
+        uint256 _alphaAmountWithdrawTotalStable = _alphaAmountWithdrawTotal * _alphaPrice
+                /_factorPriceDecimals;
+        if  ( _alphaAmountDepositTotalAfterFees >= _alphaAmountWithdrawTotalStable) {
+             netDepositInd.alpha = 1 ;
+             netAmountEvent.alpha =  _alphaAmountDepositTotalAfterFees - _alphaAmountWithdrawTotalStable;
+             totalAmountStable.alpha = _alphaAmountWithdrawTotalStable;
+             totalAmountToken.alpha = _alphaAmountWithdrawTotal;
+
+            if (_alphaAmountWithdrawTotalStable >0){
+              uint256 _depositFees = (netAmountEvent.alpha * _feeRateParity)
+                /_factorFeesDecimals;
+             netAmountEvent.alpha += _depositFees;
+             _feesParity = _fees - _depositFees;
+             }
+             else {
+              netAmountEvent.alpha += _fees;
+              _feesParity =0;
+             }
+             
+        }
+        else {
+            netDepositInd.alpha = 0;
+            netAmountEvent.alpha = ((_alphaAmountWithdrawTotalStable - _alphaAmountDepositTotalAfterFees) * _factorFeesDecimals)
+                / _alphaPrice;
+            totalAmountStable.alpha =  _alphaAmountDepositTotalAfterFees;
+            totalAmountToken.alpha = ( _alphaAmountDepositTotalAfterFees * _factorFeesDecimals)
+                / _alphaPrice;
+            _feesParity = _fees;
+        }
+
+    }
+
+    function calculateNetDepositAmountBeta() external onlyInvestment 
+        returns (uint256 _feesParity){
+        require(amountDepositTotalOld.beta <= tolerance && amountWithdrawTotalOld.beta <= tolerance,
+        "Formation.Fi: event on pending");
+        ( ,uint256 _betaAmountDepositTotal, ) = token.amountDeposit();
+        ( ,uint256 _betaAmountWithdrawTotal, ) = token.amountWithdraw();
+        amountDepositTotalOld.beta = _betaAmountDepositTotal;
+        amountWithdrawTotalOld.beta = _betaAmountWithdrawTotal;
+        uint256 _betaPrice = adminBeta.tokenPrice();
+        uint256 _factorPriceDecimals = adminBeta.FACTOR_PRICE_DECIMALS();
+        uint256 _factorFeesDecimals = adminBeta.FACTOR_FEES_DECIMALS();
+        uint256 _feeRateParity = adminBeta.depositFeeRateParity();
+        
+        uint256 _fees = ( _betaAmountDepositTotal * _feeRateParity)
+                / _factorFeesDecimals;
+        uint256 _betaAmountDepositTotalAfterFees = _betaAmountDepositTotal - _fees;
+        uint256 _betaAmountWithdrawTotalStable = (_betaAmountWithdrawTotal * _betaPrice
+                /_factorPriceDecimals);
+        if  ( _betaAmountDepositTotalAfterFees >= _betaAmountWithdrawTotalStable) {
+             netDepositInd.beta = 1 ;
+             netAmountEvent.beta =  _betaAmountDepositTotalAfterFees  -  _betaAmountWithdrawTotalStable;
+             totalAmountStable.beta = _betaAmountWithdrawTotalStable;
+             totalAmountToken.beta = _betaAmountWithdrawTotal;
+            if (_betaAmountWithdrawTotalStable >0){
+              uint256 _depositFees = (netAmountEvent.beta * _feeRateParity)
+                /_factorFeesDecimals;
+             netAmountEvent.beta += _depositFees;
+             _feesParity = _fees - _depositFees;
+            }
+             else {
+              netAmountEvent.beta += _fees;
+              _feesParity =0;
+            }
+        }
+
+        else {
+            netDepositInd.beta = 0;
+            netAmountEvent.beta = ((_betaAmountWithdrawTotalStable - _betaAmountDepositTotalAfterFees) * _factorFeesDecimals)
+                / _betaPrice;
+            totalAmountStable.beta =  _betaAmountDepositTotalAfterFees;
+            totalAmountToken.beta = ( _betaAmountDepositTotalAfterFees * _factorFeesDecimals)
+                / _betaPrice;
+            _feesParity = _fees;
+        }
+
+    }      
+
+    function calculateNetDepositAmountGamma() external onlyInvestment 
+        returns (uint256 _feesParity) {
+        require(amountDepositTotalOld.gamma <= tolerance && amountWithdrawTotalOld.gamma <= tolerance,
+        "Formation.Fi: event on pending");
+        ( , , uint256 _gammaAmountDepositTotal) = token.amountDeposit();
+        (, ,  uint256 _gammaAmountWithdrawTotal ) = token.amountWithdraw();
+        amountDepositTotalOld.gamma = _gammaAmountDepositTotal;
+        amountWithdrawTotalOld.gamma = _gammaAmountWithdrawTotal;
+        uint256 _gammaPrice = adminGamma.tokenPrice();
+        uint256 _factorPriceDecimals = adminGamma.FACTOR_PRICE_DECIMALS();
+        uint256 _factorFeesDecimals = adminGamma.FACTOR_FEES_DECIMALS();
+        uint256 _feeRateParity = adminGamma.depositFeeRateParity();
+
+        uint256 _fees = ( _gammaAmountDepositTotal * _feeRateParity)
+                / _factorFeesDecimals;
+        uint256 _gammaAmountDepositTotalAfterFees = _gammaAmountDepositTotal - _fees;
+        uint256 _gammaAmountWithdrawTotalStable = _gammaAmountWithdrawTotal * _gammaPrice 
+                /_factorPriceDecimals;
+        if  ( _gammaAmountDepositTotalAfterFees >= _gammaAmountWithdrawTotalStable) {
+             netDepositInd.gamma = 1 ;
+             netAmountEvent.gamma =  _gammaAmountDepositTotalAfterFees  -  _gammaAmountWithdrawTotalStable;
+             totalAmountStable.gamma = _gammaAmountWithdrawTotalStable;
+             totalAmountToken.gamma = _gammaAmountWithdrawTotal;
+            if (_gammaAmountWithdrawTotalStable >0){
+              uint256 _depositFees = (netAmountEvent.gamma * _feeRateParity)
+                /_factorFeesDecimals;
+             netAmountEvent.gamma += _depositFees;
+             _feesParity = _fees - _depositFees;
+             }
+             else {
+              netAmountEvent.gamma += _fees;
+              _feesParity =0;
+             }
+
+        }
+
+        else {
+            netDepositInd.gamma = 0;
+            netAmountEvent.gamma = ((_gammaAmountWithdrawTotalStable - _gammaAmountDepositTotalAfterFees) * _factorFeesDecimals)
+                / _gammaPrice;
+            totalAmountStable.gamma +=  _gammaAmountDepositTotalAfterFees;
+            totalAmountToken.gamma += ( _gammaAmountDepositTotalAfterFees * _factorPriceDecimals)
+                / _gammaPrice ;
+            _feesParity = _fees;
+        }
+
+    }   
+
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+
+interface IBEP20 {
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the token decimals.
+     */
+    function decimals() external view returns (uint8);
+
+    /**
+     * @dev Returns the token symbol.
+     */
+    function symbol() external view returns (string memory);
+
+    /**
+     * @dev Returns the token name.
+     */
+    function name() external view returns (string memory);
+
+    /**
+     * @dev Returns the bep token owner.
+     */
+    function getOwner() external view returns (address);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `recipient`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address recipient, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address _owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `sender` to `recipient` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) external returns (bool);
+
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.0;
+
+// CAUTION
+// This version of SafeMath should only be used with Solidity 0.8 or later,
+// because it relies on the compiler's built in overflow checks.
+
+/**
+ * @dev Wrappers over Solidity's arithmetic operations.
+ *
+ * NOTE: `SafeMath` is no longer needed starting with Solidity 0.8. The compiler
+ * now has built in overflow checking.
+ */
+library SafeMath {
+    /**
+     * @dev Returns the addition of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryAdd(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            uint256 c = a + b;
+            if (c < a) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the substraction of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function trySub(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b > a) return (false, 0);
+            return (true, a - b);
+        }
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMul(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            // Gas optimization: this is cheaper than requiring 'a' not being zero, but the
+            // benefit is lost if 'b' is also tested.
+            // See: https://github.com/OpenZeppelin/openzeppelin-contracts/pull/522
+            if (a == 0) return (true, 0);
+            uint256 c = a * b;
+            if (c / a != b) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the division of two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryDiv(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a / b);
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMod(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a % b);
+        }
+    }
+
+    /**
+     * @dev Returns the addition of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `+` operator.
+     *
+     * Requirements:
+     *
+     * - Addition cannot overflow.
+     */
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting on
+     * overflow (when the result is negative).
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a - b;
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `*` operator.
+     *
+     * Requirements:
+     *
+     * - Multiplication cannot overflow.
+     */
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a * b;
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator.
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a / b;
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting when dividing by zero.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a % b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting with custom message on
+     * overflow (when the result is negative).
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {trySub}.
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b <= a, errorMessage);
+            return a - b;
+        }
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting with custom message on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator. Note: this function uses a
+     * `revert` opcode (which leaves remaining gas untouched) while Solidity
+     * uses an invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a / b;
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting with custom message when dividing by zero.
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {tryMod}.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a % b;
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Collection of functions related to the address type
+ */
+library Address {
+    /**
+     * @dev Returns true if `account` is a contract.
+     *
+     * [IMPORTANT]
+     * ====
+     * It is unsafe to assume that an address for which this function returns
+     * false is an externally-owned account (EOA) and not a contract.
+     *
+     * Among others, `isContract` will return false for the following
+     * types of addresses:
+     *
+     *  - an externally-owned account
+     *  - a contract in construction
+     *  - an address where a contract will be created
+     *  - an address where a contract lived, but was destroyed
+     * ====
+     */
+    function isContract(address account) internal view returns (bool) {
+        // This method relies on extcodesize, which returns 0 for contracts in
+        // construction, since the code is only stored at the end of the
+        // constructor execution.
+
+        uint256 size;
+        assembly {
+            size := extcodesize(account)
+        }
+        return size > 0;
+    }
+
+    /**
+     * @dev Replacement for Solidity's `transfer`: sends `amount` wei to
+     * `recipient`, forwarding all available gas and reverting on errors.
+     *
+     * https://eips.ethereum.org/EIPS/eip-1884[EIP1884] increases the gas cost
+     * of certain opcodes, possibly making contracts go over the 2300 gas limit
+     * imposed by `transfer`, making them unable to receive funds via
+     * `transfer`. {sendValue} removes this limitation.
+     *
+     * https://diligence.consensys.net/posts/2019/09/stop-using-soliditys-transfer-now/[Learn more].
+     *
+     * IMPORTANT: because control is transferred to `recipient`, care must be
+     * taken to not create reentrancy vulnerabilities. Consider using
+     * {ReentrancyGuard} or the
+     * https://solidity.readthedocs.io/en/v0.5.11/security-considerations.html#use-the-checks-effects-interactions-pattern[checks-effects-interactions pattern].
+     */
+    function sendValue(address payable recipient, uint256 amount) internal {
+        require(address(this).balance >= amount, "Address: insufficient balance");
+
+        (bool success, ) = recipient.call{value: amount}("");
+        require(success, "Address: unable to send value, recipient may have reverted");
+    }
+
+    /**
+     * @dev Performs a Solidity function call using a low level `call`. A
+     * plain `call` is an unsafe replacement for a function call: use this
+     * function instead.
+     *
+     * If `target` reverts with a revert reason, it is bubbled up by this
+     * function (like regular Solidity function calls).
+     *
+     * Returns the raw returned data. To convert to the expected return value,
+     * use https://solidity.readthedocs.io/en/latest/units-and-global-variables.html?highlight=abi.decode#abi-encoding-and-decoding-functions[`abi.decode`].
+     *
+     * Requirements:
+     *
+     * - `target` must be a contract.
+     * - calling `target` with `data` must not revert.
+     *
+     * _Available since v3.1._
+     */
+    function functionCall(address target, bytes memory data) internal returns (bytes memory) {
+        return functionCall(target, data, "Address: low-level call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`], but with
+     * `errorMessage` as a fallback revert reason when `target` reverts.
+     *
+     * _Available since v3.1._
+     */
+    function functionCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, 0, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but also transferring `value` wei to `target`.
+     *
+     * Requirements:
+     *
+     * - the calling contract must have an ETH balance of at least `value`.
+     * - the called Solidity function must be `payable`.
+     *
+     * _Available since v3.1._
+     */
+    function functionCallWithValue(
+        address target,
+        bytes memory data,
+        uint256 value
+    ) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, value, "Address: low-level call with value failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCallWithValue-address-bytes-uint256-}[`functionCallWithValue`], but
+     * with `errorMessage` as a fallback revert reason when `target` reverts.
+     *
+     * _Available since v3.1._
+     */
+    function functionCallWithValue(
+        address target,
+        bytes memory data,
+        uint256 value,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        require(address(this).balance >= value, "Address: insufficient balance for call");
+        require(isContract(target), "Address: call to non-contract");
+
+        (bool success, bytes memory returndata) = target.call{value: value}(data);
+        return verifyCallResult(success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but performing a static call.
+     *
+     * _Available since v3.3._
+     */
+    function functionStaticCall(address target, bytes memory data) internal view returns (bytes memory) {
+        return functionStaticCall(target, data, "Address: low-level static call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-string-}[`functionCall`],
+     * but performing a static call.
+     *
+     * _Available since v3.3._
+     */
+    function functionStaticCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal view returns (bytes memory) {
+        require(isContract(target), "Address: static call to non-contract");
+
+        (bool success, bytes memory returndata) = target.staticcall(data);
+        return verifyCallResult(success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but performing a delegate call.
+     *
+     * _Available since v3.4._
+     */
+    function functionDelegateCall(address target, bytes memory data) internal returns (bytes memory) {
+        return functionDelegateCall(target, data, "Address: low-level delegate call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-string-}[`functionCall`],
+     * but performing a delegate call.
+     *
+     * _Available since v3.4._
+     */
+    function functionDelegateCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        require(isContract(target), "Address: delegate call to non-contract");
+
+        (bool success, bytes memory returndata) = target.delegatecall(data);
+        return verifyCallResult(success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Tool to verifies that a low level call was successful, and revert if it wasn't, either by bubbling the
+     * revert reason using the provided one.
+     *
+     * _Available since v4.3._
+     */
+    function verifyCallResult(
+        bool success,
+        bytes memory returndata,
+        string memory errorMessage
+    ) internal pure returns (bytes memory) {
+        if (success) {
+            return returndata;
+        } else {
+            // Look for revert reason and bubble it up if present
+            if (returndata.length > 0) {
+                // The easiest way to bubble the revert reason is using memory via assembly
+
+                assembly {
+                    let returndata_size := mload(returndata)
+                    revert(add(32, returndata), returndata_size)
+                }
+            } else {
+                revert(errorMessage);
+            }
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.0;
+
+import "../utils/Context.sol";
+
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owner.
+     */
+    constructor() {
+        _setOwner(_msgSender());
+    }
+
+    /**
+     * @dev Returns the address of the current owner.
+     */
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    /**
+     * @dev Throws if called by any account other than the owner.
+     */
+    modifier onlyOwner() {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    /**
+     * @dev Leaves the contract without owner. It will not be possible to call
+     * `onlyOwner` functions anymore. Can only be called by the current owner.
+     *
+     * NOTE: Renouncing ownership will leave the contract without an owner,
+     * thereby removing any functionality that is only available to the owner.
+     */
+    function renounceOwnership() public virtual onlyOwner {
+        _setOwner(address(0));
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Can only be called by the current owner.
+     */
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _setOwner(newOwner);
+    }
+
+    function _setOwner(address newOwner) private {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "./BEP20.sol";
+import "./libraries/Math.sol";
+
+/** 
+* @author Formation.Fi.
+* @notice  A common Implementation for tokens ALPHA, BETA and GAMMA.
+*/
+
+contract Token is BEP20 {
+    struct Deposit{
+        uint256 amount;
+        uint256 time;
+    }
+    address public proxyInvestement;
+    address private proxyAdmin;
+
+    mapping(address => Deposit[]) public depositPerAddress;
+    mapping(address => bool) public  whitelist;
+    event SetProxyInvestement(address  _address);
+    constructor(string memory _name, string memory _symbol) 
+    BEP20(_name,  _symbol) {
+    }
+
+    modifier onlyProxy() {
+        require(
+            (proxyInvestement != address(0)) && (proxyAdmin != address(0)),
+            "Formation.Fi: zero address"
+        );
+
+        require(
+            (msg.sender == proxyInvestement) || (msg.sender == proxyAdmin),
+             "Formation.Fi: not the proxy"
+        );
+        _;
+    }
+    modifier onlyProxyInvestement() {
+        require(proxyInvestement != address(0),
+            "Formation.Fi: zero address"
+        );
+
+        require(msg.sender == proxyInvestement,
+             "Formation.Fi: not the proxy"
+        );
+        _;
+    }
+
+     /**
+     * @dev Update the proxyInvestement.
+     * @param _proxyInvestement.
+     * @notice Emits a {SetProxyInvestement} event with `_proxyInvestement`.
+     */
+    function setProxyInvestement(address _proxyInvestement) external onlyOwner {
+        require(
+            _proxyInvestement!= address(0),
+            "Formation.Fi: zero address"
+        );
+
+         proxyInvestement = _proxyInvestement;
+
+        emit SetProxyInvestement( _proxyInvestement);
+
+    } 
+
+    /**
+     * @dev Add a contract address to the whitelist
+     * @param _contract The address of the contract.
+     */
+    function addToWhitelist(address _contract) external onlyOwner {
+        require(
+            _contract!= address(0),
+            "Formation.Fi: zero address"
+        );
+
+        whitelist[_contract] = true;
+    } 
+
+    /**
+     * @dev Remove a contract address from the whitelist
+     * @param _contract The address of the contract.
+     */
+    function removeFromWhitelist(address _contract) external onlyOwner {
+         require(
+            whitelist[_contract] == true,
+            "Formation.Fi: no whitelist"
+        );
+        require(
+            _contract!= address(0),
+            "Formation.Fi: zero address"
+        );
+
+        whitelist[_contract] = false;
+    } 
+
+    /**
+     * @dev Update the proxyAdmin.
+     * @param _proxyAdmin.
+     */
+    function setAdmin(address _proxyAdmin) external onlyOwner {
+        require(
+            _proxyAdmin!= address(0),
+            "Formation.Fi: zero address"
+        );
+        
+         proxyAdmin = _proxyAdmin;
+    } 
+
+
+    
+    /**
+     * @dev add user's deposit.
+     * @param _account The user's address.
+     * @param _amount The user's deposit amount.
+     * @param _time The deposit time.
+     */
+    function addDeposit(address _account, uint256 _amount, uint256 _time) 
+        external onlyProxyInvestement {
+        require(
+            _account!= address(0),
+            "Formation.Fi: zero address"
+        );
+
+        require(
+            _amount!= 0,
+            "Formation.Fi: zero amount"
+        );
+
+        require(
+            _time!= 0,
+            "Formation.Fi: zero time"
+        );
+        Deposit memory _deposit = Deposit(_amount, _time); 
+        depositPerAddress[_account].push(_deposit);
+    } 
+
+     /**
+     * @dev mint the token product for the user.
+     * @notice To receive the token product, the user has to deposit 
+     * the required StableCoin in this product. 
+     * @param _account The user's address.
+     * @param _amount The amount to be minted.
+     */
+    function mint(address _account, uint256 _amount) external onlyProxy {
+        require(
+          _account!= address(0),
+           "Formation.Fi: zero address"
+        );
+
+        require(
+            _amount!= 0,
+            "Formation.Fi: zero amount"
+        );
+
+       _mint(_account,  _amount);
+   }
+
+    /**
+     * @dev burn the token product of the user.
+     * @notice When the user withdraws his Stablecoins, his tokens 
+     * product are burned. 
+     * @param _account The user's address.
+     * @param _amount The amount to be burned.
+     */
+    function burn(address _account, uint256 _amount) external onlyProxy {
+        require(
+            _account!= address(0),
+            "Formation.Fi: zero address"
+        );
+
+         require(
+            _amount!= 0,
+            "Formation.Fi: zero amount"
+        );
+
+        _burn( _account, _amount);
+    }
+    
+     /**
+     * @dev Verify the lock up condition for a user's withdrawal request.
+     * @param _account The user's address.
+     * @param _amount The amount to be withdrawn.
+     * @param _period The lock up period.
+     * @return _success  is true if the lock up condition is satisfied.
+     */
+    function checklWithdrawalRequest(address _account, uint256 _amount, uint256 _period) 
+        external view returns (bool _success){
+        require(
+            _account!= address(0),
+            "Formation.Fi: zero address"
+        );
+
+        require(
+           _amount!= 0,
+            "Formation.Fi: zero amount"
+        );
+
+        Deposit[] memory _deposit = depositPerAddress[_account];
+        uint256 _amountTotal = 0;
+        for (uint256 i = 0; i < _deposit.length; i++) {
+             require ((block.timestamp - _deposit[i].time) >= _period, 
+            "Formation.Fi:  position locked");
+            if (_amount<= (_amountTotal + _deposit[i].amount)){
+                break; 
+            }
+            _amountTotal = _amountTotal + _deposit[i].amount;
+        }
+        _success= true;
+    }
+
+
+     /**
+     * @dev update the user's token data.
+     * @notice this function is called after each desposit request 
+     * validation by the manager.
+     * @param _account The user's address.
+     * @param _amount The deposit amount validated by the manager.
+     */
+    function updateTokenData( address _account,  uint256 _amount) 
+        external onlyProxyInvestement {
+        _updateTokenData(_account,  _amount);
+    }
+
+    function _updateTokenData( address _account,  uint256 _amount) internal {
+        require(
+            _account!= address(0),
+            "Formation.Fi: zero address"
+        );
+
+        require(
+            _amount!= 0,
+            "Formation.Fi: zero amount"
+        );
+
+        Deposit[] memory _deposit = depositPerAddress[_account];
+        uint256 _amountlocal = 0;
+        uint256 _amountTotal = 0;
+        uint256 _newAmount;
+        uint256 k =0;
+        for (uint256 i = 0; i < _deposit.length; i++) {
+            _amountlocal  = Math.min(_deposit[i].amount, _amount -  _amountTotal);
+            _amountTotal = _amountTotal + _amountlocal;
+            _newAmount = _deposit[i].amount - _amountlocal;
+            depositPerAddress[_account][k].amount = _newAmount;
+            if (_newAmount == 0){
+               _deleteTokenData(_account, k);
+            }
+            else {
+                k = k+1;
+            }
+            if (_amountTotal == _amount){
+               break; 
+            }
+        }
+    }
+    
+     /**
+     * @dev delete the user's token data.
+     * @notice This function is called when the user's withdrawal request is  
+     * validated by the manager.
+     * @param _account The user's address.
+     * @param _index The index of the user in 'amountDepositPerAddress'.
+     */
+    function _deleteTokenData(address _account, uint256 _index) internal {
+        require(
+            _account!= address(0),
+            "Formation.Fi: zero address"
+        );
+        uint256 _size = depositPerAddress[_account].length - 1;
+        
+        require( _index <= _size,
+            "Formation.Fi: index is out"
+        );
+        for (uint256 i = _index; i< _size; i++){
+            depositPerAddress[ _account][i] = depositPerAddress[ _account][i+1];
+        }
+        depositPerAddress[ _account].pop();   
+    }
+   
+     /**
+     * @dev update the token data of both the sender and the receiver 
+       when the product token is transferred.
+     * @param from The sender's address.
+     * @param to The receiver's address.
+     * @param amount The transferred amount.
+     */
+    function _afterTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+      ) internal virtual override{
+      
+       if ((to != address(0)) && (to != proxyInvestement) 
+       && (to != proxyAdmin) && (from != address(0)) && (!whitelist[to])){
+          _updateTokenData(from, amount);
+          Deposit memory _deposit = Deposit(amount, block.timestamp);
+          depositPerAddress[to].push(_deposit);
+         
+        }
+    }
+
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "./libraries/Data.sol";
+
+
+/** 
+* @author Formation.Fi.
+* @notice The Implementation of the user's deposit proof token {ERC721}.
+*/
+
+contract DepositConfirmation is ERC721, Ownable {
+    struct PendingDeposit {
+        Data.State state;
+        uint256 amount;
+        uint256 listPointer;
+    }
+    uint256 public tolerance = 1e3; 
+    address public proxyInvestement;
+    string public baseURI;
+    mapping(address => uint256) private tokenIdPerAddress;
+    mapping(address => PendingDeposit) public pendingDepositPerAddress;
+    address[] public usersOnPendingDeposit;
+    event MintDeposit(address indexed _address, uint256 _id);
+    event BurnDeposit(address indexed _address, uint256 _id);
+    event UpdateBaseURI( string _baseURI);
+
+    constructor(string memory _name , string memory _symbol)  
+    ERC721 (_name,  _symbol){
+    }
+
+    modifier onlyProxy() {
+        require(
+            proxyInvestement != address(0),
+            "Formation.Fi: zero address"
+        );
+
+        require(msg.sender == proxyInvestement, "Formation.Fi: not the proxy");
+        _;
+    }
+    
+     /**
+     * @dev get the token id of user's address.
+     * @param _account The user's address.
+     * @return token id.
+     */
+    function getTokenId(address _account) external view returns (uint256) {
+        require(
+           _account!= address(0),
+            "Formation.Fi: zero address"
+        );
+
+        return tokenIdPerAddress[_account];
+    }
+
+     /**
+     * @dev get the number of users.
+     * @return number of users.
+     */
+    function getUsersSize() external view  returns (uint256) {
+        return usersOnPendingDeposit.length;
+    }
+    
+     /**
+     * @dev get addresses of users on deposit pending.
+     * @return  addresses of users.
+     */
+    function getUsers() external view returns (address[] memory) {
+        return usersOnPendingDeposit;
+    }
+
+     /**
+     * @dev update the proxy.
+     * @param _proxyInvestement the new proxy.
+     */
+    function setProxy(address _proxyInvestement) external onlyOwner {
+        require(
+            _proxyInvestement != address(0),
+            "Formation.Fi: zero address"
+        );
+
+        proxyInvestement = _proxyInvestement;
+    }    
+
+    /**
+     * @dev update the Metadata URI
+     * @param _tokenURI the Metadata URI.
+     */
+    function setBaseURI(string calldata _tokenURI) external onlyOwner {
+        baseURI = _tokenURI;
+        emit UpdateBaseURI(_tokenURI);
+    }
+
+     /**
+     * @dev mint the deposit proof ERC721 token.
+     * @notice the user receives this token when he makes 
+     * a deposit request.
+     * Each user's address can at most have one deposit proof token.
+     * @param _account The user's address.
+     * @param _tokenId The id of the token.
+     * @param _amount The deposit amount in the requested Stablecoin.
+     * @notice Emits a {MintDeposit} event with `_account` and `_tokenId `.
+     */
+    function mint(address _account, uint256 _tokenId, uint256 _amount) 
+       external onlyProxy {
+       require (balanceOf(_account) == 0, "Formation.Fi: has deposit token");
+       _safeMint(_account,  _tokenId);
+       updateDepositData( _account,  _tokenId, _amount, true);
+       emit MintDeposit(_account, _tokenId);
+    }
+
+     /**
+     * @dev burn the deposit proof ERC721 token.
+     * @notice the token is burned  when the manager fully validates
+     * the user's deposit request.
+     * @param _tokenId The id of the token.
+     * @notice Emits a {BurnDeposit} event with `owner` and `_tokenId `.
+     */
+    function burn(uint256 _tokenId) internal {
+        address owner = ownerOf(_tokenId);
+        require (pendingDepositPerAddress[owner].state != Data.State.PENDING,
+        "Formation.Fi: is on pending");
+        _deleteDepositData(owner);
+        _burn(_tokenId); 
+        emit BurnDeposit(owner, _tokenId);
+    }
+     
+     /**
+     * @dev update the user's deposit data.
+     * @notice this function is called after each desposit request 
+     * by the user or after each validation by the manager.
+     * @param _account The user's address.
+     * @param _tokenId The depoist proof token id.
+     * @param _amount  The deposit amount to be added or removed.
+     * @param isAddCase  = 1 when the user makes a deposit request.
+     * = 0, when the manager validates the user's deposit request.
+     */
+    function updateDepositData(address _account, uint256 _tokenId, 
+        uint256 _amount, bool isAddCase) public onlyProxy {
+        require (_exists(_tokenId), "Formation.Fi: no token");
+        require (ownerOf(_tokenId) == _account , "Formation.Fi:  not owner");
+        if( _amount > 0){
+           if (isAddCase){
+              if(pendingDepositPerAddress[_account].amount == 0){
+                  pendingDepositPerAddress[_account].state = Data.State.PENDING;
+                  pendingDepositPerAddress[_account].listPointer = usersOnPendingDeposit.length;
+                  tokenIdPerAddress[_account] = _tokenId;
+                  usersOnPendingDeposit.push(_account);
+                }
+                pendingDepositPerAddress[_account].amount +=  _amount;
+            }
+            else {
+               require(pendingDepositPerAddress[_account].amount >= _amount, 
+               "Formation Fi: not enough amount");
+               uint256 _newAmount = pendingDepositPerAddress[_account].amount - _amount;
+               pendingDepositPerAddress[_account].amount = _newAmount;
+               if (_newAmount <= tolerance){
+                  pendingDepositPerAddress[_account].state = Data.State.NONE;
+                  burn(_tokenId);
+                }
+            }
+        }
+    }    
+
+    
+     /**
+     * @dev delete the user's deposit proof token data.
+     * @notice this function is called when the user's deposit request is fully 
+     * validated by the manager.
+     * @param _account The user's address.
+     */
+    function _deleteDepositData(address _account) internal {
+        require(
+           _account!= address(0),
+            "Formation.Fi: zero address"
+        );
+
+         uint256 _index = pendingDepositPerAddress[_account].listPointer;
+         address _lastUser = usersOnPendingDeposit[usersOnPendingDeposit.length - 1];
+         usersOnPendingDeposit[_index] = _lastUser;
+         pendingDepositPerAddress[_lastUser].listPointer = _index;
+         usersOnPendingDeposit.pop();
+         delete pendingDepositPerAddress[_account]; 
+         delete tokenIdPerAddress[_account];    
+    }
+
+     /**
+     * @dev update the deposit token proof data of both the sender and the receiver 
+       when the token is transferred.
+     * @param from The sender's address.
+     * @param to The receiver's address.
+     * @param tokenId The deposit token proof id.
+     */
+    function _beforeTokenTransfer(
+       address from,
+       address to,
+       uint256 tokenId
+    )   internal virtual override {
+        if ((to != address(0)) && (from != address(0))){
+            uint256 indexFrom = pendingDepositPerAddress[from].listPointer;
+            pendingDepositPerAddress[to] = pendingDepositPerAddress[from];
+            pendingDepositPerAddress[from].state = Data.State.NONE;
+            pendingDepositPerAddress[from].amount = 0;
+            usersOnPendingDeposit[indexFrom] = to; 
+            tokenIdPerAddress[to] = tokenId;
+            delete pendingDepositPerAddress[from];
+            delete tokenIdPerAddress[from];
+        }
+    }
+     /**
+     * @dev Get the Metadata URI
+     */
+    function _baseURI() internal view override returns (string memory) {
+        return baseURI;
+    }
+      
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "./libraries/Data.sol";
+
+/** 
+* @author Formation.Fi.
+* @notice The Implementation of the user's withdrawal proof token {ERC721}.
+*/
+
+contract WithdrawalConfirmation is ERC721, Ownable { 
+    struct PendingWithdrawal {
+        Data.State state;
+        uint256 amount;
+        uint256 listPointer;
+    }
+    uint256 public tolerance = 1e3;
+    address public proxyInvestement; 
+    string public baseURI;
+    mapping(address => uint256) private tokenIdPerAddress;
+    mapping(address => PendingWithdrawal) public pendingWithdrawPerAddress;
+    address[] public usersOnPendingWithdraw;
+    event MintWithdrawal(address indexed _address, uint256 _id);
+    event BurnWithdrawal(address indexed _address, uint256 _id);
+    event UpdateBaseURI( string _baseURI);
+
+    constructor(string memory _name , string memory _symbol)  
+    ERC721 (_name,  _symbol){
+    }
+
+    modifier onlyProxy() {
+        require(
+            proxyInvestement != address(0),
+            "Formation.Fi: zero address"
+        );
+
+        require(msg.sender == proxyInvestement, "Formation.Fi: not the proxy");
+         _;
+    }
+
+     /**
+     * @dev get the token id of user's address.
+     * @param _account The user's address.
+     * @return token id.
+     */
+    function getTokenId(address _account) external view returns (uint256) {
+        return tokenIdPerAddress[ _account];
+    }
+
+      /**
+     * @dev get the number of users.
+     * @return number of users.
+     */
+     function getUsersSize() external view returns (uint256) {
+        return usersOnPendingWithdraw.length;
+    }
+
+    /**
+     * @dev get addresses of users on withdrawal pending.
+     * @return  addresses of users.
+     */
+    function getUsers() public view returns (address[] memory) {
+        return usersOnPendingWithdraw;
+    }
+
+    /**
+     * @dev update the proxy.
+     * @param _proxyInvestement the new proxy.
+     */
+    function setProxy(address _proxyInvestement) public onlyOwner {
+        require(
+            _proxyInvestement != address(0),
+            "Formation.Fi: zero address"
+        );
+
+        proxyInvestement = _proxyInvestement;
+    }    
+
+    /**
+     * @dev update the Metadata URI
+     * @param _tokenURI the Metadata URI.
+     */
+    function setBaseURI(string calldata _tokenURI) external onlyOwner {
+        baseURI = _tokenURI;
+        emit UpdateBaseURI(_tokenURI);
+    }
+    
+    /**
+     * @dev mint the withdrawal proof ERC721 token.
+     * @notice the user receives this token when he makes 
+     * a withdrawal request.
+     * Each user's address can at most have one withdrawal proof token.
+     * @param _account The user's address.
+     * @param _tokenId The id of the token.
+     * @param _amount The withdrawal amount in the product token.
+     * @notice Emits a {MintWithdrawal} event with `_account` and `_tokenId `.
+     */
+    function mint(address _account, uint256 _tokenId, uint256 _amount) 
+       external onlyProxy {
+       require (balanceOf( _account) == 0, "Formation.Fi:  has withdrawal token");
+       _safeMint(_account,  _tokenId);
+       tokenIdPerAddress[_account] = _tokenId;
+       updateWithdrawalData (_account,  _tokenId,  _amount, true);
+       emit MintWithdrawal(_account, _tokenId);
+    }
+
+     /**
+     * @dev burn the withdrawal proof ERC721 token.
+     * @notice the token is burned  when the manager fully validates
+     * the user's withdrawal request.
+     * @param _tokenId The id of the token.
+     * @notice Emits a {BurnWithdrawal} event with `owner` and `_tokenId `.
+     */
+    function burn(uint256 _tokenId) internal {
+        address owner = ownerOf(_tokenId);
+        require (pendingWithdrawPerAddress[owner].state != Data.State.PENDING, 
+        "Formation.Fi: is on pending");
+        _deleteWithdrawalData(owner);
+        _burn(_tokenId);   
+        emit BurnWithdrawal(owner, _tokenId);
+    }
+
+    /**
+     * @dev update the user's withdrawal data.
+     * @notice this function is called after the withdrawal request 
+     * by the user or after each validation by the manager.
+     * @param _account The user's address.
+     * @param _tokenId The withdrawal proof token id.
+     * @param _amount  The withdrawal amount to be added or removed.
+     * @param isAddCase  = 1 when teh user makes a withdrawal request.
+     * = 0, when the manager validates the user's withdrawal request.
+     */
+    function updateWithdrawalData (address _account, uint256 _tokenId, 
+        uint256 _amount, bool isAddCase) public onlyProxy {
+
+        require (_exists(_tokenId), "Formation Fi: no token");
+
+        require (ownerOf(_tokenId) == _account , 
+         "Formation.Fi: not owner");
+
+        if( _amount > 0){
+            if (isAddCase){
+               pendingWithdrawPerAddress[_account].state = Data.State.PENDING;
+               pendingWithdrawPerAddress[_account].amount = _amount;
+               pendingWithdrawPerAddress[_account].listPointer = usersOnPendingWithdraw.length;
+               usersOnPendingWithdraw.push(_account);
+            }
+            else {
+               require(pendingWithdrawPerAddress[_account].amount >= _amount, 
+               "Formation.Fi: not enough amount");
+               uint256 _newAmount = pendingWithdrawPerAddress[_account].amount - _amount;
+               pendingWithdrawPerAddress[_account].amount = _newAmount;
+               if (_newAmount <= tolerance){
+                   pendingWithdrawPerAddress[_account].state = Data.State.NONE;
+                   burn(_tokenId);
+                }
+            }     
+       }
+    }
+
+    /**
+     * @dev delete the user's withdrawal proof token data.
+     * @notice this function is called when the user's withdrawal request is fully 
+     * validated by the manager.
+     * @param _account The user's address.
+     */
+    function _deleteWithdrawalData(address _account) internal {
+        require(
+          _account!= address(0),
+          "Formation.Fi: zero address"
+        );
+        uint256 _index = pendingWithdrawPerAddress[_account].listPointer;
+        address _lastUser = usersOnPendingWithdraw[usersOnPendingWithdraw.length -1];
+        usersOnPendingWithdraw[_index] = _lastUser ;
+        pendingWithdrawPerAddress[_lastUser].listPointer = _index;
+        usersOnPendingWithdraw.pop();
+        delete pendingWithdrawPerAddress[_account]; 
+        delete tokenIdPerAddress[_account];    
+    }
+
+     /**
+     * @dev update the withdrawal token proof data of both the sender and the receiver 
+       when the token is transferred.
+     * @param from The sender's address.
+     * @param to The receiver's address.
+     * @param tokenId The withdrawal token proof id.
+     */
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 tokenId
+    ) internal virtual override {
+       if ((to != address(0)) && (from != address(0))){
+          uint256 indexFrom = pendingWithdrawPerAddress[from].listPointer;
+          pendingWithdrawPerAddress[to] = pendingWithdrawPerAddress[from];
+          pendingWithdrawPerAddress[from].state = Data.State.NONE;
+          pendingWithdrawPerAddress[from].amount =0;
+          usersOnPendingWithdraw[indexFrom] = to; 
+          tokenIdPerAddress[to] = tokenId;
+          delete pendingWithdrawPerAddress[from];
+          delete tokenIdPerAddress[from];
+        }
+    }
+    
+    /**
+     * @dev Get the Metadata URI
+     */
+    function _baseURI() internal view override returns (string memory) {
+        return baseURI;
+    }
+   
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+//import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import "../utils/Pausable.sol";
+import "./libraries/SafeBEP20.sol";
+import "./libraries/Math.sol";
+import "./Assets.sol";
+import "./Admin.sol";
+
+
+/** 
+* @author Formation.Fi.
+* @notice Implementation of the contract SafeHouse.
+*/
+
+contract SafeHouse is  Pausable {
+    using SafeBEP20 for IBEP20;
+    using Math for uint256;
+    uint256 public constant  FACTOR_DECIMALS = 8;
+    uint256 public constant STABLE_DECIMALS = 1e18;
+    uint256 public maxWithdrawalStatic = 1000000 * 1e18;
+    uint256 public maxWithdrawalDynamic =  1000000 * 1e18; 
+    uint256 public  tolerance;
+    mapping(address => bool) public vaultsList;
+    Assets public assets;
+    Admin public admin;
+    constructor( address _assets, address _admin) payable {
+        require(
+            _assets != address(0),
+            "Formation.Fi: zero address"
+        );
+        require(
+            _admin != address(0),
+            "Formation.Fi: zero address"
+        );
+        assets = Assets(_assets);
+
+        admin = Admin(_admin);
+    }
+   
+
+    modifier onlyManager() {
+        address _manager = admin.manager();
+        require(msg.sender == _manager, "Formation.Fi: no manager");
+        _;
+    }
+
+
+     /**
+     * @dev Setter functions.
+     */
+     function setMaxWithdrawalStatic( uint256 _maxWithdrawalStatic) external onlyOwner {
+     maxWithdrawalStatic = _maxWithdrawalStatic;
+     }
+    
+    function setMaxWithdrawalDynamic( uint256 _maxWithdrawalDynamic) external onlyOwner {
+     maxWithdrawalDynamic = _maxWithdrawalDynamic;
+     }
+
+    function setTolerance( uint256 _tolerance) external  onlyOwner {
+     tolerance = _tolerance;
+    }
+
+    function setAdmin(address _admin) external onlyOwner {
+        require(
+            _admin != address(0),
+            "Formation.Fi: zero address"
+        );
+        
+        admin = Admin(_admin);
+    } 
+
+    /**
+     * @dev Add a vault address the manager.
+     * @param  _vault vault'address.
+     */
+    function addVault( address _vault) external onlyOwner {
+        require(
+            _vault != address(0),
+            "Formation.Fi: zero address"
+        );
+        vaultsList[_vault] = true; 
+     }
+
+    /**
+     * @dev Remove a vault address the manager.
+     * @param  _vault vault'address.
+     */
+    function removeVault( address _vault) external onlyOwner {
+        require(
+            vaultsList[_vault]== true,
+            "Formation.Fi: no vault"
+        );
+        vaultsList[_vault] = false; 
+     }
+    
+     /**
+     * @dev Send an asset to the contract by the manager.
+     * @param _asset asset'address.
+     * @param _amount amount to send.
+     */
+    function sendAsset( address _asset, uint256 _amount) 
+        external whenNotPaused onlyManager payable {
+        uint256 _index =  assets.getIndex(_asset);
+        uint256 _price;
+        uint256 _decimals;
+        uint256 _decimalsPrice;
+        address _oracle;
+        ( , _oracle, _price, _decimals ) = assets.assets(_index);
+        (_price, _decimalsPrice) = getLatestPrice( _asset, _oracle, _price);
+      
+        maxWithdrawalDynamic = Math.min(maxWithdrawalDynamic + (_amount * _price) / (10 ** _decimalsPrice),
+        maxWithdrawalStatic);
+
+
+        if ( _asset == address(0)) {
+          require (_amount == msg.value, "Formation.Fi: wrong amount");
+        }
+        else {
+            uint256 _scale;
+            _scale = Math.max((STABLE_DECIMALS/ 10 ** _decimals), 1);
+            IBEP20 asset = IBEP20(_asset);
+            asset.safeTransferFrom(msg.sender, address(this), _amount/_scale); 
+        }
+        
+    }
+
+    /**
+     * @dev Withdraw an asset from the contract by the manager.
+     * @param _asset asset'address.
+     * @param _amount amount to send.
+     */
+    function withdrawAsset( address _asset, uint256 _amount) external whenNotPaused onlyManager {
+        uint256 _index =  assets.getIndex(_asset);
+        uint256 _price;
+        uint256 _decimals;
+        uint256 _decimalsPrice;
+        address _oracle;
+        ( , _oracle, _price, _decimals ) = assets.assets(_index);
+        (_price, _decimalsPrice) = getLatestPrice( _asset, _oracle, _price);
+        uint256 _delta = (_amount * _price)  / (10 ** _decimalsPrice);
+        require ( Math.min(maxWithdrawalDynamic, maxWithdrawalStatic) >= _delta , "Formation.Fi: maximum withdrawal");
+        maxWithdrawalDynamic = maxWithdrawalDynamic  - _delta  + (_delta * tolerance)/(10 ** FACTOR_DECIMALS);
+         if ( _asset == address(0)) {
+         payable(msg.sender).transfer(_amount);
+        }
+        else {
+        uint256 _scale;
+        _scale = Math.max((STABLE_DECIMALS/ 10 **_decimals), 1);
+        IBEP20 asset = IBEP20(_asset);
+        asset.safeTransfer(msg.sender, _amount/_scale);   
+        } 
+
+    }
+
+    /**
+     * @dev Get the asset's price.
+     * @param _asset asset'address.
+     * @param _oracle oracle'address.
+     * @param _price asset'price.
+     * @return price
+     */
+
+    function getLatestPrice( address _asset, address _oracle, uint256 _price) public view returns (uint256, uint256) {
+        require (assets.isWhitelist(_asset) ==true, "Formation.Fi: not asset");
+        if (_oracle == address(0)) {
+            return (_price, FACTOR_DECIMALS);
+        }
+        else {
+        AggregatorV3Interface  priceFeed = AggregatorV3Interface(_oracle);
+        (
+            /*uint80 roundID*/,
+            int price,
+            /*uint startedAt*/,
+            /*uint timeStamp*/,
+            /*uint80 answeredInRound*/
+        ) = priceFeed.latestRoundData();
+        uint8 _decimals = priceFeed.decimals();
+        return (uint256(price), _decimals);
+        }   
+    }
+
+     /**
+     * @dev Send an asset to the vault.
+     * @param _asset asset'address.
+     * @param _vault vault'address.
+     * @param _amount to send.
+     */
+    function sendToVault( address _asset, address _vault,  uint256 _amount) external
+        whenNotPaused onlyManager {
+        require (_vault !=address(0) , "Formation.Fi: zero address");
+        require (vaultsList[_vault] == true , "Formation.Fi: no vault");
+        uint256 _index =  assets.getIndex(_asset);
+        uint256 _decimals;
+        ( , , , _decimals ) = assets.assets(_index);
+        if ( _asset == address(0)){
+           require (_amount <= address(this).balance , 
+           "Formation.Fi: balance limit");
+           payable (_vault).transfer(_amount);
+        }
+        else{
+            uint256 _scale;
+            _scale = Math.max((STABLE_DECIMALS/ 10 ** _decimals), 1);
+            IBEP20 asset = IBEP20(_asset);
+           require ((_amount/_scale) <= asset.balanceOf(address(this)) , "Formation.Fi: balance limit");
+           asset.transfer(_vault, _amount/_scale);   
+        
+        }
+    }
+
+
+    fallback() external payable {
+     
+    }
+
+     receive() external payable {
+       
+    }
+
+
+    
+       
+
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+import "@openzeppelin/contracts/access/Ownable.sol";
+import  "@openzeppelin/contracts/utils/Context.sol";
+import './IBEP20.sol';
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
+
+/**
+ * @dev Implementation of the {IBEP20} interface.
+ *
+ * This implementation is agnostic to the way tokens are created. This means
+ * that a supply mechanism has to be added in a derived contract using {_mint}.
+ * For a generic mechanism see {BEP20PresetMinterPauser}.
+ *
+ * TIP: For a detailed writeup see our guide
+ * https://forum.zeppelin.solutions/t/how-to-implement-BEP20-supply-mechanisms/226[How
+ * to implement supply mechanisms].
+ *
+ * We have followed general OpenZeppelin guidelines: functions revert instead
+ * of returning `false` on failure. This behavior is nonetheless conventional
+ * and does not conflict with the expectations of BEP20 applications.
+ *
+ * Additionally, an {Approval} event is emitted on calls to {transferFrom}.
+ * This allows applications to reconstruct the allowance for all accounts just
+ * by listening to said events. Other implementations of the EIP may not emit
+ * these events, as it isn't required by the specification.
+ *
+ * Finally, the non-standard {decreaseAllowance} and {increaseAllowance}
+ * functions have been added to mitigate the well-known issues around setting
+ * allowances. See {IBEP20-approve}.
+ */
+contract BEP20 is Context, IBEP20, Ownable {
+    using SafeMath for uint256;
+    using Address for address;
+
+    mapping(address => uint256) private _balances;
+
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    uint256 private _totalSupply;
+
+    string private _name;
+    string private _symbol;
+    uint8 private _decimals;
+
+    /**
+     * @dev Sets the values for {name} and {symbol}, initializes {decimals} with
+     * a default value of 18.
+     *
+     * To select a different value for {decimals}, use {_setupDecimals}.
+     *
+     * All three of these values are immutable: they can only be set once during
+     * construction.
+     */
+    constructor(string memory name, string memory symbol) public {
+        _name = name;
+        _symbol = symbol;
+        _decimals = 18;
+    }
+
+    /**
+     * @dev Returns the bep token owner.
+     */
+    function getOwner() external override view returns (address) {
+        return owner();
+    }
+
+    /**
+     * @dev Returns the token name.
+     */
+    function name() public override view returns (string memory) {
+        return _name;
+    }
+
+    /**
+     * @dev Returns the token decimals.
+     */
+    function decimals() public override view returns (uint8) {
+        return _decimals;
+    }
+
+    /**
+     * @dev Returns the token symbol.
+     */
+    function symbol() public override view returns (string memory) {
+        return _symbol;
+    }
+
+    /**
+     * @dev See {BEP20-totalSupply}.
+     */
+    function totalSupply() public override view returns (uint256) {
+        return _totalSupply;
+    }
+
+    /**
+     * @dev See {BEP20-balanceOf}.
+     */
+    function balanceOf(address account) public override view returns (uint256) {
+        return _balances[account];
+    }
+
+    /**
+     * @dev See {BEP20-transfer}.
+     *
+     * Requirements:
+     *
+     * - `recipient` cannot be the zero address.
+     * - the caller must have a balance of at least `amount`.
+     */
+    function transfer(address recipient, uint256 amount) public override returns (bool) {
+        _transfer(_msgSender(), recipient, amount);
+        return true;
+    }
+
+    /**
+     * @dev See {BEP20-allowance}.
+     */
+    function allowance(address owner, address spender) public override view returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    /**
+     * @dev See {BEP20-approve}.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     */
+    function approve(address spender, uint256 amount) public override returns (bool) {
+        _approve(_msgSender(), spender, amount);
+        return true;
+    }
+
+    /**
+     * @dev See {BEP20-transferFrom}.
+     *
+     * Emits an {Approval} event indicating the updated allowance. This is not
+     * required by the EIP. See the note at the beginning of {BEP20};
+     *
+     * Requirements:
+     * - `sender` and `recipient` cannot be the zero address.
+     * - `sender` must have a balance of at least `amount`.
+     * - the caller must have allowance for `sender`'s tokens of at least
+     * `amount`.
+     */
+    function transferFrom(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) public override returns (bool) {
+        _transfer(sender, recipient, amount);
+        _approve(
+            sender,
+            _msgSender(),
+            _allowances[sender][_msgSender()].sub(amount, 'BEP20: transfer amount exceeds allowance')
+        );
+        return true;
+    }
+
+    /**
+     * @dev Atomically increases the allowance granted to `spender` by the caller.
+     *
+     * This is an alternative to {approve} that can be used as a mitigation for
+     * problems described in {BEP20-approve}.
+     *
+     * Emits an {Approval} event indicating the updated allowance.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     */
+    function increaseAllowance(address spender, uint256 addedValue) public returns (bool) {
+        _approve(_msgSender(), spender, _allowances[_msgSender()][spender].add(addedValue));
+        return true;
+    }
+
+    /**
+     * @dev Atomically decreases the allowance granted to `spender` by the caller.
+     *
+     * This is an alternative to {approve} that can be used as a mitigation for
+     * problems described in {BEP20-approve}.
+     *
+     * Emits an {Approval} event indicating the updated allowance.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     * - `spender` must have allowance for the caller of at least
+     * `subtractedValue`.
+     */
+    function decreaseAllowance(address spender, uint256 subtractedValue) public returns (bool) {
+        _approve(
+            _msgSender(),
+            spender,
+            _allowances[_msgSender()][spender].sub(subtractedValue, 'BEP20: decreased allowance below zero')
+        );
+        return true;
+    }
+
+
+    /**
+     * @dev Moves tokens `amount` from `sender` to `recipient`.
+     *
+     * This is internal function is equivalent to {transfer}, and can be used to
+     * e.g. implement automatic token fees, slashing mechanisms, etc.
+     *
+     * Emits a {Transfer} event.
+     *
+     * Requirements:
+     *
+     * - `sender` cannot be the zero address.
+     * - `recipient` cannot be the zero address.
+     * - `sender` must have a balance of at least `amount`.
+     */
+    function _transfer(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) internal {
+        require(sender != address(0), 'BEP20: transfer from the zero address');
+        require(recipient != address(0), 'BEP20: transfer to the zero address');
+        _beforeTokenTransfer(sender, recipient, amount);
+        _balances[sender] = _balances[sender].sub(amount, 'BEP20: transfer amount exceeds balance');
+        _balances[recipient] = _balances[recipient].add(amount);
+        emit Transfer(sender, recipient, amount);   
+       _afterTokenTransfer(sender, recipient, amount);
+    }
+
+    /** @dev Creates `amount` tokens and assigns them to `account`, increasing
+     * the total supply.
+     *
+     * Emits a {Transfer} event with `from` set to the zero address.
+     *
+     * Requirements
+     *
+     * - `to` cannot be the zero address.
+     */
+    function _mint(address account, uint256 amount) internal {
+        require(account != address(0), 'BEP20: mint to the zero address');
+
+        _totalSupply = _totalSupply.add(amount);
+        _balances[account] = _balances[account].add(amount);
+        emit Transfer(address(0), account, amount);
+    }
+
+    /**
+     * @dev Destroys `amount` tokens from `account`, reducing the
+     * total supply.
+     *
+     * Emits a {Transfer} event with `to` set to the zero address.
+     *
+     * Requirements
+     *
+     * - `account` cannot be the zero address.
+     * - `account` must have at least `amount` tokens.
+     */
+    function _burn(address account, uint256 amount) internal {
+        require(account != address(0), 'BEP20: burn from the zero address');
+
+        _balances[account] = _balances[account].sub(amount, 'BEP20: burn amount exceeds balance');
+        _totalSupply = _totalSupply.sub(amount);
+        emit Transfer(account, address(0), amount);
+    }
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the `owner`s tokens.
+     *
+     * This is internal function is equivalent to `approve`, and can be used to
+     * e.g. set automatic allowances for certain subsystems, etc.
+     *
+     * Emits an {Approval} event.
+     *
+     * Requirements:
+     *
+     * - `owner` cannot be the zero address.
+     * - `spender` cannot be the zero address.
+     */
+    function _approve(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal {
+        require(owner != address(0), 'BEP20: approve from the zero address');
+        require(spender != address(0), 'BEP20: approve to the zero address');
+
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    /**
+     * @dev Destroys `amount` tokens from `account`.`amount` is then deducted
+     * from the caller's allowance.
+     *
+     * See {_burn} and {_approve}.
+     */
+    function _burnFrom(address account, uint256 amount) internal {
+        _burn(account, amount);
+        _approve(
+            account,
+            _msgSender(),
+            _allowances[account][_msgSender()].sub(amount, 'BEP20: burn amount exceeds allowance')
+        );
+    }
+
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+
+   
+    function _afterTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.0;
+
+import "./IERC721.sol";
+import "./IERC721Receiver.sol";
+import "./extensions/IERC721Metadata.sol";
+import "../../utils/Address.sol";
+import "../../utils/Context.sol";
+import "../../utils/Strings.sol";
+import "../../utils/introspection/ERC165.sol";
+
+/**
+ * @dev Implementation of https://eips.ethereum.org/EIPS/eip-721[ERC721] Non-Fungible Token Standard, including
+ * the Metadata extension, but not including the Enumerable extension, which is available separately as
+ * {ERC721Enumerable}.
+ */
+contract ERC721 is Context, ERC165, IERC721, IERC721Metadata {
+    using Address for address;
+    using Strings for uint256;
+
+    // Token name
+    string private _name;
+
+    // Token symbol
+    string private _symbol;
+
+    // Mapping from token ID to owner address
+    mapping(uint256 => address) private _owners;
+
+    // Mapping owner address to token count
+    mapping(address => uint256) private _balances;
+
+    // Mapping from token ID to approved address
+    mapping(uint256 => address) private _tokenApprovals;
+
+    // Mapping from owner to operator approvals
+    mapping(address => mapping(address => bool)) private _operatorApprovals;
+
+    /**
+     * @dev Initializes the contract by setting a `name` and a `symbol` to the token collection.
+     */
+    constructor(string memory name_, string memory symbol_) {
+        _name = name_;
+        _symbol = symbol_;
+    }
+
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
+        return
+            interfaceId == type(IERC721).interfaceId ||
+            interfaceId == type(IERC721Metadata).interfaceId ||
+            super.supportsInterface(interfaceId);
+    }
+
+    /**
+     * @dev See {IERC721-balanceOf}.
+     */
+    function balanceOf(address owner) public view virtual override returns (uint256) {
+        require(owner != address(0), "ERC721: balance query for the zero address");
+        return _balances[owner];
+    }
+
+    /**
+     * @dev See {IERC721-ownerOf}.
+     */
+    function ownerOf(uint256 tokenId) public view virtual override returns (address) {
+        address owner = _owners[tokenId];
+        require(owner != address(0), "ERC721: owner query for nonexistent token");
+        return owner;
+    }
+
+    /**
+     * @dev See {IERC721Metadata-name}.
+     */
+    function name() public view virtual override returns (string memory) {
+        return _name;
+    }
+
+    /**
+     * @dev See {IERC721Metadata-symbol}.
+     */
+    function symbol() public view virtual override returns (string memory) {
+        return _symbol;
+    }
+
+    /**
+     * @dev See {IERC721Metadata-tokenURI}.
+     */
+    function tokenURI(uint256 tokenId) public view virtual override returns (string memory) {
+        require(_exists(tokenId), "ERC721Metadata: URI query for nonexistent token");
+
+        string memory baseURI = _baseURI();
+        return bytes(baseURI).length > 0 ? string(abi.encodePacked(baseURI, tokenId.toString())) : "";
+    }
+
+    /**
+     * @dev Base URI for computing {tokenURI}. If set, the resulting URI for each
+     * token will be the concatenation of the `baseURI` and the `tokenId`. Empty
+     * by default, can be overriden in child contracts.
+     */
+    function _baseURI() internal view virtual returns (string memory) {
+        return "";
+    }
+
+    /**
+     * @dev See {IERC721-approve}.
+     */
+    function approve(address to, uint256 tokenId) public virtual override {
+        address owner = ERC721.ownerOf(tokenId);
+        require(to != owner, "ERC721: approval to current owner");
+
+        require(
+            _msgSender() == owner || isApprovedForAll(owner, _msgSender()),
+            "ERC721: approve caller is not owner nor approved for all"
+        );
+
+        _approve(to, tokenId);
+    }
+
+    /**
+     * @dev See {IERC721-getApproved}.
+     */
+    function getApproved(uint256 tokenId) public view virtual override returns (address) {
+        require(_exists(tokenId), "ERC721: approved query for nonexistent token");
+
+        return _tokenApprovals[tokenId];
+    }
+
+    /**
+     * @dev See {IERC721-setApprovalForAll}.
+     */
+    function setApprovalForAll(address operator, bool approved) public virtual override {
+        require(operator != _msgSender(), "ERC721: approve to caller");
+
+        _operatorApprovals[_msgSender()][operator] = approved;
+        emit ApprovalForAll(_msgSender(), operator, approved);
+    }
+
+    /**
+     * @dev See {IERC721-isApprovedForAll}.
+     */
+    function isApprovedForAll(address owner, address operator) public view virtual override returns (bool) {
+        return _operatorApprovals[owner][operator];
+    }
+
+    /**
+     * @dev See {IERC721-transferFrom}.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 tokenId
+    ) public virtual override {
+        //solhint-disable-next-line max-line-length
+        require(_isApprovedOrOwner(_msgSender(), tokenId), "ERC721: transfer caller is not owner nor approved");
+
+        _transfer(from, to, tokenId);
+    }
+
+    /**
+     * @dev See {IERC721-safeTransferFrom}.
+     */
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 tokenId
+    ) public virtual override {
+        safeTransferFrom(from, to, tokenId, "");
+    }
+
+    /**
+     * @dev See {IERC721-safeTransferFrom}.
+     */
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 tokenId,
+        bytes memory _data
+    ) public virtual override {
+        require(_isApprovedOrOwner(_msgSender(), tokenId), "ERC721: transfer caller is not owner nor approved");
+        _safeTransfer(from, to, tokenId, _data);
+    }
+
+    /**
+     * @dev Safely transfers `tokenId` token from `from` to `to`, checking first that contract recipients
+     * are aware of the ERC721 protocol to prevent tokens from being forever locked.
+     *
+     * `_data` is additional data, it has no specified format and it is sent in call to `to`.
+     *
+     * This internal function is equivalent to {safeTransferFrom}, and can be used to e.g.
+     * implement alternative mechanisms to perform token transfer, such as signature-based.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `tokenId` token must exist and be owned by `from`.
+     * - If `to` refers to a smart contract, it must implement {IERC721Receiver-onERC721Received}, which is called upon a safe transfer.
+     *
+     * Emits a {Transfer} event.
+     */
+    function _safeTransfer(
+        address from,
+        address to,
+        uint256 tokenId,
+        bytes memory _data
+    ) internal virtual {
+        _transfer(from, to, tokenId);
+        require(_checkOnERC721Received(from, to, tokenId, _data), "ERC721: transfer to non ERC721Receiver implementer");
+    }
+
+    /**
+     * @dev Returns whether `tokenId` exists.
+     *
+     * Tokens can be managed by their owner or approved accounts via {approve} or {setApprovalForAll}.
+     *
+     * Tokens start existing when they are minted (`_mint`),
+     * and stop existing when they are burned (`_burn`).
+     */
+    function _exists(uint256 tokenId) internal view virtual returns (bool) {
+        return _owners[tokenId] != address(0);
+    }
+
+    /**
+     * @dev Returns whether `spender` is allowed to manage `tokenId`.
+     *
+     * Requirements:
+     *
+     * - `tokenId` must exist.
+     */
+    function _isApprovedOrOwner(address spender, uint256 tokenId) internal view virtual returns (bool) {
+        require(_exists(tokenId), "ERC721: operator query for nonexistent token");
+        address owner = ERC721.ownerOf(tokenId);
+        return (spender == owner || getApproved(tokenId) == spender || isApprovedForAll(owner, spender));
+    }
+
+    /**
+     * @dev Safely mints `tokenId` and transfers it to `to`.
+     *
+     * Requirements:
+     *
+     * - `tokenId` must not exist.
+     * - If `to` refers to a smart contract, it must implement {IERC721Receiver-onERC721Received}, which is called upon a safe transfer.
+     *
+     * Emits a {Transfer} event.
+     */
+    function _safeMint(address to, uint256 tokenId) internal virtual {
+        _safeMint(to, tokenId, "");
+    }
+
+    /**
+     * @dev Same as {xref-ERC721-_safeMint-address-uint256-}[`_safeMint`], with an additional `data` parameter which is
+     * forwarded in {IERC721Receiver-onERC721Received} to contract recipients.
+     */
+    function _safeMint(
+        address to,
+        uint256 tokenId,
+        bytes memory _data
+    ) internal virtual {
+        _mint(to, tokenId);
+        require(
+            _checkOnERC721Received(address(0), to, tokenId, _data),
+            "ERC721: transfer to non ERC721Receiver implementer"
+        );
+    }
+
+    /**
+     * @dev Mints `tokenId` and transfers it to `to`.
+     *
+     * WARNING: Usage of this method is discouraged, use {_safeMint} whenever possible
+     *
+     * Requirements:
+     *
+     * - `tokenId` must not exist.
+     * - `to` cannot be the zero address.
+     *
+     * Emits a {Transfer} event.
+     */
+    function _mint(address to, uint256 tokenId) internal virtual {
+        require(to != address(0), "ERC721: mint to the zero address");
+        require(!_exists(tokenId), "ERC721: token already minted");
+
+        _beforeTokenTransfer(address(0), to, tokenId);
+
+        _balances[to] += 1;
+        _owners[tokenId] = to;
+
+        emit Transfer(address(0), to, tokenId);
+    }
+
+    /**
+     * @dev Destroys `tokenId`.
+     * The approval is cleared when the token is burned.
+     *
+     * Requirements:
+     *
+     * - `tokenId` must exist.
+     *
+     * Emits a {Transfer} event.
+     */
+    function _burn(uint256 tokenId) internal virtual {
+        address owner = ERC721.ownerOf(tokenId);
+
+        _beforeTokenTransfer(owner, address(0), tokenId);
+
+        // Clear approvals
+        _approve(address(0), tokenId);
+
+        _balances[owner] -= 1;
+        delete _owners[tokenId];
+
+        emit Transfer(owner, address(0), tokenId);
+    }
+
+    /**
+     * @dev Transfers `tokenId` from `from` to `to`.
+     *  As opposed to {transferFrom}, this imposes no restrictions on msg.sender.
+     *
+     * Requirements:
+     *
+     * - `to` cannot be the zero address.
+     * - `tokenId` token must be owned by `from`.
+     *
+     * Emits a {Transfer} event.
+     */
+    function _transfer(
+        address from,
+        address to,
+        uint256 tokenId
+    ) internal virtual {
+        require(ERC721.ownerOf(tokenId) == from, "ERC721: transfer of token that is not own");
+        require(to != address(0), "ERC721: transfer to the zero address");
+
+        _beforeTokenTransfer(from, to, tokenId);
+
+        // Clear approvals from the previous owner
+        _approve(address(0), tokenId);
+
+        _balances[from] -= 1;
+        _balances[to] += 1;
+        _owners[tokenId] = to;
+
+        emit Transfer(from, to, tokenId);
+    }
+
+    /**
+     * @dev Approve `to` to operate on `tokenId`
+     *
+     * Emits a {Approval} event.
+     */
+    function _approve(address to, uint256 tokenId) internal virtual {
+        _tokenApprovals[tokenId] = to;
+        emit Approval(ERC721.ownerOf(tokenId), to, tokenId);
+    }
+
+    /**
+     * @dev Internal function to invoke {IERC721Receiver-onERC721Received} on a target address.
+     * The call is not executed if the target address is not a contract.
+     *
+     * @param from address representing the previous owner of the given token ID
+     * @param to target address that will receive the tokens
+     * @param tokenId uint256 ID of the token to be transferred
+     * @param _data bytes optional data to send along with the call
+     * @return bool whether the call correctly returned the expected magic value
+     */
+    function _checkOnERC721Received(
+        address from,
+        address to,
+        uint256 tokenId,
+        bytes memory _data
+    ) private returns (bool) {
+        if (to.isContract()) {
+            try IERC721Receiver(to).onERC721Received(_msgSender(), from, tokenId, _data) returns (bytes4 retval) {
+                return retval == IERC721Receiver.onERC721Received.selector;
+            } catch (bytes memory reason) {
+                if (reason.length == 0) {
+                    revert("ERC721: transfer to non ERC721Receiver implementer");
+                } else {
+                    assembly {
+                        revert(add(32, reason), mload(reason))
+                    }
+                }
+            }
+        } else {
+            return true;
+        }
+    }
+
+    /**
+     * @dev Hook that is called before any token transfer. This includes minting
+     * and burning.
+     *
+     * Calling conditions:
+     *
+     * - When `from` and `to` are both non-zero, ``from``'s `tokenId` will be
+     * transferred to `to`.
+     * - When `from` is zero, `tokenId` will be minted for `to`.
+     * - When `to` is zero, ``from``'s `tokenId` will be burned.
+     * - `from` and `to` are never both zero.
+     *
+     * To learn more about hooks, head to xref:ROOT:extending-contracts.adoc#using-hooks[Using Hooks].
+     */
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 tokenId
+    ) internal virtual {}
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+library Data {
+
+enum State {
+        NONE,
+        PENDING
+    }
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.0;
+
+import "../../utils/introspection/IERC165.sol";
+
+/**
+ * @dev Required interface of an ERC721 compliant contract.
+ */
+interface IERC721 is IERC165 {
+    /**
+     * @dev Emitted when `tokenId` token is transferred from `from` to `to`.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+
+    /**
+     * @dev Emitted when `owner` enables `approved` to manage the `tokenId` token.
+     */
+    event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId);
+
+    /**
+     * @dev Emitted when `owner` enables or disables (`approved`) `operator` to manage all of its assets.
+     */
+    event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
+
+    /**
+     * @dev Returns the number of tokens in ``owner``'s account.
+     */
+    function balanceOf(address owner) external view returns (uint256 balance);
+
+    /**
+     * @dev Returns the owner of the `tokenId` token.
+     *
+     * Requirements:
+     *
+     * - `tokenId` must exist.
+     */
+    function ownerOf(uint256 tokenId) external view returns (address owner);
+
+    /**
+     * @dev Safely transfers `tokenId` token from `from` to `to`, checking first that contract recipients
+     * are aware of the ERC721 protocol to prevent tokens from being forever locked.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `tokenId` token must exist and be owned by `from`.
+     * - If the caller is not `from`, it must be have been allowed to move this token by either {approve} or {setApprovalForAll}.
+     * - If `to` refers to a smart contract, it must implement {IERC721Receiver-onERC721Received}, which is called upon a safe transfer.
+     *
+     * Emits a {Transfer} event.
+     */
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 tokenId
+    ) external;
+
+    /**
+     * @dev Transfers `tokenId` token from `from` to `to`.
+     *
+     * WARNING: Usage of this method is discouraged, use {safeTransferFrom} whenever possible.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `tokenId` token must be owned by `from`.
+     * - If the caller is not `from`, it must be approved to move this token by either {approve} or {setApprovalForAll}.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 tokenId
+    ) external;
+
+    /**
+     * @dev Gives permission to `to` to transfer `tokenId` token to another account.
+     * The approval is cleared when the token is transferred.
+     *
+     * Only a single account can be approved at a time, so approving the zero address clears previous approvals.
+     *
+     * Requirements:
+     *
+     * - The caller must own the token or be an approved operator.
+     * - `tokenId` must exist.
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address to, uint256 tokenId) external;
+
+    /**
+     * @dev Returns the account approved for `tokenId` token.
+     *
+     * Requirements:
+     *
+     * - `tokenId` must exist.
+     */
+    function getApproved(uint256 tokenId) external view returns (address operator);
+
+    /**
+     * @dev Approve or remove `operator` as an operator for the caller.
+     * Operators can call {transferFrom} or {safeTransferFrom} for any token owned by the caller.
+     *
+     * Requirements:
+     *
+     * - The `operator` cannot be the caller.
+     *
+     * Emits an {ApprovalForAll} event.
+     */
+    function setApprovalForAll(address operator, bool _approved) external;
+
+    /**
+     * @dev Returns if the `operator` is allowed to manage all of the assets of `owner`.
+     *
+     * See {setApprovalForAll}
+     */
+    function isApprovedForAll(address owner, address operator) external view returns (bool);
+
+    /**
+     * @dev Safely transfers `tokenId` token from `from` to `to`.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `tokenId` token must exist and be owned by `from`.
+     * - If the caller is not `from`, it must be approved to move this token by either {approve} or {setApprovalForAll}.
+     * - If `to` refers to a smart contract, it must implement {IERC721Receiver-onERC721Received}, which is called upon a safe transfer.
+     *
+     * Emits a {Transfer} event.
+     */
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 tokenId,
+        bytes calldata data
+    ) external;
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.0;
+
+import "../IERC721.sol";
+
+/**
+ * @title ERC-721 Non-Fungible Token Standard, optional metadata extension
+ * @dev See https://eips.ethereum.org/EIPS/eip-721
+ */
+interface IERC721Metadata is IERC721 {
+    /**
+     * @dev Returns the token collection name.
+     */
+    function name() external view returns (string memory);
+
+    /**
+     * @dev Returns the token collection symbol.
+     */
+    function symbol() external view returns (string memory);
+
+    /**
+     * @dev Returns the Uniform Resource Identifier (URI) for `tokenId` token.
+     */
+    function tokenURI(uint256 tokenId) external view returns (string memory);
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev String operations.
+ */
+library Strings {
+    bytes16 private constant _HEX_SYMBOLS = "0123456789abcdef";
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` decimal representation.
+     */
+    function toString(uint256 value) internal pure returns (string memory) {
+        // Inspired by OraclizeAPI's implementation - MIT licence
+        // https://github.com/oraclize/ethereum-api/blob/b42146b063c7d6ee1358846c198246239e9360e8/oraclizeAPI_0.4.25.sol
+
+        if (value == 0) {
+            return "0";
+        }
+        uint256 temp = value;
+        uint256 digits;
+        while (temp != 0) {
+            digits++;
+            temp /= 10;
+        }
+        bytes memory buffer = new bytes(digits);
+        while (value != 0) {
+            digits -= 1;
+            buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
+            value /= 10;
+        }
+        return string(buffer);
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation.
+     */
+    function toHexString(uint256 value) internal pure returns (string memory) {
+        if (value == 0) {
+            return "0x00";
+        }
+        uint256 temp = value;
+        uint256 length = 0;
+        while (temp != 0) {
+            length++;
+            temp >>= 8;
+        }
+        return toHexString(value, length);
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation with fixed length.
+     */
+    function toHexString(uint256 value, uint256 length) internal pure returns (string memory) {
+        bytes memory buffer = new bytes(2 * length + 2);
+        buffer[0] = "0";
+        buffer[1] = "x";
+        for (uint256 i = 2 * length + 1; i > 1; --i) {
+            buffer[i] = _HEX_SYMBOLS[value & 0xf];
+            value >>= 4;
+        }
+        require(value == 0, "Strings: hex length insufficient");
+        return string(buffer);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.0;
+
+import "./IERC165.sol";
+
+/**
+ * @dev Implementation of the {IERC165} interface.
+ *
+ * Contracts that want to implement ERC165 should inherit from this contract and override {supportsInterface} to check
+ * for the additional interface id that will be supported. For example:
+ *
+ * ```solidity
+ * function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+ *     return interfaceId == type(MyInterface).interfaceId || super.supportsInterface(interfaceId);
+ * }
+ * ```
+ *
+ * Alternatively, {ERC165Storage} provides an easier to use but more expensive implementation.
+ */
+abstract contract ERC165 is IERC165 {
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        return interfaceId == type(IERC165).interfaceId;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC165 standard, as defined in the
+ * https://eips.ethereum.org/EIPS/eip-165[EIP].
+ *
+ * Implementers can declare support of contract interfaces, which can then be
+ * queried by others ({ERC165Checker}).
+ *
+ * For an implementation, see {ERC165}.
+ */
+interface IERC165 {
+    /**
+     * @dev Returns true if this contract implements the interface defined by
+     * `interfaceId`. See the corresponding
+     * https://eips.ethereum.org/EIPS/eip-165#how-interfaces-are-identified[EIP section]
+     * to learn more about how these ids are created.
+     *
+     * This function call must use less than 30 000 gas.
+     */
+    function supportsInterface(bytes4 interfaceId) external view returns (bool);
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+interface AggregatorV3Interface {
+  function decimals() external view returns (uint8);
+
+  function description() external view returns (string memory);
+
+  function version() external view returns (uint256);
+
+  // getRoundData and latestRoundData should both raise "No data present"
+  // if they do not have data to report, instead of returning unset values
+  // which could be misinterpreted as actual reported values.
+  function getRoundData(uint80 _roundId)
+    external
+    view
+    returns (
+      uint80 roundId,
+      int256 answer,
+      uint256 startedAt,
+      uint256 updatedAt,
+      uint80 answeredInRound
+    );
+
+  function latestRoundData()
+    external
+    view
+    returns (
+      uint80 roundId,
+      int256 answer,
+      uint256 startedAt,
+      uint256 updatedAt,
+      uint80 answeredInRound
+    );
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.4;
+import "../utils/Pausable.sol";
+import "./libraries/SafeBEP20.sol";
+import "./Admin.sol";
+
+/** 
+* @author Formation.Fi.
+* @notice Implementation of the contract Assets.
+*/
+
+contract Assets is  Pausable {
+    using SafeBEP20 for IBEP20;
+    struct Asset{
+        address  token;
+        address oracle;
+        uint256 price;
+        uint256 decimals;   
+    }
+
+    uint256 public index;
+    Asset[] public  assets;
+    mapping(address => bool) public whitelist;
+    mapping(address => uint256) public indexAsset;
+    Admin public admin;
+    constructor(address _admin) {
+         require(
+            _admin != address(0),
+            "Formation.Fi: zero address"
+        );
+         admin = Admin(_admin);
+    }
+
+
+    modifier onlyManager() {
+        address _manager = admin.manager();
+        require(msg.sender == _manager, "Formation.Fi: no manager");
+        _;
+    }
+
+    modifier onlyManagerOrOwner() {
+        address _manager = admin.manager();
+        require( (msg.sender == _manager) || ( msg.sender == owner()),
+        "Formation.Fi: no manager or owner");
+        _;
+    }
+
+    /**
+     * @dev Getter functions .
+     */
+    function isWhitelist( address _token) external view  returns (bool) {
+        return whitelist[_token];
+    }
+    function getIndex( address _token) external view  returns (uint256) {
+        return indexAsset[_token];
+    }
+
+
+     /**
+     * @dev Setter functions .
+     */
+    function setAdmin(address _admin) external onlyOwner {
+        require(
+            _admin != address(0),
+            "Formation.Fi: zero address"
+        );
+        
+        admin = Admin(_admin);
+    } 
+
+
+    /**
+     * @dev Add an asset .
+     * @param  _token The address of the asset.
+     * @param  _oracle The address of the oracle.
+     * @param  _price The price in the case where the oracle doesn't exist.
+     */
+    function addAsset( address _token, address _oracle, uint256 _price) 
+        external onlyOwner {
+        require ( whitelist[_token] == false, "Formation.Fi: Token exists");
+        if (_oracle == address(0)){
+           require(_price != 0, "zero price");
+        }
+        else {
+        require(_price == 0, "not zero price");
+        }
+        uint8 _decimals = 0;
+        if (_token!=address(0)){
+        _decimals = BEP20(_token).decimals();
+        }
+        Asset memory _asset = Asset(_token, _oracle, _price, _decimals);
+        indexAsset[_token] = index;
+        assets.push(_asset);
+        index = index +1;
+        whitelist[_token] = true;
+    }
+    
+     /**
+     * @dev Remove an asset .
+     * @param  _token The address of the asset.
+     */
+    function removeAsset( address _token) external onlyManagerOrOwner {
+        require ( whitelist[_token] == true, "Formation.Fi: no Token");
+        whitelist[_token] = false;
+    }
+
+    /**
+     * @dev update the asset's oracle .
+     * @param  _token The address of the asset.
+     * @param  _oracle The new oracle's address.
+     */
+    function updateOracle( address _token, address _oracle) external onlyOwner {
+        require ( whitelist[_token] == true, "Formation.Fi: no token");
+        uint256 _index = indexAsset[_token];
+        assets[_index].oracle = _oracle;
+    }
+
+    /**
+     * @dev update the asset's price .
+     * @param  _token The address of the asset.
+     * @param  _price The new price's address.
+     */
+    function updatePrice( address _token, uint256 _price) external onlyOwner {
+        require ( whitelist[_token] == true, "Formation.Fi: no token");
+        require ( _price != 0, "Formation.Fi: zero price");
+        uint256 _index = indexAsset[_token];
+        require (assets[_index].oracle == address(0), " no zero address");
+        assets[_index].price = _price;
+    }
+    
+}
