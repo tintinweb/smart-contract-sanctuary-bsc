@@ -1,0 +1,275 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-09-01
+*/
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+
+abstract contract Ownable is Context {
+    address private _owner;
+    event OwnershipTransferred(
+        address indexed previousOwner,
+        address indexed newOwner
+    );
+
+    constructor(address owner_) {
+        _transferOwnership(owner_);
+    }
+
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    modifier onlyOwner() {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
+
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+
+    function balanceOf(address account) external view returns (uint256);
+
+    function allowance(address owner, address spender)
+        external
+        view
+        returns (uint256);
+
+    function transfer(address recipient, uint256 amount)
+        external
+        returns (bool);
+
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    function transferFrom(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) external returns (bool);
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(
+        address indexed owner,
+        address indexed spender,
+        uint256 value
+    );
+}
+
+contract wallet is Ownable {
+    //钱包共有人
+    address[] public Partnerwallet;
+    //授权所需人数
+    uint256 public Authorize;
+
+    constructor(address[] memory _addr, uint256 _Au)
+        Ownable(0x0000000000000000000000000000000000000000)
+    {
+        Partnerwallet = _addr;
+        Authorize = _Au;
+        for (uint16 i = 0; i < _addr.length; i++) {
+            partner[_addr[i]] = true;
+        }
+    }
+
+    mapping(uint256 => address) id; //id对应代币
+    mapping(uint256 => address[]) Votedaddress; //已经投票地址
+    mapping(uint256 => address[]) Paymentaddress; //收款地址
+    mapping(uint256 => uint256[]) Receiptamount; //收款数量
+    mapping(address => uint256[]) Initiaterecord; //用户提案编号
+    mapping(address => bool) partner; //是否合伙人
+    mapping(uint => mapping(address => bool)) Whethertovote; //是否投票Whethertovote[id][address]
+    uint256 counter; //计数器
+    uint[] Allapplications; //全部提案
+    uint[] proposals; //未签名提案
+    uint[] signed; //已签名提案
+
+    function Withdrawalapplication(
+        address _token,
+        address[] memory _Payment,
+        uint256[] memory _quantity
+    ) public {
+        //判断是否是合伙人
+        require(partner[msg.sender] == true);
+        counter++;
+        id[counter] = _token;
+        //存提款地址
+        Paymentaddress[counter] = _Payment;
+        //存提现金额
+        Receiptamount[counter] = _quantity;
+        //添加个人记录
+        Initiaterecord[msg.sender].push(counter);
+        //添加到未签名提案
+        proposals.push(counter);
+        //添加到全部提案
+        Allapplications.push(counter);
+    }
+
+    function sign(uint256 index) public {
+        //到时候还需要判断 余额是否足够
+        //判断有没有投票资格
+        require(partner[msg.sender] == true);
+        //判断投票还没达标;
+        require(Votedaddress[index].length < Authorize);
+        //判断此地址是否已经投票
+        require(Whethertovote[index][msg.sender] != true);
+        //投票
+        Votedaddress[index].push(msg.sender);
+        //msg.sender投票等于真
+        Whethertovote[index][msg.sender] = true;
+        //这里判断投票是否达标   如果达标  给他们转账 即可
+        if (Votedaddress[index].length == Authorize) {
+            //这里循环转账ADD  是代币地址
+            if (id[index] == 0x0000000000000000000000000000000000000000) {
+                //转ETH
+                for (uint256 i = 0; i < Paymentaddress[index].length; i++) {
+                    payable(Paymentaddress[index][i]).transfer(
+                        Receiptamount[index][i]
+                    );
+                }
+            } else {
+                //转普通代币
+                IERC20 token = IERC20(id[index]);
+                for (uint256 i = 0; i < Paymentaddress[index].length; i++) {
+                    token.transfer(
+                        Paymentaddress[index][i],
+                        Receiptamount[index][i]
+                    );
+                }
+            }
+            //添加到已完结投票里面
+            signed.push(index);
+            //把已经完结的删除
+            //先找到他 proposals  然后再删除他
+            for (uint i = 0; i < proposals.length; i++) {
+                if (proposals[i] == index) {
+                    for (uint y = i; y < (proposals.length - 1); y++) {
+                        //通过循环把这个数组元素往后推直到最后
+                        proposals[y] = proposals[y + 1];
+                    }
+                    proposals.pop();
+                }
+            }
+        }
+    }
+
+    //查看单用户投票
+    function whethertovote(uint index, address _addr)
+        public
+        view
+        returns (bool)
+    {
+        return Whethertovote[index][_addr];
+    }
+
+    //查看用户提案编号
+    function initiaterecord(address _addr) public view returns (uint[] memory) {
+        return Initiaterecord[_addr];
+    }
+
+    //查看没完成
+    function Proposals() public view returns (uint[] memory) {
+        return proposals;
+    }
+
+    //查看全部提案
+    function allapplications() public view returns (uint[] memory) {
+        return Allapplications;
+    }
+
+    //查看已经完成的提案编号
+    function Signed() public view returns (uint[] memory) {
+        return signed;
+    }
+
+    //获取所有信息
+    function getViewpoll(uint index)
+        public
+        view
+        returns (
+            uint,
+            address,
+            address[] memory,
+            address[] memory,
+            uint[] memory
+        )
+    {
+        return (
+            index,
+            id[index],
+            Votedaddress[index],
+            Paymentaddress[index],
+            Receiptamount[index]
+        );
+    }
+
+    function ETHbalance() public view returns (uint256) {
+        return address(this).balance;
+    }
+
+    fallback() external payable {}
+
+    receive() external payable {}
+}
+
+contract walletFactory is Ownable {
+    address public serviceReceiver;
+    uint256 public serviceFee;
+    mapping(address => wallet) public WalletOwners;
+    mapping(address => wallet[]) public Haveawallet;
+    wallet[] public tokenList;
+    event ChildCreated(uint256 date, address[] code, address childAddress);
+    constructor() Ownable(_msgSender()) {}
+
+    function createChild(address[] memory Partnerwallet_, uint Authorize_)
+        public
+        payable
+    {
+        require(msg.value >= serviceFee, "Not Sufficient Service Fee");
+        payable(serviceReceiver).transfer(msg.value);
+        wallet token = new wallet(Partnerwallet_, Authorize_);
+        WalletOwners[msg.sender] = token;
+        tokenList.push(token);        
+        for (uint i = 0; i < Partnerwallet_.length; i++) {
+            Haveawallet[Partnerwallet_[i]].push(token);
+        }
+        emit ChildCreated(block.timestamp, Partnerwallet_, address(token));
+    }
+
+    function setServiceReceiver(address val) public onlyOwner {
+        serviceReceiver = val;
+    }
+
+    function setServiceFee(uint256 amount) public onlyOwner {
+        serviceFee = amount;
+    }
+
+    function get(address _address) public view returns (wallet) {
+        return WalletOwners[_address];
+    }
+
+    function getListByOwner(address _addr) public view returns (wallet[] memory) {
+        return Haveawallet[_addr];
+    }
+
+
+    function getAirDropListLength() public view returns (uint256) {
+        return tokenList.length;
+    }
+}
