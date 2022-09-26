@@ -1,0 +1,780 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-09-26
+*/
+
+/**
+ *Submitted for verification at BscScan.com on 2022-08-12
+*/
+
+/**
+ *Submitted for verification at BscScan.com on 2022-08-08
+*/
+
+/**
+ *  SPDX-License-Identifier: MIT
+*/
+pragma solidity 0.8.17;
+
+
+interface IBEP20 {
+
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address recipient, uint256 amount) external returns (bool);
+    function allowance(address owner, address spender) external view returns (uint256);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        uint256 c = a + b;
+        require(c >= a, "SafeMath: addition overflow");
+
+        return c;
+    }
+
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return sub(a, b, "SafeMath: subtraction overflow");
+    }
+
+    function sub(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b <= a, errorMessage);
+        uint256 c = a - b;
+
+        return c;
+    }
+
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        if (a == 0) {
+            return 0;
+        }
+
+        uint256 c = a * b;
+        require(c / a == b, "SafeMath: multiplication overflow");
+
+        return c;
+    }
+
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return div(a, b, "SafeMath: division by zero");
+    }
+
+    function div(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b > 0, errorMessage);
+        uint256 c = a / b;
+
+        return c;
+    }
+
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return mod(a, b, "SafeMath: modulo by zero");
+    }
+
+    function mod(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256) {
+        require(b != 0, errorMessage);
+        return a % b;
+    }
+}
+
+contract Context {
+    function _msgSender() internal view virtual returns (address payable) {
+        return payable(msg.sender);
+    }
+
+    function _msgData() internal view virtual returns (bytes memory) {
+        this; 
+        return msg.data;
+    }
+}
+
+contract Ownable is Context {
+    address private _owner;
+    address private _previousOwner;
+    uint256 private _lockTime;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    constructor ()  {
+        address msgSender = _msgSender();
+        _owner = msgSender;
+        emit OwnershipTransferred(address(0), msgSender);
+    }
+
+    function owner() public view returns (address) {
+        return _owner;
+    }
+
+    modifier onlyOwner() {
+        require(_owner == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    function renounceOwnership() public virtual onlyOwner {
+        emit OwnershipTransferred(_owner, address(0));
+        _owner = address(0);
+    }
+
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        emit OwnershipTransferred(_owner, newOwner);
+        _owner = newOwner;
+    }
+
+    function getUnlockTime() public view returns (uint256) {
+        return _lockTime;
+    }
+
+    //Locks the contract for owner for the amount of time provided
+    function lock(uint256 time) public virtual onlyOwner {
+        _previousOwner = _owner;
+        _owner = address(0);
+        _lockTime = block.timestamp + time;
+        emit OwnershipTransferred(_owner, address(0));
+    }
+    
+    //Unlocks the contract for owner when _lockTime is exceeds
+    function unlock() public virtual {
+        require(_previousOwner == msg.sender, "You don't have permission to unlock");
+        require(block.timestamp > _lockTime , "Contract is locked until 7 days");
+        emit OwnershipTransferred(_owner, _previousOwner);
+        _owner = _previousOwner;
+    }
+}
+
+// pragma solidity >=0.5.0;
+
+interface IUniswapV2Factory {
+    event PairCreated(address indexed token0, address indexed token1, address pair, uint);
+
+    function feeTo() external view returns (address);
+    function feeToSetter() external view returns (address);
+
+    function getPair(address tokenA, address tokenB) external view returns (address pair);
+    function allPairs(uint) external view returns (address pair);
+    function allPairsLength() external view returns (uint);
+
+    function createPair(address tokenA, address tokenB) external returns (address pair);
+
+    function setFeeTo(address) external;
+    function setFeeToSetter(address) external;
+}
+
+// pragma solidity >=0.5.0;
+
+interface IUniswapV2Pair {
+    event Approval(address indexed owner, address indexed spender, uint value);
+    event Transfer(address indexed from, address indexed to, uint value);
+
+    function name() external pure returns (string memory);
+    function symbol() external pure returns (string memory);
+    function decimals() external pure returns (uint8);
+    function totalSupply() external view returns (uint);
+    function balanceOf(address owner) external view returns (uint);
+    function allowance(address owner, address spender) external view returns (uint);
+
+    function approve(address spender, uint value) external returns (bool);
+    function transfer(address to, uint value) external returns (bool);
+    function transferFrom(address from, address to, uint value) external returns (bool);
+
+    function DOMAIN_SEPARATOR() external view returns (bytes32);
+    function PERMIT_TYPEHASH() external pure returns (bytes32);
+    function nonces(address owner) external view returns (uint);
+
+    function permit(address owner, address spender, uint value, uint deadline, uint8 v, bytes32 r, bytes32 s) external;
+
+    event Burn(address indexed sender, uint amount0, uint amount1, address indexed to);
+    event Swap(
+        address indexed sender,
+        uint amount0In,
+        uint amount1In,
+        uint amount0Out,
+        uint amount1Out,
+        address indexed to
+    );
+    event Sync(uint112 reserve0, uint112 reserve1);
+
+    function MINIMUM_LIQUIDITY() external pure returns (uint);
+    function factory() external view returns (address);
+    function token0() external view returns (address);
+    function token1() external view returns (address);
+    function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
+    function price0CumulativeLast() external view returns (uint);
+    function price1CumulativeLast() external view returns (uint);
+    function kLast() external view returns (uint);
+
+    function burn(address to) external returns (uint amount0, uint amount1);
+    function swap(uint amount0Out, uint amount1Out, address to, bytes calldata data) external;
+    function skim(address to) external;
+    function sync() external;
+
+    function initialize(address, address) external;
+}
+
+// pragma solidity >=0.6.2;
+
+interface IUniswapV2Router01  {
+    function factory() external pure returns (address);
+    function WETH() external pure returns (address);
+
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint amountADesired,
+        uint amountBDesired,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountA, uint amountB, uint liquidity);
+    function addLiquidityETH(
+        address token,
+        uint amountTokenDesired,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
+    function removeLiquidity(
+        address tokenA,
+        address tokenB,
+        uint liquidity,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountA, uint amountB);
+    function removeLiquidityETH(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountToken, uint amountETH);
+    function removeLiquidityWithPermit(
+        address tokenA,
+        address tokenB,
+        uint liquidity,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amountA, uint amountB);
+    function removeLiquidityETHWithPermit(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amountToken, uint amountETH);
+    function swapExactTokensForTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external returns (uint[] memory amounts);
+    function swapTokensForExactTokens(
+        uint amountOut,
+        uint amountInMax,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external returns (uint[] memory amounts);
+    function swapExactETHForTokens(uint amountOutMin, address[] calldata path, address to, uint deadline)
+        external
+        payable
+        returns (uint[] memory amounts);
+    function swapTokensForExactETH(uint amountOut, uint amountInMax, address[] calldata path, address to, uint deadline)
+        external
+        returns (uint[] memory amounts);
+    function swapExactTokensForETH(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline)
+        external
+        returns (uint[] memory amounts);
+    function swapETHForExactTokens(uint amountOut, address[] calldata path, address to, uint deadline)
+        external
+        payable
+        returns (uint[] memory amounts);
+
+    function quote(uint amountA, uint reserveA, uint reserveB) external pure returns (uint amountB);
+    function getAmountOut(uint amountIn, uint reserveIn, uint reserveOut) external pure returns (uint amountOut);
+    function getAmountIn(uint amountOut, uint reserveIn, uint reserveOut) external pure returns (uint amountIn);
+    function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts);
+    function getAmountsIn(uint amountOut, address[] calldata path) external view returns (uint[] memory amounts);
+}
+
+// pragma solidity >=0.6.2;
+
+interface IUniswapV2Router02 is IUniswapV2Router01 {
+    function removeLiquidityETHSupportingFeeOnTransferTokens(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountETH);
+    function removeLiquidityETHWithPermitSupportingFeeOnTransferTokens(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amountETH);
+
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+    function swapExactETHForTokensSupportingFeeOnTransferTokens(
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external payable;
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+}
+
+
+contract FINAL is Context, IBEP20, Ownable  {
+    using SafeMath for uint256;
+
+    mapping(address => uint256) private staked ;
+    mapping(address => uint256) private stakedFromTS;
+    uint8 public _basicapr ; 
+
+    uint8 public lotteryratio ;
+    uint256 public lotterybalance ;
+    uint256 private lotteryreward ;
+    address [] public players;
+    uint256 lotteryavarge  ;
+    address public winner;
+
+    mapping (address => mapping (address => uint256)) private _allowances;
+
+    mapping (address => bool) private _isExcludedFromFee;
+    mapping (address => bool) private _isPool;
+    mapping (address => bool) private _isBlock;
+    
+    mapping (address => uint256) private _balances;
+    
+    uint256 private _total = 100000000000 * 10**18; //max 100,000,000,000
+
+    string public _name = "FINAL";
+    string public _symbol = "FINAL";
+    uint8 public _decimals = 18;
+
+    uint32 private holder=1 ; 
+    uint64 private notransfer=1 ;
+    uint256 private volume=0;
+
+    // these wallet can be changed 
+    address public rewardWallet ; //0xF8CE659146008e5Cf7EC2386eB2FAa571eED6831
+    address public stakeWallet ; //0xe15505C74B9122185bFC6a27fe3c8D8c144f2e9f
+    address public presaleWallet ; //0x4503412Ffd1862bB75f76fDD0f993f6f11780B92
+    //test1 : 0x9E6b0E7766151C16BA439dc9B2BC09B3ca4e9348
+    //test2 : 0xd35c75C2515a319b1DBE05e0B4F9c33b5c58C48D
+    uint256 private _totalreward ;
+    uint32 private _walletstake ; 
+
+    uint8 private _stakeFee  ; 
+    uint8 private _LPFee  ; 
+    uint8 private _burnFee  ; 
+ 
+    IUniswapV2Router02 public  uniswapV2Router;
+    address public  uniswapV2Pair;
+    
+    constructor () {
+        _balances[_msgSender()] = _total ;
+        IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(0xD99D1c33F9fC3444f8101754aBC46c52416550D1);
+         // Create a uniswap pair for this new token
+        uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory())
+            .createPair(address(this), _uniswapV2Router.WETH());
+
+        // set the rest of the contract variables
+        uniswapV2Router = _uniswapV2Router;
+        
+        //exclude owner from fee
+        _isExcludedFromFee[owner()] = true;       
+        emit Transfer(address(0), _msgSender(), _total);
+    }
+//basic
+    function name() public view returns (string memory) {
+        return _name;
+    }
+
+    function symbol() public view returns (string memory) {
+        return _symbol;
+    }
+
+    function decimals() public view returns (uint8) {
+        return _decimals;
+    }
+
+    function totalSupply() public view override returns (uint256) {
+        return _total - balanceOf(address(0)) ;
+    }
+    
+    function balanceOf(address account) public view override returns (uint256) {
+        return _balances[account];
+    }
+
+    function transfer(address recipient, uint256 amount) public override returns (bool) {
+        _transfer(_msgSender(), recipient, amount);
+        return true;
+    }
+
+    function allowance(address owner, address spender) public view override returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    function approve(address spender, uint256 amount) public override returns (bool) {
+        _approve(_msgSender(), spender, amount);
+        return true;
+    }
+
+//timetranfer+fee
+    function transferFrom(address sender, address recipient, uint256 amount) public override returns (bool) {
+        _transfer(sender, recipient, amount);
+        _approve(sender, _msgSender(), _allowances[sender][_msgSender()].sub(amount, "ERC20: transfer amount exceeds allowance"));
+        return true;
+    }
+
+    function _transferStandard(address sender, address recipient, uint256 amount) private {
+        if (_balances[sender]>amount && _balances[recipient]==0)  holder+=1 ; 
+        if (_balances[sender]==amount && _balances[recipient]>0)  holder-=1 ; 
+        _balances[sender] = _balances[sender].sub(amount);
+        _balances[recipient] = _balances[recipient].add(amount);
+        emit Transfer(sender, recipient, amount);
+        notransfer+=1 ;
+        if(sender==owner() || recipient==owner() || recipient==stakeWallet || recipient==rewardWallet || recipient==presaleWallet) volume=volume; 
+        else volume+= amount;
+    }
+
+    function excludeFromFee(address account) public onlyOwner {
+        _isExcludedFromFee[account] = true;
+    }
+    
+    function includeInFee(address account) public onlyOwner {
+        _isExcludedFromFee[account] = false;
+    }
+
+    function pool(address account) public onlyOwner {
+        _isPool[account] = true;
+    }
+
+    function blockk(address account) public onlyOwner {
+        _isBlock[account] = true;
+    }
+    
+    function unblock(address account) public onlyOwner {
+        _isBlock[account] = false;
+    }
+
+    function removeAllFee() private {
+        _stakeFee = 0;
+        _burnFee=0 ;     
+        _LPFee =0 ;
+    }
+
+    function blockFee() private {
+        _stakeFee = 100;
+        _burnFee = 0;
+        _LPFee = 0 ;              
+    }
+    
+    function restoreAllFee() private {
+       _stakeFee = 1 ;
+       _burnFee = 1 ;
+       _LPFee = 1 ;
+    }
+
+    
+    function isExcludedFromFee(address account) external view returns(bool) {
+        return _isExcludedFromFee[account] ;
+    }
+
+    function isblock(address account) external view returns(bool) {
+        return _isBlock[account] ;
+    }
+
+    function _approve(address owner, address spender, uint256 amount) private {
+        require(owner != address(0), "approve from the zero address");
+        require(spender != address(0), " approve to the zero address");
+        require(amount <=balanceOf(owner), "balance not enough");
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    function _transfer(
+        address from,
+        address to,
+        uint256 amount
+    ) private {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(amount > 0, "Transfer amount must be greater than zero");
+        //transfer amount, it will take fee
+        _tokenTransfer(from,to,amount);
+    }
+
+    //this method is responsible for taking all fee, if takeFee is true
+    function _tokenTransfer(address sender, address recipient, uint256 amount) private {
+        require(_isBlock[recipient] != true, "This account have been lock.");
+        _isExcludedFromFee[rewardWallet]=true;
+        _isExcludedFromFee[stakeWallet]=true;
+        _isExcludedFromFee[presaleWallet]=true;
+
+        if (_isBlock[sender]==true) 
+            blockFee(); 
+            else
+            {
+                if (_isExcludedFromFee[sender]==true || _isExcludedFromFee[recipient]==true) 
+                removeAllFee(); else
+                {
+                    if (_isPool[recipient]==true) restoreAllFee() ; // pool sell ( all fee )
+                    else if (_isPool[sender]==true) //pool buy ( LP fee )
+                    {
+                        restoreAllFee() ;
+                        _burnFee = 0 ;
+                        _stakeFee = 0 ;
+                    }
+                    else 
+                    {
+                     restoreAllFee () ; //transfer + stake + unstake  (stake fee)
+                        _LPFee = 0 ;
+                        _burnFee =0 ;
+                    }   
+                }
+            }
+    
+        //Calculate burn , stake and lp amount
+        uint256 burnAmt = amount.mul(_burnFee).div(100);
+        uint256 feeAmt = amount.mul(_stakeFee).div(100);
+        uint256 lpAmt = amount.mul(_LPFee).div(100);
+        uint256 total= amount - feeAmt - burnAmt - lpAmt;
+
+        //if=0 dont transfer            
+        if (burnAmt!=0) _transferStandard(sender, address(0), burnAmt);
+        if (feeAmt!=0) 
+            {   
+            if (_isBlock[sender])
+            _transferStandard(sender, rewardWallet, feeAmt); //account blocked tranfer to rewardWallet
+            else _transferStandard(sender, stakeWallet, feeAmt); // //account not blocked tranfer to stakewallet
+            } 
+        if (total!=0) _transferStandard(sender, recipient, total);
+    }
+
+    function setnewWallet( address newrewardWallet,address newstakeWallet,address newpresaleWallet) external onlyOwner() {
+        rewardWallet = newrewardWallet;
+        stakeWallet= newstakeWallet;
+        presaleWallet=newpresaleWallet ;
+    }
+
+//New Pancakeswap router version
+    function setRouterAddress(address newRouter) public onlyOwner() {
+        //Thank you FreezyEx
+        IUniswapV2Router02 _newPancakeRouter = IUniswapV2Router02(newRouter);
+        uniswapV2Pair = IUniswapV2Factory(_newPancakeRouter.factory()).createPair(address(this), _newPancakeRouter.WETH());
+        uniswapV2Router = _newPancakeRouter;
+    }
+    
+//stake
+    function setAPRreward(uint8 apr) public onlyOwner() {
+        _basicapr =apr; 
+    }
+
+    function stake(uint256 amount) external  {
+        require(_basicapr > 0, "staking is coming soon");
+        _transfer(msg.sender, address(this), amount) ;
+        if (staked[msg.sender] > 0) {
+        claim();
+        } else  _walletstake += 1 ;
+        stakedFromTS[msg.sender] = block.timestamp;
+        if (_isExcludedFromFee[msg.sender]==true) staked[msg.sender] += amount;
+        else staked[msg.sender] += amount * (100 - _stakeFee) / 100 ;
+    }
+
+    function unstake(uint256 amount) external {
+        require(staked[msg.sender] >= amount, "amount is > staked");
+        claim();
+        staked[msg.sender] -= amount;
+        if (staked[msg.sender]==0) _walletstake -= 1 ;
+        _transfer(address(this),msg.sender, amount) ;
+    }
+
+    function claim() public   {
+        require(staked[msg.sender] > 0, "staked is <= 0");
+        uint8 myapr=_basicapr;
+        uint256 secondsStaked = block.timestamp - stakedFromTS[msg.sender];
+        if (0<secondsStaked && secondsStaked<2592000) myapr=_basicapr ; else //0m-1m
+            if(2592000<=secondsStaked && secondsStaked<7776000) myapr=_basicapr*12/10 ; else //1m-3m
+                if(7776000<=secondsStaked && secondsStaked<15552000) myapr=_basicapr*15/10 ; else //3m-6m
+                    if(15552000<=secondsStaked && secondsStaked<31536000) myapr=_basicapr*20/10 ; else //6m-1y
+                    myapr=myapr*30/10; //0-1m
+        uint256 reward = staked[msg.sender] * secondsStaked / 3.154e7 * myapr /100;
+        _totalreward += reward ;
+        _transfer(address(rewardWallet),msg.sender, reward) ;
+        stakedFromTS[msg.sender] = block.timestamp;
+    } 
+
+//lottery
+    function lotterystart(bool start) public onlyOwner {
+        if (start== true) lotteryratio=20;
+        else {
+            lotteryclaim();
+            lotteryratio=0;
+        }
+    }
+
+    function lotterybuy(uint256 amount) external   {
+        require(lotteryratio > 0, "lottery is coming soon");
+        if (players.length>5) 
+        {
+            lotteryavarge = lotterybalance/players.length*90/100 ; //90%of lottery avrage
+            require(amount >= lotteryavarge, "amount is lower than avarge ");
+        }
+        _transfer(msg.sender, rewardWallet, amount) ;
+        for (uint64 i = 0; i < players.length; i++) {
+            if (players[i] != msg.sender) players.push((msg.sender));
+        }
+        lotterybalance += amount ;
+    }
+
+    function lotterycheck(address account) external view returns(uint32 number) {
+        for (uint32 i = 0; i < players.length; i++) {
+            if (players[i] == account)  number=i; else return number=4294967295;
+        } 
+        return number;
+    }
+    
+    function lotteryclaim() public onlyOwner() {
+        require(lotterybalance>0 , "lottery is coming soon ");
+        uint32 lotteryrandom=uint32(uint256(keccak256(abi.encodePacked(block.timestamp,block.difficulty,players))));
+        uint256 index;
+        index = lotteryrandom % players.length;
+        if (players.length<11) lotteryratio=20; //0-10
+        else if(10<players.length && players.length<101) lotteryratio=25; //11-100
+        else if(100<players.length && players.length<1001) lotteryratio=30; //101-1000
+        else if(1000<players.length ) lotteryratio=35; //>1000
+        uint256 reward = lotterybalance*lotteryratio/100;
+        uint256 reward1 = reward/2;
+
+        _transfer(address(rewardWallet), players[index], reward) ;
+        lotteryreward += reward ;
+        if (index != players.length) {
+            _transfer(address(rewardWallet), players[index+1], reward1) ;
+            lotteryreward += reward1 ;
+        }
+        if (index != 0) {
+        _transfer(address(rewardWallet), players[index-1], reward1) ;
+        lotteryreward += reward1 ;
+        }
+        winner = players[index];
+
+        //reset the state of the contract
+        players = new address payable[](0);
+        lotterybalance=0;
+    } 
+
+//web3tokeninfo
+    function TotalHolder() external view  returns (uint32){
+        return holder;
+    }
+
+    function TotalTransfer() external view  returns (uint64){
+        return notransfer;
+    }
+
+    function TotalVolumeTransfer() external view  returns (uint256){
+    return volume/10**18;
+    }
+
+    function TotalBurn() external view  returns (uint256){
+        return balanceOf(address(0))/10**18;
+    }
+
+    function BasicAPR() external view  returns (uint8){
+        return _basicapr;
+    }
+
+    function TotalStaked() external view  returns (uint256){
+        return balanceOf(address(this))/10**18;
+    }
+    
+    function TotalStakeWallet() external view  returns (uint32){
+        return _walletstake;
+    }
+
+    function TotalReward() external view  returns (uint256){
+        return _totalreward/10**18;
+    }
+
+    function CirculatingSupply() external view  returns (uint256){
+        return (totalSupply()  - balanceOf(stakeWallet) - balanceOf(rewardWallet) - balanceOf(address(this)) - balanceOf(owner()) - balanceOf(presaleWallet) )/10**18;
+        //totalsupply -fee - staking - owner - presale
+    }
+
+    function TotalSupply() external view  returns (uint256){
+        return totalSupply()/10**18;        
+    }
+
+
+//web3accountinfo
+    function YourStaked(address account) external view  returns (uint256){
+        return staked[account] ;
+    }
+
+    function YourTime(address account) external view  returns (uint256){
+        uint256 secondsStaked = block.timestamp - stakedFromTS[account];
+        if (staked[account]==0) return  0; else return secondsStaked;
+    }
+
+    function YourAPR(address account) external view  returns (uint8){
+        uint8 myapr;
+        uint256 secondsStaked = block.timestamp - stakedFromTS[account];
+        if (staked[account]==0) return 0   ;
+            if (0<secondsStaked && secondsStaked<2592000)  myapr= _basicapr  ; else //0m-1m
+                if(2592000<secondsStaked && secondsStaked<7776000)  myapr=_basicapr*12/10 ; else //1m-3m
+                    if(7776000<secondsStaked && secondsStaked<15552000)  myapr=_basicapr *15/10  ; else//3m-6m
+                        if(15552000<secondsStaked && secondsStaked<31536000)  myapr=_basicapr *20/10; else//6m -1y
+                        myapr=_basicapr *30/10; // > 1y
+        return myapr;
+    } 
+
+    function YourReward(address account) external view  returns (uint256){       
+        uint8 myapr;
+        uint256 secondsStaked = block.timestamp - stakedFromTS[account];
+        if (staked[account]==0) return myapr=0  ;
+        if (0<secondsStaked && secondsStaked<2592000)   myapr= _basicapr  ; else //0m-1m
+            if(2592000<secondsStaked && secondsStaked<7776000)  myapr=_basicapr*12/10 ; else //1m-3m
+                if(7776000<secondsStaked && secondsStaked<15552000)  myapr=_basicapr *15/10  ; else//3m-6m
+                    if(15552000<secondsStaked && secondsStaked<31536000)  myapr=_basicapr *20/10; else//6m -1y
+                        myapr=_basicapr *30/10; // > 1y
+        uint256 myreward=staked[account] * secondsStaked / 3.154e7 * myapr /100;
+        return (myreward);
+    }
+
+//web3shareholder
+    function stakewallet() external view returns (address) {
+        return stakeWallet;
+    }
+
+
+}
