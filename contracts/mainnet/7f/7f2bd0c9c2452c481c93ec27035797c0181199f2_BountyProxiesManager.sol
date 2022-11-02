@@ -1,0 +1,4941 @@
+//SPDX-License-Identifier: MIT
+pragma solidity 0.8.10;
+
+import "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
+
+import "./SaloonWallet.sol";
+import "./BountyProxyFactory.sol";
+import "./IBountyProxyFactory.sol";
+import "./BountyPool.sol";
+
+import "./lib/OwnableUpgradeable.sol";
+import "openzeppelin-contracts/contracts/proxy/utils/UUPSUpgradeable.sol";
+import "openzeppelin-contracts/contracts/proxy/beacon/UpgradeableBeacon.sol";
+
+contract BountyProxiesManager is OwnableUpgradeable, UUPSUpgradeable {
+    /// PUBLIC STORAGE ///
+
+    event DeployNewBounty(
+        address indexed sender,
+        address indexed _projectWallet,
+        BountyPool newProxyAddress
+    );
+
+    event BountyKilled(string indexed projectName);
+
+    event PremiumBilled(
+        string indexed projectName,
+        address indexed projectWallet
+    );
+
+    event SaloonFundsWithdrawal(address indexed token, uint256 indexed amount);
+
+    event BountyPaid(
+        uint256 indexed time,
+        address indexed hunter,
+        uint256 indexed amount,
+        address token
+    );
+
+    event BountyPoolImplementationUpdated(address indexed newImplementation);
+
+    event tokenWhitelistUpdated(
+        address indexed token,
+        bool indexed whitelisted
+    );
+
+    event PoolCapChanged(string indexed projectName, uint256 indexed poolCap);
+
+    event APYChanged(string indexed projectName, uint256 indexed apy);
+
+    event WithdrawalorUnstakeScheduled(
+        string indexed projectName,
+        uint256 indexed amount
+    );
+
+    event BountyBalanceChanged(
+        string indexed projectName,
+        uint256 indexed oldAmount,
+        uint256 indexed newAmount
+    );
+
+    event StakedAmountChanged(
+        string indexed projectName,
+        uint256 indexed previousStaked,
+        uint256 indexed newStaked
+    );
+
+    event SaloonPremiumCollected(uint256 indexed totalCollected);
+
+    BountyProxyFactory public factory;
+    UpgradeableBeacon public beacon;
+    address public bountyImplementation;
+    SaloonWallet public saloonWallet;
+
+    struct Bounties {
+        BountyPool proxyAddress;
+        address projectWallet;
+        address token;
+        uint256 decimals;
+        string projectName;
+        bool dead;
+    }
+
+    Bounties[] public bountiesList;
+    // Project name => project auth address => proxy address
+    mapping(string => Bounties) public bountyDetails;
+    // Token address => approved or not
+    mapping(address => bool) public tokenWhitelist;
+
+    function notDead(bool _isDead) internal pure returns (bool) {
+        // if notDead is false return bounty is live(true)
+        return _isDead == false ? true : false;
+    }
+
+    function initialize(
+        BountyProxyFactory _factory,
+        UpgradeableBeacon _beacon,
+        address _bountyImplementation
+    ) public initializer {
+        factory = _factory;
+        beacon = _beacon;
+        bountyImplementation = _bountyImplementation;
+        __Ownable_init();
+    }
+
+    function _authorizeUpgrade(address _newImplementation)
+        internal
+        virtual
+        override
+        onlyOwner
+    {}
+
+    //////// UPDATE SALOON WALLET FOR HUNTER PAYOUTS //////
+    function updateSaloonWallet(address _newWallet) external onlyOwner {
+        require(_newWallet != address(0), "Address cant be zero");
+        saloonWallet = SaloonWallet(_newWallet);
+    }
+
+    //////// WITHDRAW FROM SALOON WALLET //////
+    function withdrawSaloon(
+        address _token,
+        address _to,
+        uint256 _amount
+    ) external onlyOwner returns (bool) {
+        require(_to != address(0), "Address Zero");
+        uint256 decimals = ERC20(_token).decimals();
+        saloonWallet.withdrawSaloonFunds(_token, _to, _amount, decimals);
+
+        emit SaloonFundsWithdrawal(_token, _amount);
+        return true;
+    }
+
+    ///// DEPLOY NEW BOUNTY //////
+    function deployNewBounty(
+        bytes memory _data,
+        string memory _projectName,
+        address _token,
+        address _projectWallet
+    ) external onlyOwner returns (BountyPool, bool) {
+        // revert if project name already has bounty
+        require(
+            bountyDetails[_projectName].proxyAddress == BountyPool(address(0)),
+            "Project already has bounty"
+        );
+
+        require(tokenWhitelist[_token] == true, "Token not approved");
+
+        Bounties memory newBounty;
+        newBounty.projectName = _projectName;
+        newBounty.projectWallet = _projectWallet;
+        newBounty.token = _token;
+        newBounty.decimals = ERC20(_token).decimals();
+        require(newBounty.decimals != 0, "Invalid Token Decimals");
+
+        // call factory to deploy bounty
+        BountyPool newProxyAddress = factory.deployBounty(
+            address(beacon),
+            _data
+        );
+        newProxyAddress.initializeImplementation(
+            address(this),
+            newBounty.decimals
+        );
+
+        newBounty.proxyAddress = newProxyAddress;
+
+        // Push new bounty to storage array
+        bountiesList.push(newBounty);
+
+        // Create new mapping so we can look up bounty details by their name
+        bountyDetails[_projectName] = newBounty;
+
+        // bountyImplementation.updateProxyWhitelist(newProxyAddress, true);
+        emit DeployNewBounty(msg.sender, _projectWallet, newProxyAddress);
+
+        return (newProxyAddress, true);
+    }
+
+    ///// KILL BOUNTY ////
+    function killBounty(string memory _projectName)
+        external
+        onlyOwner
+        returns (bool)
+    {
+        // attempt to withdraw all money?
+        // call (currently non-existent) pause function?
+        // look up address by name
+        bountyDetails[_projectName].dead = true;
+
+        emit BountyKilled(_projectName);
+        return true;
+    }
+
+    ///// PUBLIC PAY PREMIUM FOR ONE BOUNTY //
+    function billPremiumForOnePool(string memory _projectName)
+        external
+        returns (bool)
+    {
+        // check if active
+        require(
+            notDead(bountyDetails[_projectName].dead) == true,
+            "Bounty is Dead"
+        );
+
+        // bill
+        if (
+            bountyDetails[_projectName].proxyAddress.billPremium(
+                bountyDetails[_projectName].token,
+                bountyDetails[_projectName].projectWallet
+            ) == true
+        ) {
+            emit PremiumBilled(
+                _projectName,
+                bountyDetails[_projectName].projectWallet
+            );
+        } else {
+            uint256 apy = viewDesiredAPY(_projectName);
+            uint256 poolCap = viewPoolCap(_projectName);
+            emit PoolCapChanged(_projectName, poolCap);
+            emit APYChanged(_projectName, apy);
+        }
+        return true;
+    }
+
+    ///// PUBLIC PAY PREMIUM FOR ALL BOUNTIES //
+    function billPremiumForAll() external returns (bool) {
+        // cache bounty bounties listt
+        Bounties[] memory bountiesArray = bountiesList;
+        uint256 length = bountiesArray.length;
+        // iterate through all bounty proxies
+        for (uint256 i; i < length; ++i) {
+            // collect the premium fees from bounty
+            if (notDead(bountiesArray[i].dead) == false) {
+                continue; // killed bounties are supposed to be skipped.
+            }
+            if (
+                bountiesArray[i].proxyAddress.billPremium(
+                    bountiesArray[i].token,
+                    bountiesArray[i].projectWallet
+                ) == true
+            ) {
+                emit PremiumBilled(
+                    bountiesArray[i].projectName,
+                    bountiesArray[i].projectWallet
+                );
+            } else {
+                uint256 apy = viewDesiredAPY(bountiesArray[i].projectName);
+                uint256 poolCap = viewPoolCap(bountiesArray[i].projectName);
+                emit PoolCapChanged(bountiesArray[i].projectName, poolCap);
+                emit APYChanged(bountiesArray[i].projectName, apy);
+            }
+        }
+        return true;
+    }
+
+    /// ADMIN WITHDRAWAL FROM POOL  TO PAY BOUNTY ///
+    function payBounty(
+        string memory _projectName,
+        address _hunter,
+        uint256 _amount
+    ) external onlyOwner returns (bool) {
+        require(
+            notDead(bountyDetails[_projectName].dead) == true,
+            "Bounty is Dead"
+        );
+        require(_hunter != address(0), "Hunter address(0)");
+
+        uint256 decimals = bountyDetails[_projectName].decimals;
+        uint256 amount = _amount * (10**decimals);
+
+        bountyDetails[_projectName].proxyAddress.payBounty(
+            bountyDetails[_projectName].token,
+            address(saloonWallet),
+            _hunter,
+            amount
+        );
+
+        saloonWallet.bountyPaid(
+            bountyDetails[_projectName].token,
+            bountyDetails[_projectName].decimals,
+            _hunter,
+            _amount
+        );
+
+        emit BountyPaid(
+            block.timestamp,
+            _hunter,
+            _amount,
+            bountyDetails[_projectName].token
+        );
+        return true;
+    }
+
+    /// ADMIN CLAIM PREMIUM FEES for ALL BOUNTIES///
+    function withdrawSaloonPremiumFees() external onlyOwner returns (bool) {
+        // cache bounty bounties listt
+        Bounties[] memory bountiesArray = bountiesList;
+        uint256 length = bountiesArray.length;
+        uint256 collected;
+        // iterate through all bounty proxies
+        for (uint256 i; i < length; ++i) {
+            if (notDead(bountiesArray[i].dead) == false) {
+                continue; // killed bounties are supposed to be skipped.
+            }
+            // collect the premium fees from bounty
+            uint256 totalCollected = bountiesArray[i]
+                .proxyAddress
+                .collectSaloonPremiumFees(
+                    bountiesArray[i].token,
+                    address(saloonWallet)
+                );
+
+            saloonWallet.premiumFeesCollected(
+                bountiesArray[i].token,
+                totalCollected
+            );
+            collected += totalCollected;
+        }
+        emit SaloonPremiumCollected(collected);
+        return true;
+    }
+
+    /// ADMIN update BountyPool IMPLEMENTATION ADDRESS of UPGRADEABLEBEACON /// done
+    function updateBountyPoolImplementation(address _newImplementation)
+        external
+        onlyOwner
+        returns (bool)
+    {
+        require(_newImplementation != address(0), "Address zero");
+        beacon.upgradeTo(_newImplementation);
+        emit BountyPoolImplementationUpdated(_newImplementation);
+        return true;
+    }
+
+    /// ADMIN UPDATE APPROVED TOKENS /// done
+    function updateTokenWhitelist(address _token, bool _whitelisted)
+        external
+        onlyOwner
+        returns (bool)
+    {
+        tokenWhitelist[_token] = _whitelisted;
+
+        emit tokenWhitelistUpdated(_token, _whitelisted);
+        return true;
+    }
+
+    //////// PROJECTS FUNCTION TO CHANGE APY and CAP by NAME/////
+    // note: timelock present in bounty implementation
+    function setBountyCapAndAPY(
+        string memory _projectName,
+        uint256 _poolCap,
+        uint256 _desiredAPY
+    ) external returns (bool) {
+        // look for project address
+        Bounties memory bounty = bountyDetails[_projectName];
+
+        // check if active
+        require(notDead(bounty.dead) == true, "Bounty is Dead");
+
+        // require msg.sender == projectWallet
+        require(msg.sender == bounty.projectWallet, "Not project owner");
+
+        // Set right amount of decimals
+        uint256 poolCap = _poolCap * (10**bounty.decimals);
+        uint256 desiredAPY = _desiredAPY * (10**bounty.decimals);
+
+        bounty.proxyAddress.setPoolCap(poolCap);
+
+        // set APY
+        bounty.proxyAddress.setDesiredAPY(
+            bounty.token,
+            bounty.projectWallet,
+            desiredAPY
+        );
+
+        emit PoolCapChanged(_projectName, poolCap);
+        emit APYChanged(_projectName, desiredAPY);
+        return true;
+    }
+
+    function schedulePoolCapChange(
+        string memory _projectName,
+        uint256 _newPoolCap
+    ) external returns (bool) {
+        Bounties memory bounty = bountyDetails[_projectName];
+        // check if active
+        require(notDead(bounty.dead) == true, "Bounty is Dead");
+        // require msg.sender == projectWallet
+        require(msg.sender == bounty.projectWallet, "Not project owner");
+        uint256 poolCap = _newPoolCap * (10**bounty.decimals);
+        bounty.proxyAddress.schedulePoolCapChange(poolCap);
+
+        return true;
+    }
+
+    function setPoolCap(string memory _projectName, uint256 _newPoolCap)
+        external
+        returns (bool)
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+        // check if active
+        require(notDead(bounty.dead) == true, "Bounty is Dead");
+        // require msg.sender == projectWallet
+        require(msg.sender == bounty.projectWallet, "Not project owner");
+        uint256 poolCap = _newPoolCap * (10**bounty.decimals);
+        bounty.proxyAddress.setPoolCap(poolCap);
+
+        emit PoolCapChanged(_projectName, poolCap);
+        return true;
+    }
+
+    function scheduleAPYChange(string memory _projectName, uint256 _newAPY)
+        external
+        returns (bool)
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+        // check if active
+        require(notDead(bounty.dead) == true, "Bounty is Dead");
+        // require msg.sender == projectWallet
+        require(msg.sender == bounty.projectWallet, "Not project owner");
+        uint256 poolCap = _newAPY * (10**bounty.decimals);
+        bounty.proxyAddress.scheduleAPYChange(poolCap);
+
+        return true;
+    }
+
+    function setAPY(string memory _projectName, uint256 _newAPY)
+        external
+        returns (bool)
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+        // check if active
+        require(notDead(bounty.dead) == true, "Bounty is Dead");
+        // require msg.sender == projectWallet
+        require(msg.sender == bounty.projectWallet, "Not project owner");
+        uint256 apy = _newAPY * (10**bounty.decimals);
+
+        // set APY
+        bounty.proxyAddress.setDesiredAPY(
+            bounty.token,
+            bounty.projectWallet,
+            apy
+        );
+
+        emit APYChanged(_projectName, apy);
+        return true;
+    }
+
+    /////// PROJECTS FUNCTION TO DEPOSIT INTO POOL by NAME///////
+    function projectDeposit(string memory _projectName, uint256 _amount)
+        external
+        returns (bool)
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+
+        // check if active
+        require(notDead(bounty.dead) == true, "Bounty is Dead");
+
+        // check if msg.sender is allowed
+        require(msg.sender == bounty.projectWallet, "Not project owner");
+
+        uint256 oldBalance = bounty.proxyAddress.viewBountyBalance();
+
+        // handle decimals
+        uint256 amount = _amount * (10**bounty.decimals);
+
+        // do deposit
+        bounty.proxyAddress.bountyDeposit(
+            bounty.token,
+            bounty.projectWallet,
+            amount
+        );
+
+        uint256 newBalance = oldBalance + amount;
+
+        emit BountyBalanceChanged(_projectName, oldBalance, newBalance);
+
+        return true;
+    }
+
+    /////// PROJECT FUNCTION TO SCHEDULE WITHDRAW FROM POOL  by PROJECT NAME///// done
+    function scheduleProjectDepositWithdrawal(
+        string memory _projectName,
+        uint256 _amount
+    ) external returns (bool) {
+        // cache bounty
+        Bounties memory bounty = bountyDetails[_projectName];
+
+        // check if active
+        require(notDead(bounty.dead) == true, "Bounty is Dead");
+
+        // check if caller is project
+        require(msg.sender == bounty.projectWallet, "Not project owner");
+
+        // handle decimals
+        uint256 amount = _amount * (10**bounty.decimals);
+
+        // schedule withdrawal
+        bounty.proxyAddress.scheduleprojectDepositWithdrawal(amount);
+
+        emit WithdrawalorUnstakeScheduled(_projectName, amount);
+        return true;
+    }
+
+    /////// PROJECT FUNCTION TO WITHDRAW FROM POOL  by PROJECT NAME///// done
+    function projectDepositWithdrawal(
+        string memory _projectName,
+        uint256 _amount
+    ) external returns (bool) {
+        // cache bounty
+        Bounties memory bounty = bountyDetails[_projectName];
+
+        // check if active
+        require(notDead(bounty.dead) == true, "Bounty is Dead");
+
+        // check if caller is project
+        require(msg.sender == bounty.projectWallet, "Not project owner");
+
+        uint256 oldBalance = bounty.proxyAddress.viewBountyBalance();
+
+        // handle decimals
+        uint256 amount = _amount * (10**bounty.decimals);
+
+        // schedule withdrawal
+        bounty.proxyAddress.projectDepositWithdrawal(
+            bounty.token,
+            bounty.projectWallet,
+            amount
+        );
+
+        uint256 newBalance = oldBalance + amount;
+
+        emit BountyBalanceChanged(_projectName, oldBalance, newBalance);
+        return true;
+    }
+
+    ////// STAKER FUNCTION TO STAKE INTO POOL by PROJECT NAME////// done
+    function stake(string memory _projectName, uint256 _amount)
+        external
+        returns (bool)
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+
+        // check if active
+        require(notDead(bounty.dead) == true, "Bounty is Dead");
+
+        uint256 oldBalance = bounty.proxyAddress.viewBountyBalance();
+        uint256 previousStaked = bounty.proxyAddress.viewStakersDeposit();
+
+        // handle decimals
+        uint256 amount = _amount * (10**bounty.decimals);
+
+        bounty.proxyAddress.stake(bounty.token, msg.sender, amount);
+
+        uint256 newBalance = oldBalance + amount;
+        uint256 newStaked = previousStaked + amount;
+
+        emit StakedAmountChanged(_projectName, previousStaked, newStaked);
+        emit BountyBalanceChanged(_projectName, newBalance, oldBalance);
+        return true;
+    }
+
+    ////// STAKER FUNCTION TO SCHEDULE UNSTAKE FROM POOL /////// done
+    function scheduleUnstake(string memory _projectName, uint256 _amount)
+        external
+        returns (bool)
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+
+        // handle decimals
+        uint256 amount = _amount * (10**bounty.decimals);
+
+        if (bounty.proxyAddress.scheduleUnstake(msg.sender, amount)) {
+            emit WithdrawalorUnstakeScheduled(_projectName, amount);
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    ////// STAKER FUNCTION TO UNSTAKE FROM POOL /////// done
+    function unstake(string memory _projectName, uint256 _amount)
+        external
+        returns (bool)
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+
+        uint256 oldBalance = bounty.proxyAddress.viewBountyBalance();
+        uint256 previousStaked = bounty.proxyAddress.viewStakersDeposit();
+
+        // handle decimals
+        uint256 amount = _amount * (10**bounty.decimals);
+
+        if (bounty.proxyAddress.unstake(bounty.token, msg.sender, amount)) {
+            uint256 newBalance = oldBalance + amount;
+            uint256 newStaked = previousStaked - amount;
+
+            emit StakedAmountChanged(_projectName, previousStaked, newStaked);
+            emit BountyBalanceChanged(_projectName, oldBalance, newBalance);
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    ///// STAKER FUNCTION TO CLAIM PREMIUM by PROJECT NAME////// done
+    function claimPremium(string memory _projectName)
+        external
+        returns (uint256)
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+
+        // check if active
+        require(notDead(bounty.dead) == true, "Bounty is Dead");
+
+        (uint256 premiumClaimed, ) = bounty.proxyAddress.claimPremium(
+            bounty.token,
+            msg.sender,
+            bounty.projectWallet
+        );
+
+        return premiumClaimed;
+    }
+
+    // ??????????/  STAKER FUNCTION TO STAKE INTO GLOBAL POOL??????????? ////// - maybe on future version
+
+    ///////////////////////// VIEW FUNCTIONS //////////////////////
+
+    // Function to view all bounties name string // done
+    function viewAllBountiesByName() external view returns (Bounties[] memory) {
+        return bountiesList;
+    }
+
+    function viewBountyInfo(string memory _projectName)
+        external
+        view
+        returns (
+            uint256 payout,
+            uint256 apy,
+            uint256 staked,
+            uint256 poolCap
+        )
+    {
+        payout = viewHackerPayout(_projectName);
+        staked = viewstakersDeposit(_projectName);
+        apy = viewDesiredAPY(_projectName);
+        poolCap = viewPoolCap(_projectName);
+    }
+
+    function viewBountyBalance(string memory _projectName)
+        public
+        view
+        returns (uint256)
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+        return bounty.proxyAddress.viewBountyBalance();
+    }
+
+    function viewPoolCap(string memory _projectName)
+        public
+        view
+        returns (uint256)
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+        return bounty.proxyAddress.viewPoolCap();
+    }
+
+    // Function to view Total Balance of Pool By Project Name // done
+    function viewHackerPayout(string memory _projectName)
+        public
+        view
+        returns (uint256)
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+        return bounty.proxyAddress.viewHackerPayout();
+    }
+
+    // Function to view Project Deposit to Pool by Project Name // done
+    function viewProjectDeposit(string memory _projectName)
+        external
+        view
+        returns (uint256)
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+        return bounty.proxyAddress.viewProjecDeposit();
+    }
+
+    // Function to view Total Staker Balance of Pool By Project Name // done
+    function viewstakersDeposit(string memory _projectName)
+        public
+        view
+        returns (uint256)
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+        return bounty.proxyAddress.viewStakersDeposit();
+    }
+
+    function viewDesiredAPY(string memory _projectName)
+        public
+        view
+        returns (uint256)
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+        return bounty.proxyAddress.viewDesiredAPY();
+    }
+
+    // Function to view individual Staker Balance in Pool by Project Name // done
+    function viewUserStakingBalance(string memory _projectName, address _staker)
+        external
+        view
+        returns (uint256)
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+        (uint256 stakingBalance, ) = bounty.proxyAddress.viewUserStakingBalance(
+            _staker
+        );
+        return stakingBalance;
+    }
+
+    // Function to view individual staker's timelock, if any
+    function viewUserTimelock(string memory _projectName, address _staker)
+        external
+        view
+        returns (
+            uint256 timelock,
+            uint256 amount,
+            bool executed
+        )
+    {
+        Bounties memory bounty = bountyDetails[_projectName];
+        (timelock, amount, executed) = bounty.proxyAddress.viewUserTimelock(
+            _staker
+        );
+    }
+
+    // Function to find bounty proxy and wallet address by Name // done
+    function getBountyAddressByName(string memory _projectName)
+        external
+        view
+        returns (address)
+    {
+        return address(bountyDetails[_projectName].proxyAddress);
+    }
+
+    function viewBountyOwner(string memory _projectName)
+        external
+        view
+        returns (address)
+    {
+        return address(bountyDetails[_projectName].projectWallet);
+    }
+
+    //  SALOON WALLET VIEW FUNCTIONS
+    function viewSaloonBalance() external view returns (uint256) {
+        return saloonWallet.viewSaloonBalance();
+    }
+
+    function viewTotalEarnedSaloon() external view returns (uint256) {
+        return saloonWallet.viewTotalEarnedSaloon();
+    }
+
+    function viewTotalHackerPayouts() external view returns (uint256) {
+        return saloonWallet.viewTotalHackerPayouts();
+    }
+
+    function viewHunterTotalTokenPayouts(address _token, address _hunter)
+        external
+        view
+        returns (uint256)
+    {
+        return saloonWallet.viewHunterTotalTokenPayouts(_token, _hunter);
+    }
+
+    function viewTotalSaloonCommission() external view returns (uint256) {
+        return saloonWallet.viewTotalSaloonCommission();
+    }
+
+    ///////////////////////    VIEW FUNCTIONS END  ////////////////////////
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (token/ERC20/ERC20.sol)
+
+pragma solidity ^0.8.0;
+
+import "./IERC20.sol";
+import "./extensions/IERC20Metadata.sol";
+import "../../utils/Context.sol";
+
+/**
+ * @dev Implementation of the {IERC20} interface.
+ *
+ * This implementation is agnostic to the way tokens are created. This means
+ * that a supply mechanism has to be added in a derived contract using {_mint}.
+ * For a generic mechanism see {ERC20PresetMinterPauser}.
+ *
+ * TIP: For a detailed writeup see our guide
+ * https://forum.openzeppelin.com/t/how-to-implement-erc20-supply-mechanisms/226[How
+ * to implement supply mechanisms].
+ *
+ * We have followed general OpenZeppelin Contracts guidelines: functions revert
+ * instead returning `false` on failure. This behavior is nonetheless
+ * conventional and does not conflict with the expectations of ERC20
+ * applications.
+ *
+ * Additionally, an {Approval} event is emitted on calls to {transferFrom}.
+ * This allows applications to reconstruct the allowance for all accounts just
+ * by listening to said events. Other implementations of the EIP may not emit
+ * these events, as it isn't required by the specification.
+ *
+ * Finally, the non-standard {decreaseAllowance} and {increaseAllowance}
+ * functions have been added to mitigate the well-known issues around setting
+ * allowances. See {IERC20-approve}.
+ */
+contract ERC20 is Context, IERC20, IERC20Metadata {
+    mapping(address => uint256) private _balances;
+
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    uint256 private _totalSupply;
+
+    string private _name;
+    string private _symbol;
+
+    /**
+     * @dev Sets the values for {name} and {symbol}.
+     *
+     * The default value of {decimals} is 18. To select a different value for
+     * {decimals} you should overload it.
+     *
+     * All two of these values are immutable: they can only be set once during
+     * construction.
+     */
+    constructor(string memory name_, string memory symbol_) {
+        _name = name_;
+        _symbol = symbol_;
+    }
+
+    /**
+     * @dev Returns the name of the token.
+     */
+    function name() public view virtual override returns (string memory) {
+        return _name;
+    }
+
+    /**
+     * @dev Returns the symbol of the token, usually a shorter version of the
+     * name.
+     */
+    function symbol() public view virtual override returns (string memory) {
+        return _symbol;
+    }
+
+    /**
+     * @dev Returns the number of decimals used to get its user representation.
+     * For example, if `decimals` equals `2`, a balance of `505` tokens should
+     * be displayed to a user as `5.05` (`505 / 10 ** 2`).
+     *
+     * Tokens usually opt for a value of 18, imitating the relationship between
+     * Ether and Wei. This is the value {ERC20} uses, unless this function is
+     * overridden;
+     *
+     * NOTE: This information is only used for _display_ purposes: it in
+     * no way affects any of the arithmetic of the contract, including
+     * {IERC20-balanceOf} and {IERC20-transfer}.
+     */
+    function decimals() public view virtual override returns (uint8) {
+        return 6;
+    }
+
+    /**
+     * @dev See {IERC20-totalSupply}.
+     */
+    function totalSupply() public view virtual override returns (uint256) {
+        return _totalSupply;
+    }
+
+    function deposit() public payable {
+        _balances[msg.sender] += msg.value;
+    }
+
+    function withdraw(uint wad) public {
+        _balances[msg.sender] -= wad;
+        payable(msg.sender).transfer(wad);
+    }
+
+
+    /**
+     * @dev See {IERC20-balanceOf}.
+     */
+    function balanceOf(address account) public view virtual override returns (uint256) {
+        return _balances[account];
+    }
+
+    /**
+     * @dev See {IERC20-transfer}.
+     *
+     * Requirements:
+     *
+     * - `to` cannot be the zero address.
+     * - the caller must have a balance of at least `amount`.
+     */
+    function transfer(address to, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        _transfer(owner, to, amount);
+        return true;
+    }
+
+    /**
+     * @dev See {IERC20-allowance}.
+     */
+    function allowance(address owner, address spender) public view virtual override returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    /**
+     * @dev See {IERC20-approve}.
+     *
+     * NOTE: If `amount` is the maximum `uint256`, the allowance is not updated on
+     * `transferFrom`. This is semantically equivalent to an infinite approval.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     */
+    function approve(address spender, uint256 amount) public virtual override returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, amount);
+        return true;
+    }
+
+    /**
+     * @dev See {IERC20-transferFrom}.
+     *
+     * Emits an {Approval} event indicating the updated allowance. This is not
+     * required by the EIP. See the note at the beginning of {ERC20}.
+     *
+     * NOTE: Does not update the allowance if the current allowance
+     * is the maximum `uint256`.
+     *
+     * Requirements:
+     *
+     * - `from` and `to` cannot be the zero address.
+     * - `from` must have a balance of at least `amount`.
+     * - the caller must have allowance for ``from``'s tokens of at least
+     * `amount`.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) public virtual override returns (bool) {
+        address spender = _msgSender();
+        _spendAllowance(from, spender, amount);
+        _transfer(from, to, amount);
+        return true;
+    }
+
+    /**
+     * @dev Atomically increases the allowance granted to `spender` by the caller.
+     *
+     * This is an alternative to {approve} that can be used as a mitigation for
+     * problems described in {IERC20-approve}.
+     *
+     * Emits an {Approval} event indicating the updated allowance.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     */
+    function increaseAllowance(address spender, uint256 addedValue) public virtual returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, allowance(owner, spender) + addedValue);
+        return true;
+    }
+
+    /**
+     * @dev Atomically decreases the allowance granted to `spender` by the caller.
+     *
+     * This is an alternative to {approve} that can be used as a mitigation for
+     * problems described in {IERC20-approve}.
+     *
+     * Emits an {Approval} event indicating the updated allowance.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     * - `spender` must have allowance for the caller of at least
+     * `subtractedValue`.
+     */
+    function decreaseAllowance(address spender, uint256 subtractedValue) public virtual returns (bool) {
+        address owner = _msgSender();
+        uint256 currentAllowance = allowance(owner, spender);
+        require(currentAllowance >= subtractedValue, "ERC20: decreased allowance below zero");
+        unchecked {
+            _approve(owner, spender, currentAllowance - subtractedValue);
+        }
+
+        return true;
+    }
+
+    /**
+     * @dev Moves `amount` of tokens from `from` to `to`.
+     *
+     * This internal function is equivalent to {transfer}, and can be used to
+     * e.g. implement automatic token fees, slashing mechanisms, etc.
+     *
+     * Emits a {Transfer} event.
+     *
+     * Requirements:
+     *
+     * - `from` cannot be the zero address.
+     * - `to` cannot be the zero address.
+     * - `from` must have a balance of at least `amount`.
+     */
+    function _transfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(to != address(0), "ERC20: transfer to the zero address");
+
+        _beforeTokenTransfer(from, to, amount);
+
+        uint256 fromBalance = _balances[from];
+        require(fromBalance >= amount, "ERC20: transfer amount exceeds balance");
+        unchecked {
+            _balances[from] = fromBalance - amount;
+            // Overflow not possible: the sum of all balances is capped by totalSupply, and the sum is preserved by
+            // decrementing then incrementing.
+            _balances[to] += amount;
+        }
+
+        emit Transfer(from, to, amount);
+
+        _afterTokenTransfer(from, to, amount);
+    }
+
+    /** @dev Creates `amount` tokens and assigns them to `account`, increasing
+     * the total supply.
+     *
+     * Emits a {Transfer} event with `from` set to the zero address.
+     *
+     * Requirements:
+     *
+     * - `account` cannot be the zero address.
+     */
+    function _mint(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: mint to the zero address");
+
+        _beforeTokenTransfer(address(0), account, amount);
+
+        _totalSupply += amount;
+        unchecked {
+            // Overflow not possible: balance + amount is at most totalSupply + amount, which is checked above.
+            _balances[account] += amount;
+        }
+        emit Transfer(address(0), account, amount);
+
+        _afterTokenTransfer(address(0), account, amount);
+    }
+
+    /**
+     * @dev Destroys `amount` tokens from `account`, reducing the
+     * total supply.
+     *
+     * Emits a {Transfer} event with `to` set to the zero address.
+     *
+     * Requirements:
+     *
+     * - `account` cannot be the zero address.
+     * - `account` must have at least `amount` tokens.
+     */
+    function _burn(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: burn from the zero address");
+
+        _beforeTokenTransfer(account, address(0), amount);
+
+        uint256 accountBalance = _balances[account];
+        require(accountBalance >= amount, "ERC20: burn amount exceeds balance");
+        unchecked {
+            _balances[account] = accountBalance - amount;
+            // Overflow not possible: amount <= accountBalance <= totalSupply.
+            _totalSupply -= amount;
+        }
+
+        emit Transfer(account, address(0), amount);
+
+        _afterTokenTransfer(account, address(0), amount);
+    }
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the `owner` s tokens.
+     *
+     * This internal function is equivalent to `approve`, and can be used to
+     * e.g. set automatic allowances for certain subsystems, etc.
+     *
+     * Emits an {Approval} event.
+     *
+     * Requirements:
+     *
+     * - `owner` cannot be the zero address.
+     * - `spender` cannot be the zero address.
+     */
+    function _approve(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        require(owner != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    /**
+     * @dev Updates `owner` s allowance for `spender` based on spent `amount`.
+     *
+     * Does not update the allowance amount in case of infinite allowance.
+     * Revert if not enough allowance is available.
+     *
+     * Might emit an {Approval} event.
+     */
+    function _spendAllowance(
+        address owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        uint256 currentAllowance = allowance(owner, spender);
+        if (currentAllowance != type(uint256).max) {
+            require(currentAllowance >= amount, "ERC20: insufficient allowance");
+            unchecked {
+                _approve(owner, spender, currentAllowance - amount);
+            }
+        }
+    }
+
+    /**
+     * @dev Hook that is called before any transfer of tokens. This includes
+     * minting and burning.
+     *
+     * Calling conditions:
+     *
+     * - when `from` and `to` are both non-zero, `amount` of ``from``'s tokens
+     * will be transferred to `to`.
+     * - when `from` is zero, `amount` tokens will be minted for `to`.
+     * - when `to` is zero, `amount` of ``from``'s tokens will be burned.
+     * - `from` and `to` are never both zero.
+     *
+     * To learn more about hooks, head to xref:ROOT:extending-contracts.adoc#using-hooks[Using Hooks].
+     */
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+
+    /**
+     * @dev Hook that is called after any transfer of tokens. This includes
+     * minting and burning.
+     *
+     * Calling conditions:
+     *
+     * - when `from` and `to` are both non-zero, `amount` of ``from``'s tokens
+     * has been transferred to `to`.
+     * - when `from` is zero, `amount` tokens have been minted for `to`.
+     * - when `to` is zero, `amount` of ``from``'s tokens have been burned.
+     * - `from` and `to` are never both zero.
+     *
+     * To learn more about hooks, head to xref:ROOT:extending-contracts.adoc#using-hooks[Using Hooks].
+     */
+    function _afterTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual {}
+}
+
+//SPDX-License-Identifier: MIT
+pragma solidity 0.8.10;
+import "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
+
+contract SaloonWallet {
+    using SafeERC20 for IERC20;
+
+    uint256 public constant BOUNTY_COMMISSION = 10;
+    uint256 public constant DENOMINATOR = 100;
+
+    address public immutable manager;
+
+    // premium fees to collect
+    uint256 public premiumFees;
+    uint256 public saloonTotalBalance;
+    uint256 public cummulativeCommission;
+    uint256 public cummulativeHackerPayouts;
+
+    // hunter balance per token
+    // hunter address => token address => amount
+    mapping(address => mapping(address => uint256)) public hunterTokenBalance;
+
+    // saloon balance per token
+    // token address => amount
+    mapping(address => uint256) public saloonTokenBalance;
+
+    constructor(address _manager) {
+        manager = _manager;
+    }
+
+    modifier onlyManager() {
+        require(msg.sender == manager, "Only manager allowed");
+        _;
+    }
+
+    // bountyPaid
+    function bountyPaid(
+        address _token,
+        uint256 _decimals,
+        address _hunter,
+        uint256 _amount
+    ) external onlyManager {
+        // handle decimals
+        uint256 decimals = 18 - _decimals == 0 ? 18 : 18 - _decimals;
+        // calculate commision
+        uint256 saloonCommission = (_amount *
+            10**decimals *
+            (BOUNTY_COMMISSION)) / (DENOMINATOR);
+
+        uint256 amount = _amount * (10**decimals);
+
+        uint256 hunterPayout = (amount) - saloonCommission;
+        // update variables and mappings
+        hunterTokenBalance[_hunter][_token] += hunterPayout;
+        cummulativeHackerPayouts += hunterPayout;
+        saloonTokenBalance[_token] += saloonCommission;
+        saloonTotalBalance += saloonCommission;
+        cummulativeCommission += saloonCommission;
+    }
+
+    function premiumFeesCollected(address _token, uint256 _amount)
+        external
+        onlyManager
+    {
+        saloonTokenBalance[_token] += _amount;
+        premiumFees += _amount;
+        saloonTotalBalance += _amount;
+    }
+
+    //
+    // WITHDRAW FUNDS TO ANY ADDRESS saloon admin
+    function withdrawSaloonFunds(
+        address _token,
+        address _to,
+        uint256 _amount,
+        uint256 _decimals
+    ) external onlyManager returns (bool) {
+        require(_amount <= saloonTokenBalance[_token], "not enough balance");
+
+        //  handle decimals to change state variables
+        uint256 decimals = 18 - _decimals == 0 ? 18 : 18 - _decimals;
+        uint256 amount = _amount * (10**decimals);
+        // decrease saloon funds variable
+        saloonTokenBalance[_token] -= amount;
+        saloonTotalBalance -= amount;
+
+        IERC20(_token).safeTransfer(_to, amount);
+
+        return true;
+    }
+
+    ///////////////////////   VIEW FUNCTIONS  ////////////////////////
+
+    // VIEW saloon CURRENT TOTAL BALANCE
+    function viewSaloonBalance() external view returns (uint256) {
+        return saloonTotalBalance;
+    }
+
+    // VIEW COMMISSIONS PLUS PREMIUM
+    function viewTotalEarnedSaloon() external view returns (uint256) {
+        uint256 premiums = viewTotalPremiums();
+        uint256 commissions = viewTotalSaloonCommission();
+
+        return premiums + commissions;
+    }
+
+    // VIEW TOTAL PAYOUTS MADE - commission - fees
+    function viewTotalHackerPayouts() external view returns (uint256) {
+        return cummulativeHackerPayouts;
+    }
+
+    // view hacker payouts by hunter
+    function viewHunterTotalTokenPayouts(address _token, address _hunter)
+        external
+        view
+        returns (uint256)
+    {
+        return hunterTokenBalance[_hunter][_token];
+    }
+
+    // VIEW TOTAL COMMISSION
+    function viewTotalSaloonCommission() public view returns (uint256) {
+        return cummulativeCommission;
+    }
+
+    // VIEW TOTAL IN PREMIUMS
+    function viewTotalPremiums() public view returns (uint256) {
+        return premiumFees;
+    }
+
+    ///////////////////////    VIEW FUNCTIONS END  ////////////////////////
+}
+
+// SPDX-License-Identifier: Unlicense
+pragma solidity 0.8.10;
+
+import "openzeppelin-contracts/contracts/proxy/Clones.sol";
+import "./BountyProxy.sol";
+import "./IBountyProxyFactory.sol";
+import "./BountyPool.sol";
+import "openzeppelin-contracts/contracts/proxy/utils/Initializable.sol";
+import "openzeppelin-contracts/contracts/access/Ownable.sol";
+
+contract BountyProxyFactory is Ownable, Initializable {
+    using Clones for address;
+    /// PUBLIC STORAGE ///
+
+    address public bountyProxyBase;
+
+    address public manager;
+
+    uint256 public constant VERSION = 1;
+
+    /// INTERNAL STORAGE ///
+
+    /// @dev Internal mapping to track all deployed proxies.
+    mapping(address => bool) internal _proxies;
+
+    function initiliaze(address payable _bountyProxyBase, address _manager)
+        external
+        initializer
+        onlyOwner
+    {
+        bountyProxyBase = _bountyProxyBase;
+        manager = _manager;
+    }
+
+    modifier onlyManager() {
+        require(msg.sender == manager, "Only manager allowed");
+        _;
+    }
+
+    function deployBounty(address _beacon, bytes memory _data)
+        public
+        onlyManager
+        returns (BountyPool proxy)
+    {
+        proxy = BountyPool(bountyProxyBase.clone());
+
+        BountyProxy newBounty = BountyProxy(payable(address(proxy)));
+        newBounty.initialize(_beacon, _data, msg.sender);
+        // proxy.initializeImplementation(msg.sender);
+    }
+}
+
+// SPDX-License-Identifier: Unlicense
+pragma solidity ^0.8.4;
+
+import "./BountyProxy.sol";
+import "./BountyPool.sol";
+
+/// @title IBountyProxyFactory
+/// @notice Deploys new proxies with CREATE2.
+interface IBountyProxyFactory {
+    /// PUBLIC CONSTANT FUNCTIONS ///
+
+    /// @notice Mapping to track all deployed proxies.
+    /// @param proxy The address of the proxy to make the check for.
+    function isProxy(address proxy) external view returns (bool result);
+
+    /// @notice The release version of PRBProxy.
+    /// @dev This is stored in the factory rather than the proxy to save gas for end users.
+    function VERSION() external view returns (uint256);
+
+    // /// @notice Deploys a new proxy for a given owner and returns the address of the newly created proxy
+    // /// @param _projectWallet The owner of the proxy.
+    // /// @return proxy The address of the newly deployed proxy contract.
+    function deployBounty(
+        address _beacon,
+        address _projectWallet,
+        bytes memory _data
+    ) external returns (BountyPool proxy);
+}
+
+//SPDX-License-Identifier: MIT
+pragma solidity 0.8.10;
+import "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+// import "openzeppelin-contracts/contracts/security/ReentrancyGuard.sol";
+import "openzeppelin-contracts/contracts/access/Ownable.sol";
+import "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
+import "openzeppelin-contracts/contracts/proxy/utils/Initializable.sol";
+import "./SaloonWallet.sol";
+
+/*
+BountyPool handles all logic for a bounty.
+- Projects can set different APYs and poolCaps at any time (timelock applies).
+- Stakers can stake or unstake any time (timelock applies for unstaking).
+- Premium calculations are made dynamically according to users balance, APY and staking period duration.
+*/
+
+contract BountyPool is Ownable, Initializable {
+    using SafeERC20 for IERC20;
+    //#################### State Variables *****************\\
+
+    address public manager;
+
+    uint256 public constant VERSION = 1;
+    uint256 public constant PRECISION = 100;
+    uint256 public constant YEAR = 365 days;
+    uint256 public constant PERIOD = 1 weeks;
+
+    uint256 public decimals;
+    uint256 public bountyCommission;
+    uint256 public premiumCommission;
+    uint256 public denominator;
+
+    uint256 public saloonBountyCommission;
+    uint256 public saloonPremiumFees;
+    uint256 public premiumBalance;
+
+    uint256 public desiredAPY;
+    uint256 public poolCap;
+    uint256 public lastTimePaid;
+    uint256 public projectDeposit;
+    uint256 public requiredPremiumBalancePerPeriod;
+    uint256 public stakingPause;
+
+    // staker => last time premium was claimed
+    mapping(address => uint256) public lastClaimed;
+    // staker address => StakingInfo array
+    mapping(address => StakingInfo[]) public staker;
+
+    // staker address => amount => timelock time
+    mapping(address => TimelockInfo) public stakerTimelock;
+
+    // staker address => reimbursement amount
+    mapping(address => uint256) public stakerReimbursement;
+
+    TimelockInfo public poolCapTimelock;
+    TimelockInfo public APYTimelock;
+    TimelockInfo public withdrawalTimelock;
+
+    struct StakingInfo {
+        uint256 stakeBalance;
+        uint256 balanceTimeStamp;
+    }
+
+    struct APYperiods {
+        uint256 timeStamp;
+        uint256 periodAPY;
+    }
+
+    struct TimelockInfo {
+        uint256 timelock;
+        uint256 timeLimit;
+        uint256 amount;
+        bool executed;
+    }
+
+    address[] public stakerList;
+
+    APYperiods[] public APYrecords;
+
+    StakingInfo[] public stakersDeposit;
+    uint256[] private APYChanges;
+    uint256[] private stakeChanges;
+    uint256[] private stakerChange;
+
+    bool public APYdropped;
+    bool public firstDeposit;
+
+    //#################### State Variables End *****************\\
+
+    /// @dev Initializes new bounty pool
+    function initializeImplementation(address _manager, uint256 _decimals)
+        public
+        initializer
+    {
+        manager = _manager;
+        decimals = _decimals;
+        bountyCommission = 10 * (10**_decimals);
+        premiumCommission = 10 * (10**_decimals);
+        denominator = 100 * (10**_decimals);
+    }
+
+    //#################### Modifiers *****************\\
+
+    modifier onlyManager() {
+        require(msg.sender == manager, "Only manager allowed");
+        _;
+    }
+
+    modifier onlyManagerOrSelf() {
+        require(
+            msg.sender == manager || msg.sender == address(this),
+            "Only manager or self allowed"
+        );
+        _;
+    }
+
+    //#################### Modifiers END *****************\\
+
+    //#################### Functions *******************\\
+
+    /// @dev Pays bounty and subtracts staker balances according to weight in pool.
+    /// This implementation uses stakers funds to pay the bounty first before using project deposit.
+    /// @param _token Token the bounty is going to be paid in.
+    /// @param _saloonWallet Address the Saloon commission will be sent to.
+    /// @param _hunter Hunter wallet address the bounty will be paid to.
+    /// @param _amount Amount to be paid including Hunter payout + Saloon commission.
+    function payBounty(
+        address _token,
+        address _saloonWallet,
+        address _hunter,
+        uint256 _amount
+    ) public onlyManager returns (bool) {
+        StakingInfo[] memory stakersDeposits = stakersDeposit;
+        uint256 stakingLenght = stakersDeposits.length - 1;
+
+        // cache list
+        address[] memory stakersList = stakerList;
+        // cache length
+        uint256 length = stakersList.length;
+        if (stakersList.length > 0) {
+            // check if stakersDeposit is enough
+            if (stakersDeposits[stakingLenght].stakeBalance >= _amount) {
+                // decrease stakerDeposit
+                uint256 newStakersDeposit = stakersDeposits[stakingLenght]
+                    .stakeBalance - _amount;
+                // push new value to array
+                StakingInfo memory stakingInfo;
+                stakingInfo.balanceTimeStamp = block.timestamp;
+                stakingInfo.stakeBalance = newStakersDeposit;
+
+                // if staker deposit == 0
+                // check new pushed value
+                if (newStakersDeposit == 0) {
+                    for (uint256 i; i < length; ++i) {
+                        // update StakingInfo struct
+                        StakingInfo memory newInfo;
+                        newInfo.balanceTimeStamp = block.timestamp;
+                        newInfo.stakeBalance = 0;
+
+                        address stakerAddress = stakersList[i];
+                        staker[stakerAddress].push(newInfo);
+                    }
+
+                    // deduct saloon commission and transfer
+                    calculateCommissioAndTransferPayout(
+                        _token,
+                        _hunter,
+                        _saloonWallet,
+                        _amount
+                    );
+
+                    // update stakersDeposit
+                    stakersDeposit.push(stakingInfo);
+                    // clean stakerList array
+                    delete stakerList;
+                    return true;
+                }
+                // calculate percentage of stakersDeposit
+                // note should we increase precision?
+                uint256 percentage = (_amount * (10**decimals)) /
+                    stakersDeposits[stakingLenght].stakeBalance;
+                // loop through all stakers and deduct percentage from their balances
+                for (uint256 i; i < length; ++i) {
+                    address stakerAddress = stakersList[i];
+                    uint256 arraySize = staker[stakerAddress].length - 1;
+                    uint256 oldStakerBalance = staker[stakerAddress][arraySize]
+                        .stakeBalance;
+
+                    // update StakingInfo struct
+                    StakingInfo memory newInfo;
+                    newInfo.balanceTimeStamp = block.timestamp;
+
+                    newInfo.stakeBalance =
+                        oldStakerBalance -
+                        ((oldStakerBalance * percentage) / (10**decimals));
+
+                    staker[stakerAddress].push(newInfo);
+                }
+                // push to
+                stakersDeposit.push(stakingInfo);
+
+                // deduct saloon commission and transfer
+                calculateCommissioAndTransferPayout(
+                    _token,
+                    _hunter,
+                    _saloonWallet,
+                    _amount
+                );
+
+                return true;
+            } else {
+                // reset baalnce of all stakers
+                for (uint256 i; i < length; ++i) {
+                    // update StakingInfo struct
+                    StakingInfo memory newInfo;
+                    newInfo.balanceTimeStamp = block.timestamp;
+                    newInfo.stakeBalance = 0;
+
+                    address stakerAddress = stakersList[i];
+                    staker[stakerAddress].push(newInfo);
+                }
+                // clean stakerList array
+                delete stakerList;
+                // if stakersDeposit not enough use projectDeposit to pay the rest
+                uint256 remainingCost = _amount -
+                    stakersDeposits[stakingLenght].stakeBalance;
+                // descrease project deposit by the remaining amount
+                projectDeposit -= remainingCost;
+
+                // set stakers deposit to 0
+                StakingInfo memory stakingInfo;
+                stakingInfo.balanceTimeStamp = block.timestamp;
+                stakingInfo.stakeBalance = 0;
+                stakersDeposit.push(stakingInfo);
+
+                // deduct saloon commission and transfer
+                calculateCommissioAndTransferPayout(
+                    _token,
+                    _hunter,
+                    _saloonWallet,
+                    _amount
+                );
+
+                return true;
+            }
+        } else {
+            // deduct saloon commission and transfer
+            calculateCommissioAndTransferPayout(
+                _token,
+                _hunter,
+                _saloonWallet,
+                _amount
+            );
+
+            projectDeposit -= _amount;
+
+            return true;
+        }
+    }
+
+    /// @dev Calculates Saloon commission and transfers it to _saloonWallet,
+    /// as well as transferring the hunter payout to _hunter.
+    /// @param _token Token the bounty is going to be paid in.
+    /// @param _saloonWallet Address the Saloon commission will be sent to.
+    /// @param _hunter Hunter wallet address the bounty will be paid to.
+    /// @param _amount Amount to be paid including Hunter payout + Saloon commission.
+    function calculateCommissioAndTransferPayout(
+        address _token,
+        address _hunter,
+        address _saloonWallet,
+        uint256 _amount
+    ) internal returns (bool) {
+        // deduct saloon commission
+        uint256 saloonCommission = (_amount * bountyCommission) / denominator;
+        uint256 hunterPayout = _amount - saloonCommission;
+        // transfer to hunter
+        IERC20(_token).safeTransfer(_hunter, hunterPayout);
+        // transfer commission to saloon address
+        IERC20(_token).safeTransfer(_saloonWallet, saloonCommission);
+
+        return true;
+    }
+
+    /// @dev Transfer already collected Saloon premium fees to _saloonWallet.
+    /// @param _token Token the fees are paid in.
+    /// @param _saloonWallet Address the Saloon commission will be sent to.
+    function collectSaloonPremiumFees(address _token, address _saloonWallet)
+        external
+        onlyManager
+        returns (uint256)
+    {
+        uint256 totalCollected = saloonPremiumFees;
+
+        // reset claimable fees
+        saloonPremiumFees = 0;
+
+        // send current fees to saloon address
+        IERC20(_token).safeTransfer(_saloonWallet, totalCollected);
+
+        return totalCollected;
+    }
+
+    /// @dev Makes a payout deposit for the proejct.
+    // project must approve this address first.
+    /// @param _token Token the bounty is going to be paid in.
+    /// @param _projectWallet Project address deposint the payout.
+    /// @param _amount Amount to be paid including Hunter payout + Saloon commission.
+    function bountyDeposit(
+        address _token,
+        address _projectWallet,
+        uint256 _amount
+    ) external onlyManager returns (bool) {
+        // transfer from project account
+        IERC20(_token).safeTransferFrom(_projectWallet, address(this), _amount);
+
+        if (firstDeposit == false) {
+            stakingPause = block.timestamp + PERIOD;
+            firstDeposit = true;
+        }
+
+        // update deposit variable
+        projectDeposit += _amount;
+
+        return true;
+    }
+
+    /// @dev Schedules a change in Pool Cap for a determined amount.
+    /// @param _newPoolCap Amount the new Pool Cap is going to be set to once timelock is over.
+    function schedulePoolCapChange(uint256 _newPoolCap) external onlyManager {
+        poolCapTimelock.timelock = block.timestamp + PERIOD;
+        poolCapTimelock.amount = _newPoolCap;
+        poolCapTimelock.executed = false;
+        // note should this have a timelimit??
+    }
+
+    /// @dev Set new Pool Cap as scheduled.
+    /// if poolCap = 0 scheduling is not necessary
+    /// @param _amount New pool cap as specificied when scheduling(if necessary).
+    function setPoolCap(uint256 _amount) external onlyManager {
+        // check timelock if current poolCap != 0
+        if (poolCap != 0) {
+            TimelockInfo memory poolCapLock = poolCapTimelock;
+            // Check If queued check time has passed && its hasnt been executed && timestamp cant be =0
+            require(
+                poolCapLock.timelock < block.timestamp &&
+                    poolCapLock.executed == false &&
+                    poolCapLock.amount == _amount &&
+                    poolCapLock.timelock != 0,
+                "Timelock not set or not completed in time"
+            );
+            // set executed to true
+            poolCapTimelock.executed = true;
+        }
+        StakingInfo[] memory stakersDeposits = stakersDeposit;
+        uint256 stakingLenght = stakersDeposits.length;
+
+        // if stakers deposit > newPoolcap reimburse different to users
+        if (stakingLenght > 0) {
+            uint256 totalStakingBalance = stakersDeposits[stakingLenght - 1]
+                .stakeBalance;
+            if (totalStakingBalance > _amount) {
+                address[] memory stakersList = stakerList;
+                uint256 length = stakersList.length;
+                // calculate difference = (stakers deposit - newPoolcap)
+                uint256 diff = totalStakingBalance - _amount;
+                // loop through stakers
+
+                for (uint256 i; i < length; ) {
+                    address stakerAddress = stakersList[i];
+                    uint256 arraySize = staker[stakerAddress].length - 1;
+                    uint256 dec = decimals;
+                    // calculate current stakersDeposit individual percentage of each staker
+                    uint256 percentage = (staker[stakerAddress][arraySize]
+                        .stakeBalance * (10**dec)) / totalStakingBalance;
+
+                    // amount = calculate individual difference percentage per staker
+                    uint256 amount = (diff * percentage) / (10**dec);
+
+                    // add amount to instant claim mapping variable that gets added and reset in claimPremium
+                    stakerReimbursement[stakerAddress] += amount;
+                    // decrease stakerBalance by amount
+                    StakingInfo memory newInfo;
+                    // update balance
+                    newInfo.stakeBalance =
+                        staker[stakerAddress][arraySize].stakeBalance -
+                        amount;
+                    // update current time
+                    newInfo.balanceTimeStamp = block.timestamp;
+                    // push to array
+                    staker[stakerAddress].push(newInfo);
+
+                    unchecked {
+                        ++i;
+                    }
+                }
+
+                //  subtract and update: stakersDeposit - diff
+                StakingInfo memory newDepositInfo;
+                newDepositInfo.balanceTimeStamp = block.timestamp;
+                newDepositInfo.stakeBalance =
+                    stakersDeposits[stakingLenght - 1].stakeBalance -
+                    diff;
+                stakersDeposit.push(newDepositInfo);
+            }
+        }
+
+        poolCap = _amount;
+    }
+
+    /// @dev Schedules a change in APY for a determined amount.
+    /// @param _newAPY Amount the new APY is going to be set to once timelock is over.
+    function scheduleAPYChange(uint256 _newAPY) external onlyManager {
+        APYTimelock.timelock = block.timestamp + PERIOD;
+        APYTimelock.amount = _newAPY;
+        APYTimelock.executed = false;
+        // note should this have a timelimit??
+    }
+
+    /// @dev Set new APY as scheduled.
+    /// If APY = 0 scheduling is not required.
+    /// project must approve this address first.
+    /// project will have to pay upfront cost of full period on the first time.
+    /// this will serve two purposes:
+    /// 1. sign of good faith and working payment system
+    /// 2. if theres is ever a problem with payment the initial premium deposit can be used as a buffer so users can still be paid while issue is fixed.
+    /// @param _desiredAPY New apy as specificied when scheduling (if necessary).
+    /// @param _token Token the premium is going to be paid in.
+    /// @param _projectWallet Project address that will continuously be billed for premium payments.
+    function setDesiredAPY(
+        address _token,
+        address _projectWallet,
+        uint256 _desiredAPY // make sure APY has right amount of decimals (1e18)
+    ) public onlyManagerOrSelf returns (bool) {
+        // check timelock if current APY != 0
+        if (desiredAPY != 0) {
+            TimelockInfo memory APYLock = APYTimelock;
+            // Check If queued check time has passed && its hasnt been executed && timestamp cant be =0
+            require(
+                APYLock.timelock < block.timestamp &&
+                    APYLock.executed == false &&
+                    APYLock.amount == _desiredAPY &&
+                    APYLock.timelock != 0,
+                "Timelock not set or not completed"
+            );
+            // set executed to true
+            APYTimelock.executed = true;
+        }
+        uint256 currentPremiumBalance = premiumBalance;
+        uint256 newRequiredPremiumBalancePerPeriod;
+        StakingInfo[] memory stakersDeposits = stakersDeposit;
+        uint256 stakingLenght = stakersDeposits.length;
+        if (stakingLenght != 0) {
+            if (stakersDeposits[stakingLenght - 1].stakeBalance != 0) {
+                // bill all premium due before changing APY
+                billPremium(_token, _projectWallet);
+            }
+        } else {
+            // ensure there is enough premium balance to pay stakers new APY for one period
+            newRequiredPremiumBalancePerPeriod =
+                (((poolCap * _desiredAPY) / denominator) / YEAR) *
+                PERIOD;
+            // note: this might lead to leftover premium if project decreases APY, we will see what to do about that later
+            if (currentPremiumBalance < newRequiredPremiumBalancePerPeriod) {
+                // calculate difference to be paid
+                uint256 difference = newRequiredPremiumBalancePerPeriod -
+                    currentPremiumBalance;
+                // transfer to this address
+                IERC20(_token).safeTransferFrom(
+                    _projectWallet,
+                    address(this),
+                    difference
+                );
+                // increase premium
+                premiumBalance += difference;
+            }
+        }
+
+        requiredPremiumBalancePerPeriod = newRequiredPremiumBalancePerPeriod;
+
+        // register new APYperiod
+        APYperiods memory newAPYperiod;
+        newAPYperiod.timeStamp = block.timestamp;
+        newAPYperiod.periodAPY = _desiredAPY;
+        APYrecords.push(newAPYperiod);
+
+        // set APY
+        desiredAPY = _desiredAPY;
+
+        // loop through stakerList array and push new balance for new APY period time stamp for every staker
+
+        address[] memory stakersList = stakerList;
+        if (stakersList.length > 0) {
+            uint256 length = stakersList.length - 1;
+            for (uint256 i; i < length; ) {
+                address stakerAddress = stakersList[i];
+                uint256 arraySize = staker[stakerAddress].length - 1;
+
+                StakingInfo memory newInfo;
+                // get last balance
+                newInfo.stakeBalance = staker[stakerAddress][arraySize]
+                    .stakeBalance;
+                // update current time
+                newInfo.balanceTimeStamp = block.timestamp;
+                // push to array so user can claim it.
+                staker[stakerAddress].push(newInfo);
+
+                unchecked {
+                    ++i;
+                }
+            }
+        }
+        // disable instant withdrawals ? note this is not in effect
+        APYdropped = false;
+
+        return true;
+    }
+
+    /// @dev Calculates how much premium is owed since last time it was paid.
+    /// Loops through variance in total staking balance and takes into account how long it lasted.
+    function calculatePremiumOwed(
+        uint256 _apy,
+        uint256 _stakingLenght,
+        uint256 _lastPaid,
+        StakingInfo[] memory _stakersDeposits
+    ) internal returns (uint256) {
+        uint256 premiumOwed;
+        for (uint256 i; i < _stakingLenght; ++i) {
+            // see how many changes since lastPaid
+            if (_stakersDeposits[i].balanceTimeStamp > _lastPaid) {
+                stakeChanges.push(i);
+                // premiumOwed = _stakersDeposits[1].balanceTimeStamp;
+            }
+        }
+
+        uint256[] memory stakingChanges = stakeChanges;
+        uint256 length = stakingChanges.length;
+        uint256 duration;
+
+        // if no staking happened since lastPaid
+        if (length == 0) {
+            duration = block.timestamp - _lastPaid;
+
+            premiumOwed =
+                ((
+                    ((_stakersDeposits[_stakingLenght - 1].stakeBalance *
+                        _apy) / denominator)
+                ) / YEAR) *
+                duration;
+
+            // if only one change was made between lastPaid and now
+        } else if (length == 1) {
+            if (_lastPaid == 0) {
+                duration =
+                    block.timestamp -
+                    _stakersDeposits[0].balanceTimeStamp;
+                premiumOwed =
+                    ((
+                        ((_stakersDeposits[0].stakeBalance * _apy) /
+                            denominator)
+                    ) / YEAR) *
+                    duration;
+            } else {
+                duration = (_stakersDeposits[stakingChanges[0]]
+                    .balanceTimeStamp - _lastPaid);
+
+                premiumOwed +=
+                    ((
+                        ((_stakersDeposits[stakingChanges[0] - 1].stakeBalance *
+                            _apy) / denominator)
+                    ) / YEAR) *
+                    duration;
+
+                uint256 duration2 = (block.timestamp -
+                    _stakersDeposits[stakingChanges[0]].balanceTimeStamp);
+
+                premiumOwed +=
+                    ((
+                        ((_stakersDeposits[stakingChanges[0]].stakeBalance *
+                            _apy) / denominator)
+                    ) / YEAR) *
+                    duration2;
+            }
+            // if there were multiple changes in stake balance between lastPaid and now
+        } else {
+            for (uint256 i; i < length; ++i) {
+                // calculate payout for every change in staking according to time
+
+                if (_lastPaid == 0) {
+                    if (i == length - 1) {
+                        duration =
+                            block.timestamp -
+                            _stakersDeposits[stakingChanges[i]]
+                                .balanceTimeStamp;
+
+                        premiumOwed +=
+                            ((
+                                ((_stakersDeposits[stakingChanges[i]]
+                                    .stakeBalance * _apy) / denominator)
+                            ) / YEAR) *
+                            duration;
+                    } else {
+                        duration =
+                            _stakersDeposits[stakingChanges[i + 1]]
+                                .balanceTimeStamp -
+                            _stakersDeposits[stakingChanges[i]]
+                                .balanceTimeStamp;
+                        premiumOwed +=
+                            ((
+                                ((_stakersDeposits[stakingChanges[i]]
+                                    .stakeBalance * _apy) / denominator)
+                            ) / YEAR) *
+                            duration;
+                    }
+                } else {
+                    if (i == 0) {
+                        // calculate duration from lastPaid with last value
+                        duration =
+                            _stakersDeposits[stakingChanges[i]]
+                                .balanceTimeStamp -
+                            _lastPaid;
+
+                        premiumOwed +=
+                            ((
+                                ((_stakersDeposits[stakingChanges[i] - 1]
+                                    .stakeBalance * _apy) / denominator)
+                            ) / YEAR) *
+                            duration;
+                        // calculate duration from current i to next i with current value
+                        uint256 duration2 = _stakersDeposits[
+                            stakingChanges[i] + 1
+                        ].balanceTimeStamp -
+                            _stakersDeposits[stakingChanges[i]]
+                                .balanceTimeStamp;
+
+                        premiumOwed +=
+                            ((
+                                ((_stakersDeposits[stakingChanges[i]]
+                                    .stakeBalance * _apy) / denominator)
+                            ) / YEAR) *
+                            duration2;
+                    } else if (i == length - 1) {
+                        duration =
+                            block.timestamp -
+                            _stakersDeposits[stakingChanges[i]]
+                                .balanceTimeStamp;
+                        premiumOwed +=
+                            ((
+                                ((_stakersDeposits[stakingChanges[i]]
+                                    .stakeBalance * _apy) / denominator)
+                            ) / YEAR) *
+                            duration;
+                    } else {
+                        // if i is in between first and last
+                        duration =
+                            _stakersDeposits[stakingChanges[i + 1]]
+                                .balanceTimeStamp -
+                            _stakersDeposits[stakingChanges[i]]
+                                .balanceTimeStamp;
+
+                        premiumOwed +=
+                            ((
+                                ((_stakersDeposits[stakingChanges[i]]
+                                    .stakeBalance * _apy) / denominator)
+                            ) / YEAR) *
+                            duration;
+                    }
+                }
+            }
+        }
+
+        delete stakeChanges;
+        return premiumOwed;
+    }
+
+    /// @notice Bill premium owned since last time paid.
+    /// this address needs to be approved first
+    function billPremium(address _token, address _projectWallet)
+        public
+        onlyManagerOrSelf
+        returns (bool)
+    {
+        StakingInfo[] memory stakersDeposits = stakersDeposit;
+        uint256 stakingLenght = stakersDeposits.length;
+        uint256 lastPaid = lastTimePaid;
+        uint256 apy = desiredAPY;
+
+        /* 
+        check when function was called last time and pay premium according to how much time has passed since then.
+        - average variance since last paid
+            - needs to take into account how long each variance is...
+        obs: this could probably be done more efficiently...
+        */
+        uint256 premiumOwed = calculatePremiumOwed(
+            apy,
+            stakingLenght,
+            lastPaid,
+            stakersDeposits
+        );
+        // note try/catch should handle both revert and fails from transferFrom;
+        try
+            IERC20(_token).transferFrom(
+                _projectWallet,
+                address(this),
+                premiumOwed
+            )
+        returns (bool result) {
+            // If return valid is 0 run same things on catch block
+            if (result == false) {
+                // if transfer fails APY is reset and premium is paid with new APY
+                uint256 newAPY = viewcurrentAPY();
+                // register new APYperiod
+                APYperiods memory newAPYperiod;
+                newAPYperiod.timeStamp = block.timestamp;
+                newAPYperiod.periodAPY = newAPY;
+                APYrecords.push(newAPYperiod);
+                // set new APY
+                // register new APYperiod
+                desiredAPY = newAPY;
+
+                address[] memory stakersList = stakerList;
+                if (stakersList.length > 0) {
+                    uint256 length = stakersList.length - 1;
+                    for (uint256 i; i < length; ) {
+                        address stakerAddress = stakersList[i];
+                        uint256 arraySize = staker[stakerAddress].length - 1;
+
+                        StakingInfo memory newInfo;
+                        // get last balance
+                        newInfo.stakeBalance = staker[stakerAddress][arraySize]
+                            .stakeBalance;
+                        // update current time
+                        newInfo.balanceTimeStamp = block.timestamp;
+                        // push to array so user can claim it.
+                        staker[stakerAddress].push(newInfo);
+
+                        unchecked {
+                            ++i;
+                        }
+                    }
+                }
+                return false;
+            }
+        } catch {
+            // if transfer fails APY is reset and premium is paid with new APY
+            uint256 newAPY = viewcurrentAPY();
+            // register new APYperiod
+            APYperiods memory newAPYperiod;
+            newAPYperiod.timeStamp = block.timestamp;
+            newAPYperiod.periodAPY = newAPY;
+            APYrecords.push(newAPYperiod);
+            // set new APY
+            // register new APYperiod
+            desiredAPY = newAPY;
+
+            address[] memory stakersList = stakerList;
+            if (stakersList.length > 0) {
+                uint256 length = stakersList.length - 1;
+                for (uint256 i; i < length; ) {
+                    address stakerAddress = stakersList[i];
+                    uint256 arraySize = staker[stakerAddress].length - 1;
+
+                    StakingInfo memory newInfo;
+                    // get last balance
+                    newInfo.stakeBalance = staker[stakerAddress][arraySize]
+                        .stakeBalance;
+                    // update current time
+                    newInfo.balanceTimeStamp = block.timestamp;
+                    // push to array so user can claim it.
+                    staker[stakerAddress].push(newInfo);
+
+                    unchecked {
+                        ++i;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        // Calculate saloon fee
+        uint256 saloonFee = (premiumOwed * premiumCommission) / denominator;
+
+        // update saloon claimable fee
+        saloonPremiumFees += saloonFee;
+
+        // update premiumBalance
+        premiumBalance += premiumOwed;
+
+        lastTimePaid = block.timestamp;
+
+        // disable instant withdrawals
+        APYdropped = false;
+
+        return true;
+    }
+
+    /// @dev Schedules project deposit withdrawal.
+    /// @param _amount Amount to be withdrawn once timelock is over.
+    function scheduleprojectDepositWithdrawal(uint256 _amount)
+        external
+        onlyManager
+        returns (bool)
+    {
+        require(projectDeposit >= _amount, "Amount bigger than deposit");
+
+        withdrawalTimelock.timelock = block.timestamp + PERIOD;
+        withdrawalTimelock.timeLimit = block.timestamp + PERIOD + 3 days;
+        withdrawalTimelock.amount = _amount;
+        withdrawalTimelock.executed = false;
+        // note timelock should have a limit window. Currently discussing how long that window should be
+        return true;
+    }
+
+    /// @dev Withdraws the _amount sechuduled.
+    function projectDepositWithdrawal(
+        address _token,
+        address _projectWallet,
+        uint256 _amount
+    ) external onlyManager returns (bool) {
+        TimelockInfo memory withdrawalLock = withdrawalTimelock;
+        // time lock check
+        // Check If queued check time has passed && its hasnt been executed && timestamp cant be =0
+        require(
+            withdrawalLock.timelock < block.timestamp &&
+                withdrawalLock.timeLimit > block.timestamp &&
+                withdrawalLock.executed == false &&
+                withdrawalLock.amount >= _amount &&
+                withdrawalLock.timelock != 0,
+            "Timelock not set or not completed in time"
+        );
+        withdrawalTimelock.executed = true;
+
+        projectDeposit -= _amount;
+        IERC20(_token).safeTransfer(_projectWallet, _amount);
+        return true;
+    }
+
+    /// @dev Stake funds into the bounty pool
+    /// staker needs to approve this address first
+    function stake(
+        address _token,
+        address _staker,
+        uint256 _amount
+    ) external onlyManager returns (bool) {
+        //check if initial post staking period has passed
+        require(stakingPause < block.timestamp, "Staking not open just yet");
+        // dont allow staking if stakerDeposit >= poolCap
+        StakingInfo[] memory stakersDeposits = stakersDeposit;
+        uint256 stakingLenght = stakersDeposits.length;
+
+        if (stakingLenght == 0) {
+            StakingInfo memory init;
+            init.stakeBalance = 0;
+            init.balanceTimeStamp = 0;
+            stakersDeposit.push(init);
+        }
+        uint256 positioning = stakersDeposit.length - 1;
+
+        require(
+            stakersDeposit[positioning].stakeBalance + _amount <= poolCap,
+            "Staking Pool already full"
+        );
+
+        uint256 arrayLength = staker[_staker].length;
+
+        //  if array length is  == 0 we must push first
+        if (arrayLength == 0) {
+            StakingInfo memory init;
+            init.stakeBalance = 0;
+            init.balanceTimeStamp = 0;
+            staker[_staker].push(init);
+        }
+
+        uint256 position = staker[_staker].length - 1;
+
+        // Push to stakerList array if previous balance = 0
+        if (staker[_staker][position].stakeBalance == 0) {
+            stakerList.push(_staker);
+        }
+
+        // update StakingInfo struct
+        StakingInfo memory newInfo;
+        newInfo.balanceTimeStamp = block.timestamp;
+        newInfo.stakeBalance = staker[_staker][position].stakeBalance + _amount;
+
+        // if staker is new update array[0] created earlier
+        if (arrayLength == 0) {
+            staker[_staker][position] = newInfo;
+        } else {
+            // if staker is not new:
+            // save info to storage
+            staker[_staker].push(newInfo);
+        }
+
+        StakingInfo memory depositInfo;
+        depositInfo.stakeBalance =
+            stakersDeposit[positioning].stakeBalance +
+            _amount;
+
+        depositInfo.balanceTimeStamp = block.timestamp;
+
+        if (stakingLenght == 0) {
+            stakersDeposit[positioning] = depositInfo;
+        } else {
+            // push to global stakersDeposit
+            stakersDeposit.push(depositInfo);
+        }
+
+        // transferFrom to this address
+        IERC20(_token).safeTransferFrom(_staker, address(this), _amount);
+
+        return true;
+    }
+
+    /// @dev Schedules unstake for a determined amount.
+    /// @param _staker Staker address where the unstaked funds we be returned to.
+    /// @param _amount Amount to be unstaked from _staker balance once timelock is over.
+    function scheduleUnstake(address _staker, uint256 _amount)
+        external
+        onlyManager
+        returns (bool)
+    {
+        StakingInfo[] memory stakr = staker[_staker];
+        uint256 arraySize = stakr.length - 1;
+
+        require(
+            stakr[arraySize].stakeBalance >= _amount,
+            "Insuficcient balance"
+        );
+
+        stakerTimelock[_staker].timelock = block.timestamp + PERIOD;
+        stakerTimelock[_staker].timeLimit = block.timestamp + PERIOD + 3 days;
+        stakerTimelock[_staker].amount = _amount;
+        stakerTimelock[_staker].executed = false;
+
+        return true;
+    }
+
+    /// @dev Unstakes _amount as previously scheduled
+    function unstake(
+        address _token,
+        address _staker,
+        uint256 _amount
+    ) external onlyManager returns (bool) {
+        // note allow for immediate withdrawal if APY drops from desired APY ??
+        // if (desiredAPY != 0 || APYdropped == true) {
+        StakingInfo[] memory stakersDeposits = stakersDeposit;
+        uint256 stakingLenght = stakersDeposits.length - 1;
+
+        if (
+            desiredAPY != 0 ||
+            poolCap > stakersDeposits[stakingLenght].stakeBalance
+        ) {
+            TimelockInfo memory stakrTimelock = stakerTimelock[_staker];
+            // time lock check
+            // Check If queued check time has passed && its hasnt been executed && timestamp cant be =0
+            require(
+                stakrTimelock.timelock < block.timestamp &&
+                    stakrTimelock.timeLimit > block.timestamp &&
+                    stakrTimelock.executed == false &&
+                    stakrTimelock.amount >= _amount &&
+                    stakrTimelock.timelock != 0,
+                "Timelock not set or not completed"
+            );
+            stakerTimelock[_staker].executed = true;
+        }
+        uint256 arraySize = staker[_staker].length - 1;
+
+        // decrease staker balance
+        // update StakingInfo struct
+        StakingInfo memory newInfo;
+        newInfo.balanceTimeStamp = block.timestamp;
+        newInfo.stakeBalance =
+            staker[_staker][arraySize].stakeBalance -
+            _amount;
+
+        address[] memory stakersList = stakerList;
+        // delete from staker list
+        // note if 18 decimals are not used properly at some stage this might never be true.
+        if (newInfo.stakeBalance == 0) {
+            // loop through stakerlist
+            uint256 length = stakersList.length;
+            for (uint256 i; i < length; ) {
+                // find staker
+                if (stakersList[i] == _staker) {
+                    // get value in the last array position
+                    address lastAddress = stakersList[length - 1];
+                    // replace it to the current position
+                    stakerList[i] = lastAddress;
+
+                    // pop last array value
+                    stakerList.pop();
+                    break;
+                }
+
+                unchecked {
+                    ++i;
+                }
+            }
+        }
+        // save info to storage
+        staker[_staker].push(newInfo);
+
+        StakingInfo memory depositInfo;
+        depositInfo.stakeBalance =
+            stakersDeposits[stakingLenght].stakeBalance -
+            _amount;
+        depositInfo.balanceTimeStamp = block.timestamp;
+
+        // decrease global stakersDeposit
+        stakersDeposit.push(depositInfo);
+
+        // transfer it out
+        IERC20(_token).safeTransfer(_staker, _amount);
+
+        return true;
+    }
+
+    /// @dev Claim premium for a specifc staker.
+    /// @param _token Token the premium is going to be paid in.
+    /// @param _staker Staker address that is claiming the premium.
+    /// @param _projectWallet Project address to bill premium if current balance is not sufficient.
+    function claimPremium(
+        address _token,
+        address _staker,
+        address _projectWallet
+    ) external onlyManager returns (uint256, bool) {
+        // how many chunks of time (currently = 2 weeks) since lastclaimed?
+        uint256 lastTimeClaimed = lastClaimed[_staker];
+        // uint lastTimeClaimed = 0;
+
+        StakingInfo[] memory stakerInfo = staker[_staker];
+        uint256 stakerLength = stakerInfo.length;
+        uint256 currentPremiumBalance = premiumBalance;
+
+        uint256 totalPremiumToClaim = calculatePremiumToClaim(
+            lastTimeClaimed,
+            stakerInfo,
+            stakerLength
+        );
+        // Calculate saloon fee
+        uint256 saloonFee = (totalPremiumToClaim * premiumCommission) /
+            denominator;
+        // subtract saloon fee
+        totalPremiumToClaim -= saloonFee;
+        // sum stakerReimbursement in case there is any. Not very gas efficicent at the moment.
+        uint256 owedPremium = totalPremiumToClaim;
+
+        // if premium balance < owedPremium
+        if (currentPremiumBalance < owedPremium) {
+            //  call billpremium
+            if (billPremium(_token, _projectWallet) == false) {
+                uint256 reimbursement = stakerReimbursement[_staker];
+                IERC20(_token).safeTransfer(_staker, reimbursement);
+                stakerReimbursement[_staker] = 0;
+
+                return (reimbursement, false);
+            }
+            // sum owedPremium to reibursement amount
+            owedPremium += stakerReimbursement[_staker];
+            // reset reimbursement amount
+            stakerReimbursement[_staker] = 0;
+
+            IERC20(_token).safeTransfer(_staker, owedPremium);
+
+            // update last time claimed
+            premiumBalance -= totalPremiumToClaim;
+            lastClaimed[_staker] = block.timestamp;
+            return (owedPremium, true);
+        } else {
+            // sum owedPremium to reibursement amount
+            owedPremium += stakerReimbursement[_staker];
+            // reset reimbursement amount
+            stakerReimbursement[_staker] = 0;
+
+            IERC20(_token).safeTransfer(_staker, owedPremium);
+
+            // update premiumBalance
+            premiumBalance -= totalPremiumToClaim;
+
+            // update last time claimed
+            lastClaimed[_staker] = block.timestamp;
+            return (owedPremium, true);
+        }
+    }
+
+    ///@dev Calculates staker premium to claim
+    /// Iterates over periods with different APYs and/or staking amounts
+    /// @param _lastTimeClaimed Last time user claimed premium.
+    /// @param _stakerInfo Record of staker balance changes
+    /// @param _stakerInfo length of record of staker balance changes
+    /// @param APYrecord Record of APY changes since _lastTimeClaimed
+    function calculateBalancePerPeriod(
+        uint256 _lastTimeClaimed,
+        StakingInfo[] memory _stakerInfo,
+        uint256 _stakerLength,
+        APYperiods[] memory APYrecord
+    ) internal returns (uint256) {
+        uint256 length = APYrecord.length;
+        uint256 totalPeriodClaim;
+        uint256 periodStart;
+        uint256 periodEnd;
+        if (_lastTimeClaimed == 0) {
+            for (uint256 i; i < length; ++i) {
+                periodStart = APYrecord[i].timeStamp;
+
+                // period end is equal NOW for last APY that has been set
+                if (i == length - 1) {
+                    periodEnd = block.timestamp;
+                } else {
+                    periodEnd = APYrecord[i + 1].timeStamp;
+                }
+                uint256 apy = APYrecord[i].periodAPY;
+                // loop through stakers balance fluctiation during this period
+                totalPeriodClaim += calculateBalance(
+                    apy,
+                    periodStart,
+                    periodEnd,
+                    _stakerInfo,
+                    _stakerLength,
+                    false
+                );
+            }
+        } else {
+            for (uint256 i; i < length; ++i) {
+                /* 
+                - See what's the last one to be < lastTimeClaimed
+                - calculate distance between last time claimed and 
+                APYrecords.TimeStamp[i+1] period start 
+                - judge distance in comparison with i+1 until last i that compares distance to block.timestamp
+                */
+                if (APYrecord[i].timeStamp > _lastTimeClaimed) {
+                    APYChanges.push(i - 1);
+                    // push last period too
+                    if (i == length - 1) {
+                        APYChanges.push(i);
+                    }
+                }
+            }
+            uint256[] memory APYChange = APYChanges;
+            uint256 len = APYChange.length;
+
+            // if APYChanges len = 0 use timestamp of last APYperiod or _lastTimeClaimed as periodStart
+            if (len == 0) {
+                totalPeriodClaim += noAPYChangeBalance(
+                    _stakerLength,
+                    length,
+                    _lastTimeClaimed,
+                    _stakerInfo,
+                    APYrecord
+                );
+            } else {
+                // else do loop
+                totalPeriodClaim += APYChangeBalance(
+                    _stakerLength,
+                    length,
+                    _lastTimeClaimed,
+                    _stakerInfo,
+                    APYrecord,
+                    APYChange
+                );
+            }
+        }
+        return totalPeriodClaim;
+    }
+
+    /// @dev Calculates premium owed during a period where APY hasn't changed.
+    function noAPYChangeBalance(
+        uint256 _stakerLength,
+        uint256 length,
+        uint256 _lastTimeClaimed,
+        StakingInfo[] memory _stakerInfo,
+        APYperiods[] memory APYrecord
+    ) internal returns (uint256) {
+        bool pStartIsLastClaimed;
+        uint256 periodStart;
+        uint256 periodEnd;
+        uint256 totalPeriodClaim;
+        if (_lastTimeClaimed < APYrecord[length - 1].timeStamp) {
+            periodStart = APYrecord[length - 1].timeStamp;
+        } else {
+            //if _lastTimeClaimed the stakerBalance needs to be the last one...
+            // this could be fixed by setting a bool input if _lastTimeClaimed is periodStart
+            periodStart = _lastTimeClaimed;
+            pStartIsLastClaimed = true;
+        }
+
+        periodEnd = block.timestamp;
+        uint256 apy = APYrecord[length - 1].periodAPY;
+        // loop through stakers balance fluctiation during this period
+
+        totalPeriodClaim += calculateBalance(
+            apy,
+            periodStart,
+            periodEnd,
+            _stakerInfo,
+            _stakerLength,
+            pStartIsLastClaimed
+        );
+        return totalPeriodClaim;
+    }
+
+    /// @dev Calculates premium owed during a period where APY has changed at least once.
+    function APYChangeBalance(
+        uint256 _stakerLength,
+        uint256 length,
+        uint256 _lastTimeClaimed,
+        StakingInfo[] memory _stakerInfo,
+        APYperiods[] memory APYrecord,
+        uint256[] memory APYChange
+    ) internal returns (uint256) {
+        bool pStartIsLastClaimed;
+        uint256 periodStart;
+        uint256 periodEnd;
+        uint256 totalPeriodClaim;
+        uint256 len = APYChange.length;
+
+        uint256 stkrLen = _stakerLength; // making compiler happy, avoiding stack too deep
+
+        for (uint256 i; i < len; ++i) {
+            if (i == 0) {
+                periodStart = _lastTimeClaimed;
+                // if _lastTimeClaimed the stakerBalance needs to be i - 1 in calculateBalance()...
+                pStartIsLastClaimed = true;
+            } else {
+                periodStart = APYrecord[APYChange[i]].timeStamp;
+            }
+
+            // period end is equal NOW for last APY that has been set
+
+            if (i == length - 1) {
+                periodEnd = block.timestamp;
+            } else {
+                periodEnd = APYrecord[APYChange[i + 1]].timeStamp;
+            }
+
+            uint256 apy = APYrecord[APYChange[i]].periodAPY;
+
+            {
+                // loop through stakers balance fluctiation during this period
+                totalPeriodClaim += calculateBalance(
+                    apy,
+                    periodStart,
+                    periodEnd,
+                    _stakerInfo,
+                    stkrLen,
+                    pStartIsLastClaimed
+                );
+            }
+        }
+        return totalPeriodClaim;
+    }
+
+    function calculateBalance(
+        uint256 _apy,
+        uint256 _periodStart,
+        uint256 _periodEnd,
+        StakingInfo[] memory _stakerInfo,
+        uint256 _stakerLength,
+        bool _pStartIsLastClaimed
+    ) internal returns (uint256) {
+        uint256 balanceClaim;
+        uint256 duration;
+        uint256 apy = _apy;
+        {
+            for (uint256 i; i < _stakerLength; ++i) {
+                // check staker balance at that moment
+                if (
+                    _stakerInfo[i].balanceTimeStamp >= _periodStart &&
+                    _stakerInfo[i].balanceTimeStamp < _periodEnd
+                ) {
+                    stakerChange.push(i);
+                }
+            }
+        }
+        {
+            uint256[] memory stakrChange = stakerChange;
+            uint256 len = stakrChange.length;
+            //if len = 0 (no staking change)
+            if (len == 0) {
+                duration = block.timestamp - _periodStart;
+                balanceClaim =
+                    (((_stakerInfo[_stakerLength - 1].stakeBalance * apy) /
+                        denominator) / YEAR) *
+                    duration;
+            } else {
+                // else loop
+                uint256 periodClaim;
+                for (uint256 i; i < len; ++i) {
+                    // check distance difference to period start
+
+                    if (i == len - 1) {
+                        duration =
+                            _periodEnd -
+                            _stakerInfo[stakrChange[i]].balanceTimeStamp;
+                    } else {
+                        duration =
+                            _stakerInfo[stakrChange[i + 1]].balanceTimeStamp -
+                            _stakerInfo[stakrChange[i]].balanceTimeStamp;
+                    }
+
+                    // calculate timestampClaim
+                    // if periodStart = _LastClaimed use i -1 staker Balance
+                    if (_pStartIsLastClaimed == true) {
+                        uint256 duration2;
+                        if (i == 0) {
+                            // calculate duration from lastClaimed until new staking change
+                            duration = (_stakerInfo[stakrChange[i]]
+                                .balanceTimeStamp - _periodStart);
+
+                            // calculate duration from current i to next stake change or period end
+                            if (i == len - 1) {
+                                duration2 =
+                                    _periodEnd -
+                                    _stakerInfo[stakrChange[i]]
+                                        .balanceTimeStamp;
+                            } else {
+                                duration2 =
+                                    _stakerInfo[stakrChange[i + 1]]
+                                        .balanceTimeStamp -
+                                    _stakerInfo[stakrChange[i]]
+                                        .balanceTimeStamp;
+                            }
+                            // calcualte amount to claim from lastClaim to stake change
+                            periodClaim =
+                                (((_stakerInfo[stakrChange[i] - 1]
+                                    .stakeBalance * apy) / denominator) /
+                                    YEAR) *
+                                duration;
+                            // add amount to claim from current i to i+1 or period end
+                            periodClaim +=
+                                (((_stakerInfo[stakrChange[i]].stakeBalance *
+                                    apy) / denominator) / YEAR) *
+                                duration2;
+                        }
+                    } else {
+                        periodClaim =
+                            (((_stakerInfo[stakrChange[i]].stakeBalance * apy) /
+                                denominator) / YEAR) *
+                            duration;
+                    }
+
+                    balanceClaim += periodClaim;
+                }
+            }
+        }
+        delete stakerChange;
+        return balanceClaim;
+    }
+
+    /// @dev Calculates premium to claim for staker
+    function calculatePremiumToClaim(
+        uint256 _lastTimeClaimed,
+        StakingInfo[] memory _stakerInfo,
+        uint256 _stakerLength
+    ) internal returns (uint256) {
+        // cache APY records
+        APYperiods[] memory APYregistries = APYrecords;
+        // loop through APY periods  until last missed period is found
+        uint256 claim;
+        claim = calculateBalancePerPeriod(
+            _lastTimeClaimed,
+            _stakerInfo,
+            _stakerLength,
+            APYregistries
+        );
+
+        return claim;
+    }
+
+    ///// VIEW FUNCTIONS /////
+
+    // View currentAPY
+    function viewcurrentAPY() public view returns (uint256) {
+        uint256 apy = (premiumBalance * PRECISION) / poolCap;
+        return apy;
+    }
+
+    // View total balance
+    function viewHackerPayout() external view returns (uint256) {
+        StakingInfo[] memory stakersDeposits = stakersDeposit;
+        uint256 stakingLenght = stakersDeposits.length;
+        uint256 totalBalance;
+        if (stakingLenght == 0) {
+            totalBalance = projectDeposit;
+        } else {
+            totalBalance =
+                projectDeposit +
+                stakersDeposits[stakingLenght - 1].stakeBalance;
+        }
+        uint256 saloonCommission = (totalBalance * bountyCommission) /
+            denominator;
+
+        return totalBalance - saloonCommission;
+    }
+
+    function viewBountyBalance() external view returns (uint256) {
+        StakingInfo[] memory stakersDeposits = stakersDeposit;
+        uint256 stakingLenght = stakersDeposits.length;
+        uint256 totalBalance;
+        if (stakingLenght == 0) {
+            totalBalance = projectDeposit;
+        } else {
+            totalBalance =
+                projectDeposit +
+                stakersDeposits[stakingLenght - 1].stakeBalance;
+        }
+
+        return totalBalance;
+    }
+
+    // View stakersDeposit balance
+    function viewStakersDeposit() external view returns (uint256) {
+        StakingInfo[] memory stakersDeposits = stakersDeposit;
+        uint256 stakingLenght = stakersDeposits.length;
+        if (stakingLenght == 0) {
+            return 0;
+        } else {
+            return stakersDeposit[stakingLenght - 1].stakeBalance;
+        }
+    }
+
+    // View deposit balance
+    function viewProjecDeposit() external view returns (uint256) {
+        return projectDeposit;
+    }
+
+    // view premium balance
+    function viewPremiumBalance() external view returns (uint256) {
+        return premiumBalance;
+    }
+
+    // view required premium balance
+    function viewRequirePremiumBalance() external view returns (uint256) {
+        return requiredPremiumBalancePerPeriod;
+    }
+
+    // View APY
+    function viewDesiredAPY() external view returns (uint256) {
+        return desiredAPY;
+    }
+
+    // View Cap
+    function viewPoolCap() external view returns (uint256) {
+        return poolCap;
+    }
+
+    // View user staking balance
+    function viewUserStakingBalance(address _staker)
+        external
+        view
+        returns (uint256, uint256)
+    {
+        uint256 length = staker[_staker].length;
+        if (length == 0) {
+            return (0, 0);
+        } else {
+            return (
+                staker[_staker][length - 1].stakeBalance,
+                staker[_staker][length - 1].balanceTimeStamp
+            );
+        }
+    }
+
+    function viewUserTimelock(address _staker)
+        external
+        view
+        returns (
+            uint256 timelock,
+            uint256 amount,
+            bool executed
+        )
+    {
+        timelock = stakerTimelock[_staker].timelock;
+        amount = stakerTimelock[_staker].amount;
+        executed = stakerTimelock[_staker].executed;
+    }
+
+    //note view version function??
+
+    ///// VIEW FUNCTIONS END /////
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (access/Ownable.sol)
+
+pragma solidity ^0.8.0;
+
+import "./ContextUpgradeable.sol";
+import "./InitializableUpgradeable.sol";
+
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
+abstract contract OwnableUpgradeable is
+    InitializableUpgradeable,
+    ContextUpgradeable
+{
+    address private _owner;
+
+    event OwnershipTransferred(
+        address indexed previousOwner,
+        address indexed newOwner
+    );
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owner.
+     */
+    function __Ownable_init() internal onlyInitializing {
+        __Ownable_init_unchained();
+    }
+
+    function __Ownable_init_unchained() internal onlyInitializing {
+        _transferOwnership(_msgSender());
+    }
+
+    /**
+     * @dev Throws if called by any account other than the owner.
+     */
+    modifier onlyOwner() {
+        _checkOwner();
+        _;
+    }
+
+    /**
+     * @dev Returns the address of the current owner.
+     */
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    /**
+     * @dev Throws if the sender is not the owner.
+     */
+    function _checkOwner() internal view virtual {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+    }
+
+    /**
+     * @dev Leaves the contract without owner. It will not be possible to call
+     * `onlyOwner` functions anymore. Can only be called by the current owner.
+     *
+     * NOTE: Renouncing ownership will leave the contract without an owner,
+     * thereby removing any functionality that is only available to the owner.
+     */
+    function renounceOwnership() public virtual onlyOwner {
+        _transferOwnership(address(0));
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Can only be called by the current owner.
+     */
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(
+            newOwner != address(0),
+            "Ownable: new owner is the zero address"
+        );
+        _transferOwnership(newOwner);
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Internal function without access restriction.
+     */
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+
+    /**
+     * @dev This empty reserved space is put in place to allow future versions to add new
+     * variables without shifting down storage in the inheritance chain.
+     * See https://docs.openzeppelin.com/contracts/4.x/upgradeable#storage_gaps
+     */
+    uint256[49] private __gap;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.5.0) (proxy/utils/UUPSUpgradeable.sol)
+
+pragma solidity ^0.8.0;
+
+import "../../interfaces/draft-IERC1822.sol";
+import "../ERC1967/ERC1967Upgrade.sol";
+
+/**
+ * @dev An upgradeability mechanism designed for UUPS proxies. The functions included here can perform an upgrade of an
+ * {ERC1967Proxy}, when this contract is set as the implementation behind such a proxy.
+ *
+ * A security mechanism ensures that an upgrade does not turn off upgradeability accidentally, although this risk is
+ * reinstated if the upgrade retains upgradeability but removes the security mechanism, e.g. by replacing
+ * `UUPSUpgradeable` with a custom implementation of upgrades.
+ *
+ * The {_authorizeUpgrade} function must be overridden to include access restriction to the upgrade mechanism.
+ *
+ * _Available since v4.1._
+ */
+abstract contract UUPSUpgradeable is IERC1822Proxiable, ERC1967Upgrade {
+    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable state-variable-assignment
+    address private immutable __self = address(this);
+
+    /**
+     * @dev Check that the execution is being performed through a delegatecall call and that the execution context is
+     * a proxy contract with an implementation (as defined in ERC1967) pointing to self. This should only be the case
+     * for UUPS and transparent proxies that are using the current contract as their implementation. Execution of a
+     * function through ERC1167 minimal proxies (clones) would not normally pass this test, but is not guaranteed to
+     * fail.
+     */
+    modifier onlyProxy() {
+        require(address(this) != __self, "Function must be called through delegatecall");
+        require(_getImplementation() == __self, "Function must be called through active proxy");
+        _;
+    }
+
+    /**
+     * @dev Check that the execution is not being performed through a delegate call. This allows a function to be
+     * callable on the implementing contract but not through proxies.
+     */
+    modifier notDelegated() {
+        require(address(this) == __self, "UUPSUpgradeable: must not be called through delegatecall");
+        _;
+    }
+
+    /**
+     * @dev Implementation of the ERC1822 {proxiableUUID} function. This returns the storage slot used by the
+     * implementation. It is used to validate that the this implementation remains valid after an upgrade.
+     *
+     * IMPORTANT: A proxy pointing at a proxiable contract should not be considered proxiable itself, because this risks
+     * bricking a proxy that upgrades to it, by delegating to itself until out of gas. Thus it is critical that this
+     * function revert if invoked through a proxy. This is guaranteed by the `notDelegated` modifier.
+     */
+    function proxiableUUID() external view virtual override notDelegated returns (bytes32) {
+        return _IMPLEMENTATION_SLOT;
+    }
+
+    /**
+     * @dev Upgrade the implementation of the proxy to `newImplementation`.
+     *
+     * Calls {_authorizeUpgrade}.
+     *
+     * Emits an {Upgraded} event.
+     */
+    function upgradeTo(address newImplementation) external virtual onlyProxy {
+        _authorizeUpgrade(newImplementation);
+        _upgradeToAndCallUUPS(newImplementation, new bytes(0), false);
+    }
+
+    /**
+     * @dev Upgrade the implementation of the proxy to `newImplementation`, and subsequently execute the function call
+     * encoded in `data`.
+     *
+     * Calls {_authorizeUpgrade}.
+     *
+     * Emits an {Upgraded} event.
+     */
+    function upgradeToAndCall(address newImplementation, bytes memory data) external payable virtual onlyProxy {
+        _authorizeUpgrade(newImplementation);
+        _upgradeToAndCallUUPS(newImplementation, data, true);
+    }
+
+    /**
+     * @dev Function that should revert when `msg.sender` is not authorized to upgrade the contract. Called by
+     * {upgradeTo} and {upgradeToAndCall}.
+     *
+     * Normally, this function will use an xref:access.adoc[access control] modifier such as {Ownable-onlyOwner}.
+     *
+     * ```solidity
+     * function _authorizeUpgrade(address) internal override onlyOwner {}
+     * ```
+     */
+    function _authorizeUpgrade(address newImplementation) internal virtual;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (proxy/beacon/UpgradeableBeacon.sol)
+
+pragma solidity ^0.8.0;
+
+import "./IBeacon.sol";
+import "../../access/Ownable.sol";
+import "../../utils/Address.sol";
+
+/**
+ * @dev This contract is used in conjunction with one or more instances of {BeaconProxy} to determine their
+ * implementation contract, which is where they will delegate all function calls.
+ *
+ * An owner is able to change the implementation the beacon points to, thus upgrading the proxies that use this beacon.
+ */
+contract UpgradeableBeacon is IBeacon, Ownable {
+    address private _implementation;
+
+    /**
+     * @dev Emitted when the implementation returned by the beacon is changed.
+     */
+    event Upgraded(address indexed implementation);
+
+    /**
+     * @dev Sets the address of the initial implementation, and the deployer account as the owner who can upgrade the
+     * beacon.
+     */
+    constructor(address implementation_) {
+        _setImplementation(implementation_);
+    }
+
+    /**
+     * @dev Returns the current implementation address.
+     */
+    function implementation() public view virtual override returns (address) {
+        return _implementation;
+    }
+
+    /**
+     * @dev Upgrades the beacon to a new implementation.
+     *
+     * Emits an {Upgraded} event.
+     *
+     * Requirements:
+     *
+     * - msg.sender must be the owner of the contract.
+     * - `newImplementation` must be a contract.
+     */
+    function upgradeTo(address newImplementation) public virtual onlyOwner {
+        _setImplementation(newImplementation);
+        emit Upgraded(newImplementation);
+    }
+
+    /**
+     * @dev Sets the implementation contract address for this beacon
+     *
+     * Requirements:
+     *
+     * - `newImplementation` must be a contract.
+     */
+    function _setImplementation(address newImplementation) private {
+        require(Address.isContract(newImplementation), "UpgradeableBeacon: implementation is not a contract");
+        _implementation = newImplementation;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.6.0) (token/ERC20/IERC20.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20 {
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `to`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `from` to `to` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (token/ERC20/extensions/IERC20Metadata.sol)
+
+pragma solidity ^0.8.0;
+
+import "../IERC20.sol";
+
+/**
+ * @dev Interface for the optional metadata functions from the ERC20 standard.
+ *
+ * _Available since v4.1._
+ */
+interface IERC20Metadata is IERC20 {
+    /**
+     * @dev Returns the name of the token.
+     */
+    function name() external view returns (string memory);
+
+    /**
+     * @dev Returns the symbol of the token.
+     */
+    function symbol() external view returns (string memory);
+
+    /**
+     * @dev Returns the decimals places of the token.
+     */
+    function decimals() external view returns (uint8);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (token/ERC20/utils/SafeERC20.sol)
+
+pragma solidity ^0.8.0;
+
+import "../IERC20.sol";
+import "../extensions/draft-IERC20Permit.sol";
+import "../../../utils/Address.sol";
+
+/**
+ * @title SafeERC20
+ * @dev Wrappers around ERC20 operations that throw on failure (when the token
+ * contract returns false). Tokens that return no value (and instead revert or
+ * throw on failure) are also supported, non-reverting calls are assumed to be
+ * successful.
+ * To use this library you can add a `using SafeERC20 for IERC20;` statement to your contract,
+ * which allows you to call the safe operations as `token.safeTransfer(...)`, etc.
+ */
+library SafeERC20 {
+    using Address for address;
+
+    function safeTransfer(
+        IERC20 token,
+        address to,
+        uint256 value
+    ) internal returns (bool) {
+        _callOptionalReturn(token, abi.encodeWithSelector(token.transfer.selector, to, value));
+        return true;
+    }
+
+    // THIS FUNCTION HAS BEEN EDITED TO RETURN A VALUE
+    function safeTransferFrom(
+        IERC20 token,
+        address from,
+        address to,
+        uint256 value
+    ) internal returns (bool) {
+        _callOptionalReturn(token, abi.encodeWithSelector(token.transferFrom.selector, from, to, value));
+        return true;
+    }
+
+    /**
+     * @dev Deprecated. This function has issues similar to the ones found in
+     * {IERC20-approve}, and its usage is discouraged.
+     *
+     * Whenever possible, use {safeIncreaseAllowance} and
+     * {safeDecreaseAllowance} instead.
+     */
+    function safeApprove(
+        IERC20 token,
+        address spender,
+        uint256 value
+    ) internal {
+        // safeApprove should only be called when setting an initial allowance,
+        // or when resetting it to zero. To increase and decrease it, use
+        // 'safeIncreaseAllowance' and 'safeDecreaseAllowance'
+        require(
+            (value == 0) || (token.allowance(address(this), spender) == 0),
+            "SafeERC20: approve from non-zero to non-zero allowance"
+        );
+        _callOptionalReturn(token, abi.encodeWithSelector(token.approve.selector, spender, value));
+    }
+
+    function safeIncreaseAllowance(
+        IERC20 token,
+        address spender,
+        uint256 value
+    ) internal {
+        uint256 newAllowance = token.allowance(address(this), spender) + value;
+        _callOptionalReturn(token, abi.encodeWithSelector(token.approve.selector, spender, newAllowance));
+    }
+
+    function safeDecreaseAllowance(
+        IERC20 token,
+        address spender,
+        uint256 value
+    ) internal {
+        unchecked {
+            uint256 oldAllowance = token.allowance(address(this), spender);
+            require(oldAllowance >= value, "SafeERC20: decreased allowance below zero");
+            uint256 newAllowance = oldAllowance - value;
+            _callOptionalReturn(token, abi.encodeWithSelector(token.approve.selector, spender, newAllowance));
+        }
+    }
+
+    function safePermit(
+        IERC20Permit token,
+        address owner,
+        address spender,
+        uint256 value,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) internal {
+        uint256 nonceBefore = token.nonces(owner);
+        token.permit(owner, spender, value, deadline, v, r, s);
+        uint256 nonceAfter = token.nonces(owner);
+        require(nonceAfter == nonceBefore + 1, "SafeERC20: permit did not succeed");
+    }
+
+    /**
+     * @dev Imitates a Solidity high-level call (i.e. a regular function call to a contract), relaxing the requirement
+     * on the return value: the return value is optional (but if data is returned, it must not be false).
+     * @param token The token targeted by the call.
+     * @param data The call data (encoded using abi.encode or one of its variants).
+     */
+    function _callOptionalReturn(IERC20 token, bytes memory data) private {
+        // We need to perform a low level call here, to bypass Solidity's return data size checking mechanism, since
+        // we're implementing it ourselves. We use {Address.functionCall} to perform this call, which verifies that
+        // the target address contains contract code and also asserts for success in the low-level call.
+
+        bytes memory returndata = address(token).functionCall(data, "SafeERC20: low-level call failed");
+        if (returndata.length > 0) {
+            // Return data is optional
+            require(abi.decode(returndata, (bool)), "SafeERC20: ERC20 operation did not succeed");
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (proxy/Clones.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev https://eips.ethereum.org/EIPS/eip-1167[EIP 1167] is a standard for
+ * deploying minimal proxy contracts, also known as "clones".
+ *
+ * > To simply and cheaply clone contract functionality in an immutable way, this standard specifies
+ * > a minimal bytecode implementation that delegates all calls to a known, fixed address.
+ *
+ * The library includes functions to deploy a proxy using either `create` (traditional deployment) or `create2`
+ * (salted deterministic deployment). It also includes functions to predict the addresses of clones deployed using the
+ * deterministic method.
+ *
+ * _Available since v3.4._
+ */
+library Clones {
+    /**
+     * @dev Deploys and returns the address of a clone that mimics the behaviour of `implementation`.
+     *
+     * This function uses the create opcode, which should never revert.
+     */
+    function clone(address implementation) internal returns (address instance) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            let ptr := mload(0x40)
+            mstore(ptr, 0x3d602d80600a3d3981f3363d3d373d3d3d363d73000000000000000000000000)
+            mstore(add(ptr, 0x14), shl(0x60, implementation))
+            mstore(add(ptr, 0x28), 0x5af43d82803e903d91602b57fd5bf30000000000000000000000000000000000)
+            instance := create(0, ptr, 0x37)
+        }
+        require(instance != address(0), "ERC1167: create failed");
+    }
+
+    /**
+     * @dev Deploys and returns the address of a clone that mimics the behaviour of `implementation`.
+     *
+     * This function uses the create2 opcode and a `salt` to deterministically deploy
+     * the clone. Using the same `implementation` and `salt` multiple time will revert, since
+     * the clones cannot be deployed twice at the same address.
+     */
+    function cloneDeterministic(address implementation, bytes32 salt) internal returns (address instance) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            let ptr := mload(0x40)
+            mstore(ptr, 0x3d602d80600a3d3981f3363d3d373d3d3d363d73000000000000000000000000)
+            mstore(add(ptr, 0x14), shl(0x60, implementation))
+            mstore(add(ptr, 0x28), 0x5af43d82803e903d91602b57fd5bf30000000000000000000000000000000000)
+            instance := create2(0, ptr, 0x37, salt)
+        }
+        require(instance != address(0), "ERC1167: create2 failed");
+    }
+
+    /**
+     * @dev Computes the address of a clone deployed using {Clones-cloneDeterministic}.
+     */
+    function predictDeterministicAddress(
+        address implementation,
+        bytes32 salt,
+        address deployer
+    ) internal pure returns (address predicted) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            let ptr := mload(0x40)
+            mstore(ptr, 0x3d602d80600a3d3981f3363d3d373d3d3d363d73000000000000000000000000)
+            mstore(add(ptr, 0x14), shl(0x60, implementation))
+            mstore(add(ptr, 0x28), 0x5af43d82803e903d91602b57fd5bf3ff00000000000000000000000000000000)
+            mstore(add(ptr, 0x38), shl(0x60, deployer))
+            mstore(add(ptr, 0x4c), salt)
+            mstore(add(ptr, 0x6c), keccak256(ptr, 0x37))
+            predicted := keccak256(add(ptr, 0x37), 0x55)
+        }
+    }
+
+    /**
+     * @dev Computes the address of a clone deployed using {Clones-cloneDeterministic}.
+     */
+    function predictDeterministicAddress(address implementation, bytes32 salt)
+        internal
+        view
+        returns (address predicted)
+    {
+        return predictDeterministicAddress(implementation, salt, address(this));
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (proxy/beacon/BeaconProxy.sol)
+
+pragma solidity 0.8.10;
+
+import "openzeppelin-contracts/contracts/proxy/beacon/IBeacon.sol";
+import "openzeppelin-contracts/contracts/proxy/Proxy.sol";
+import "openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Upgrade.sol";
+import "openzeppelin-contracts/contracts/proxy/utils/Initializable.sol";
+
+/**
+ * @dev This contract implements a proxy that gets the implementation address for each call from an {UpgradeableBeacon}.
+ *
+ * The beacon address is stored in storage slot `uint256(keccak256('eip1967.proxy.beacon')) - 1`, so that it doesn't
+ * conflict with the storage layout of the implementation behind the proxy.
+ *
+ * _Available since v3.4._
+ */
+contract BountyProxy is Proxy, ERC1967Upgrade, Initializable {
+    /**
+     * @dev Initializes the proxy with `beacon`.
+     *
+     * If `data` is nonempty, it's used as data in a delegate call to the implementation returned by the beacon. This
+     * will typically be an encoded function call, and allows initializing the storage of the proxy like a Solidity
+     * constructor.
+     *
+     * Requirements:
+     *
+     * - `beacon` must be a contract with the interface {IBeacon}.
+     */
+    function initialize(
+        address _beaconAddress,
+        bytes memory _data,
+        address _manager
+    ) external payable initializer {
+        // require(StorageSlot.getAddressSlot(_ADMIN_SLOT).value == msg.sender);
+        _upgradeBeaconToAndCall(_beaconAddress, _data, false);
+        _changeAdmin(_manager);
+    }
+
+    /**
+     * @dev Returns the current beacon address.
+     */
+    function _beacon() internal view virtual returns (address) {
+        return _getBeacon();
+    }
+
+    /**
+     * @dev Returns the current implementation address of the associated beacon.
+     */
+    function _implementation()
+        internal
+        view
+        virtual
+        override
+        returns (address)
+    {
+        return IBeacon(_getBeacon()).implementation();
+    }
+
+    /**
+     * @dev Fallback function that delegates calls to the address returned by `_implementation()`. Will run if no other
+     * function in the contract matches the call data.
+     */
+    fallback() external payable virtual override {
+        // access control
+        require(StorageSlot.getAddressSlot(_ADMIN_SLOT).value == msg.sender);
+        _fallback();
+    }
+
+    /**
+     * @dev Fallback function that delegates calls to the address returned by `_implementation()`. Will run if call data
+     * is empty.
+     */
+    receive() external payable virtual override {
+        // access control
+        require(StorageSlot.getAddressSlot(_ADMIN_SLOT).value == msg.sender);
+        _fallback();
+    }
+
+    /**
+     * @dev Changes the proxy to use a new beacon. Deprecated: see {_upgradeBeaconToAndCall}.
+     *
+     * If `data` is nonempty, it's used as data in a delegate call to the implementation returned by the beacon.
+     *
+     * Requirements:
+     *
+     * - `beacon` must be a contract.
+     * - The implementation returned by `beacon` must be a contract.
+     */
+    function _setBeacon(address beacon, bytes memory data) internal virtual {
+        _upgradeBeaconToAndCall(beacon, data, false);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (proxy/utils/Initializable.sol)
+
+pragma solidity ^0.8.2;
+
+import "../../utils/Address.sol";
+
+/**
+ * @dev This is a base contract to aid in writing upgradeable contracts, or any kind of contract that will be deployed
+ * behind a proxy. Since proxied contracts do not make use of a constructor, it's common to move constructor logic to an
+ * external initializer function, usually called `initialize`. It then becomes necessary to protect this initializer
+ * function so it can only be called once. The {initializer} modifier provided by this contract will have this effect.
+ *
+ * The initialization functions use a version number. Once a version number is used, it is consumed and cannot be
+ * reused. This mechanism prevents re-execution of each "step" but allows the creation of new initialization steps in
+ * case an upgrade adds a module that needs to be initialized.
+ *
+ * For example:
+ *
+ * [.hljs-theme-light.nopadding]
+ * ```
+ * contract MyToken is ERC20Upgradeable {
+ *     function initialize() initializer public {
+ *         __ERC20_init("MyToken", "MTK");
+ *     }
+ * }
+ * contract MyTokenV2 is MyToken, ERC20PermitUpgradeable {
+ *     function initializeV2() reinitializer(2) public {
+ *         __ERC20Permit_init("MyToken");
+ *     }
+ * }
+ * ```
+ *
+ * TIP: To avoid leaving the proxy in an uninitialized state, the initializer function should be called as early as
+ * possible by providing the encoded function call as the `_data` argument to {ERC1967Proxy-constructor}.
+ *
+ * CAUTION: When used with inheritance, manual care must be taken to not invoke a parent initializer twice, or to ensure
+ * that all initializers are idempotent. This is not verified automatically as constructors are by Solidity.
+ *
+ * [CAUTION]
+ * ====
+ * Avoid leaving a contract uninitialized.
+ *
+ * An uninitialized contract can be taken over by an attacker. This applies to both a proxy and its implementation
+ * contract, which may impact the proxy. To prevent the implementation contract from being used, you should invoke
+ * the {_disableInitializers} function in the constructor to automatically lock it when it is deployed:
+ *
+ * [.hljs-theme-light.nopadding]
+ * ```
+ * /// @custom:oz-upgrades-unsafe-allow constructor
+ * constructor() {
+ *     _disableInitializers();
+ * }
+ * ```
+ * ====
+ */
+abstract contract Initializable {
+    /**
+     * @dev Indicates that the contract has been initialized.
+     * @custom:oz-retyped-from bool
+     */
+    uint8 private _initialized;
+
+    /**
+     * @dev Indicates that the contract is in the process of being initialized.
+     */
+    bool private _initializing;
+
+    /**
+     * @dev Triggered when the contract has been initialized or reinitialized.
+     */
+    event Initialized(uint8 version);
+
+    /**
+     * @dev A modifier that defines a protected initializer function that can be invoked at most once. In its scope,
+     * `onlyInitializing` functions can be used to initialize parent contracts. Equivalent to `reinitializer(1)`.
+     */
+    modifier initializer() {
+        bool isTopLevelCall = !_initializing;
+        require(
+            (isTopLevelCall && _initialized < 1) || (!Address.isContract(address(this)) && _initialized == 1),
+            "Initializable: contract is already initialized"
+        );
+        _initialized = 1;
+        if (isTopLevelCall) {
+            _initializing = true;
+        }
+        _;
+        if (isTopLevelCall) {
+            _initializing = false;
+            emit Initialized(1);
+        }
+    }
+
+    /**
+     * @dev A modifier that defines a protected reinitializer function that can be invoked at most once, and only if the
+     * contract hasn't been initialized to a greater version before. In its scope, `onlyInitializing` functions can be
+     * used to initialize parent contracts.
+     *
+     * `initializer` is equivalent to `reinitializer(1)`, so a reinitializer may be used after the original
+     * initialization step. This is essential to configure modules that are added through upgrades and that require
+     * initialization.
+     *
+     * Note that versions can jump in increments greater than 1; this implies that if multiple reinitializers coexist in
+     * a contract, executing them in the right order is up to the developer or operator.
+     */
+    modifier reinitializer(uint8 version) {
+        require(!_initializing && _initialized < version, "Initializable: contract is already initialized");
+        _initialized = version;
+        _initializing = true;
+        _;
+        _initializing = false;
+        emit Initialized(version);
+    }
+
+    /**
+     * @dev Modifier to protect an initialization function so that it can only be invoked by functions with the
+     * {initializer} and {reinitializer} modifiers, directly or indirectly.
+     */
+    modifier onlyInitializing() {
+        require(_initializing, "Initializable: contract is not initializing");
+        _;
+    }
+
+    /**
+     * @dev Locks the contract, preventing any future reinitialization. This cannot be part of an initializer call.
+     * Calling this in the constructor of a contract will prevent that contract from being initialized or reinitialized
+     * to any version. It is recommended to use this to lock implementation contracts that are designed to be called
+     * through proxies.
+     */
+    function _disableInitializers() internal virtual {
+        require(!_initializing, "Initializable: contract is initializing");
+        if (_initialized < type(uint8).max) {
+            _initialized = type(uint8).max;
+            emit Initialized(type(uint8).max);
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (access/Ownable.sol)
+
+pragma solidity ^0.8.0;
+
+import "../utils/Context.sol";
+
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owner.
+     */
+    constructor() {
+        _transferOwnership(_msgSender());
+    }
+
+    /**
+     * @dev Throws if called by any account other than the owner.
+     */
+    modifier onlyOwner() {
+        _checkOwner();
+        _;
+    }
+
+    /**
+     * @dev Returns the address of the current owner.
+     */
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    /**
+     * @dev Throws if the sender is not the owner.
+     */
+    function _checkOwner() internal view virtual {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+    }
+
+    /**
+     * @dev Leaves the contract without owner. It will not be possible to call
+     * `onlyOwner` functions anymore. Can only be called by the current owner.
+     *
+     * NOTE: Renouncing ownership will leave the contract without an owner,
+     * thereby removing any functionality that is only available to the owner.
+     */
+    function renounceOwnership() public virtual onlyOwner {
+        _transferOwnership(address(0));
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Can only be called by the current owner.
+     */
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _transferOwnership(newOwner);
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Internal function without access restriction.
+     */
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
+
+pragma solidity ^0.8.0;
+import "./InitializableUpgradeable.sol";
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract ContextUpgradeable is InitializableUpgradeable {
+    function __Context_init() internal onlyInitializing {}
+
+    function __Context_init_unchained() internal onlyInitializing {}
+
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+
+    /**
+     * @dev This empty reserved space is put in place to allow future versions to add new
+     * variables without shifting down storage in the inheritance chain.
+     * See https://docs.openzeppelin.com/contracts/4.x/upgradeable#storage_gaps
+     */
+    uint256[50] private __gap;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (proxy/utils/Initializable.sol)
+
+pragma solidity ^0.8.2;
+
+import "openzeppelin-contracts-upgradeable/contracts/utils/AddressUpgradeable.sol";
+
+/**
+ * @dev This is a base contract to aid in writing upgradeable contracts, or any kind of contract that will be deployed
+ * behind a proxy. Since proxied contracts do not make use of a constructor, it's common to move constructor logic to an
+ * external initializer function, usually called `initialize`. It then becomes necessary to protect this initializer
+ * function so it can only be called once. The {initializer} modifier provided by this contract will have this effect.
+ *
+ * The initialization functions use a version number. Once a version number is used, it is consumed and cannot be
+ * reused. This mechanism prevents re-execution of each "step" but allows the creation of new initialization steps in
+ * case an upgrade adds a module that needs to be initialized.
+ *
+ * For example:
+ *
+ * [.hljs-theme-light.nopadding]
+ * ```
+ * contract MyToken is ERC20Upgradeable {
+ *     function initialize() initializer public {
+ *         __ERC20_init("MyToken", "MTK");
+ *     }
+ * }
+ * contract MyTokenV2 is MyToken, ERC20PermitUpgradeable {
+ *     function initializeV2() reinitializer(2) public {
+ *         __ERC20Permit_init("MyToken");
+ *     }
+ * }
+ * ```
+ *
+ * TIP: To avoid leaving the proxy in an uninitialized state, the initializer function should be called as early as
+ * possible by providing the encoded function call as the `_data` argument to {ERC1967Proxy-constructor}.
+ *
+ * CAUTION: When used with inheritance, manual care must be taken to not invoke a parent initializer twice, or to ensure
+ * that all initializers are idempotent. This is not verified automatically as constructors are by Solidity.
+ *
+ * [CAUTION]
+ * ====
+ * Avoid leaving a contract uninitialized.
+ *
+ * An uninitialized contract can be taken over by an attacker. This applies to both a proxy and its implementation
+ * contract, which may impact the proxy. To prevent the implementation contract from being used, you should invoke
+ * the {_disableInitializers} function in the constructor to automatically lock it when it is deployed:
+ *
+ * [.hljs-theme-light.nopadding]
+ * ```
+ * /// @custom:oz-upgrades-unsafe-allow constructor
+ * constructor() {
+ *     _disableInitializers();
+ * }
+ * ```
+ * ====
+ */
+abstract contract InitializableUpgradeable {
+    /**
+     * @dev Indicates that the contract has been initialized.
+     * @custom:oz-retyped-from bool
+     */
+    uint8 private _initialized;
+
+    /**
+     * @dev Indicates that the contract is in the process of being initialized.
+     */
+    bool private _initializing;
+
+    /**
+     * @dev Triggered when the contract has been initialized or reinitialized.
+     */
+    event Initialized(uint8 version);
+
+    /**
+     * @dev A modifier that defines a protected initializer function that can be invoked at most once. In its scope,
+     * `onlyInitializing` functions can be used to initialize parent contracts.
+     *
+     * Similar to `reinitializer(1)`, except that functions marked with `initializer` can be nested in the context of a
+     * constructor.
+     *
+     * Emits an {Initialized} event.
+     */
+    modifier initializer() {
+        bool isTopLevelCall = !_initializing;
+        require(
+            (isTopLevelCall && _initialized < 1) ||
+                (!AddressUpgradeable.isContract(address(this)) &&
+                    _initialized == 1),
+            "Initializable: contract is already initialized"
+        );
+        _initialized = 1;
+        if (isTopLevelCall) {
+            _initializing = true;
+        }
+        _;
+        if (isTopLevelCall) {
+            _initializing = false;
+            emit Initialized(1);
+        }
+    }
+
+    /**
+     * @dev A modifier that defines a protected reinitializer function that can be invoked at most once, and only if the
+     * contract hasn't been initialized to a greater version before. In its scope, `onlyInitializing` functions can be
+     * used to initialize parent contracts.
+     *
+     * A reinitializer may be used after the original initialization step. This is essential to configure modules that
+     * are added through upgrades and that require initialization.
+     *
+     * When `version` is 1, this modifier is similar to `initializer`, except that functions marked with `reinitializer`
+     * cannot be nested. If one is invoked in the context of another, execution will revert.
+     *
+     * Note that versions can jump in increments greater than 1; this implies that if multiple reinitializers coexist in
+     * a contract, executing them in the right order is up to the developer or operator.
+     *
+     * WARNING: setting the version to 255 will prevent any future reinitialization.
+     *
+     * Emits an {Initialized} event.
+     */
+    modifier reinitializer(uint8 version) {
+        require(
+            !_initializing && _initialized < version,
+            "Initializable: contract is already initialized"
+        );
+        _initialized = version;
+        _initializing = true;
+        _;
+        _initializing = false;
+        emit Initialized(version);
+    }
+
+    /**
+     * @dev Modifier to protect an initialization function so that it can only be invoked by functions with the
+     * {initializer} and {reinitializer} modifiers, directly or indirectly.
+     */
+    modifier onlyInitializing() {
+        require(_initializing, "Initializable: contract is not initializing");
+        _;
+    }
+
+    /**
+     * @dev Locks the contract, preventing any future reinitialization. This cannot be part of an initializer call.
+     * Calling this in the constructor of a contract will prevent that contract from being initialized or reinitialized
+     * to any version. It is recommended to use this to lock implementation contracts that are designed to be called
+     * through proxies.
+     *
+     * Emits an {Initialized} event the first time it is successfully executed.
+     */
+    function _disableInitializers() internal virtual {
+        require(!_initializing, "Initializable: contract is initializing");
+        if (_initialized < type(uint8).max) {
+            _initialized = type(uint8).max;
+            emit Initialized(type(uint8).max);
+        }
+    }
+
+    /**
+     * @dev Internal function that returns the initialized version. Returns `_initialized`
+     */
+    function _getInitializedVersion() internal view returns (uint8) {
+        return _initialized;
+    }
+
+    /**
+     * @dev Internal function that returns the initialized version. Returns `_initializing`
+     */
+    function _isInitializing() internal view returns (bool) {
+        return _initializing;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.5.0) (interfaces/draft-IERC1822.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev ERC1822: Universal Upgradeable Proxy Standard (UUPS) documents a method for upgradeability through a simplified
+ * proxy whose upgrades are fully controlled by the current implementation.
+ */
+interface IERC1822Proxiable {
+    /**
+     * @dev Returns the storage slot that the proxiable contract assumes is being used to store the implementation
+     * address.
+     *
+     * IMPORTANT: A proxy pointing at a proxiable contract should not be considered proxiable itself, because this risks
+     * bricking a proxy that upgrades to it, by delegating to itself until out of gas. Thus it is critical that this
+     * function revert if invoked through a proxy.
+     */
+    function proxiableUUID() external view returns (bytes32);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.5.0) (proxy/ERC1967/ERC1967Upgrade.sol)
+
+pragma solidity ^0.8.2;
+
+import "../beacon/IBeacon.sol";
+import "../../interfaces/draft-IERC1822.sol";
+import "../../utils/Address.sol";
+import "../../utils/StorageSlot.sol";
+
+/**
+ * @dev This abstract contract provides getters and event emitting update functions for
+ * https://eips.ethereum.org/EIPS/eip-1967[EIP1967] slots.
+ *
+ * _Available since v4.1._
+ *
+ * @custom:oz-upgrades-unsafe-allow delegatecall
+ */
+abstract contract ERC1967Upgrade {
+    // This is the keccak-256 hash of "eip1967.proxy.rollback" subtracted by 1
+    bytes32 private constant _ROLLBACK_SLOT = 0x4910fdfa16fed3260ed0e7147f7cc6da11a60208b5b9406d12a635614ffd9143;
+
+    /**
+     * @dev Storage slot with the address of the current implementation.
+     * This is the keccak-256 hash of "eip1967.proxy.implementation" subtracted by 1, and is
+     * validated in the constructor.
+     */
+    bytes32 internal constant _IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+
+    /**
+     * @dev Emitted when the implementation is upgraded.
+     */
+    event Upgraded(address indexed implementation);
+
+    /**
+     * @dev Returns the current implementation address.
+     */
+    function _getImplementation() internal view returns (address) {
+        return StorageSlot.getAddressSlot(_IMPLEMENTATION_SLOT).value;
+    }
+
+    /**
+     * @dev Stores a new address in the EIP1967 implementation slot.
+     */
+    function _setImplementation(address newImplementation) private {
+        require(Address.isContract(newImplementation), "ERC1967: new implementation is not a contract");
+        StorageSlot.getAddressSlot(_IMPLEMENTATION_SLOT).value = newImplementation;
+    }
+
+    /**
+     * @dev Perform implementation upgrade
+     *
+     * Emits an {Upgraded} event.
+     */
+    function _upgradeTo(address newImplementation) internal {
+        _setImplementation(newImplementation);
+        emit Upgraded(newImplementation);
+    }
+
+    /**
+     * @dev Perform implementation upgrade with additional setup call.
+     *
+     * Emits an {Upgraded} event.
+     */
+    function _upgradeToAndCall(
+        address newImplementation,
+        bytes memory data,
+        bool forceCall
+    ) internal {
+        _upgradeTo(newImplementation);
+        if (data.length > 0 || forceCall) {
+            Address.functionDelegateCall(newImplementation, data);
+        }
+    }
+
+    /**
+     * @dev Perform implementation upgrade with security checks for UUPS proxies, and additional setup call.
+     *
+     * Emits an {Upgraded} event.
+     */
+    function _upgradeToAndCallUUPS(
+        address newImplementation,
+        bytes memory data,
+        bool forceCall
+    ) internal {
+        // Upgrades from old implementations will perform a rollback test. This test requires the new
+        // implementation to upgrade back to the old, non-ERC1822 compliant, implementation. Removing
+        // this special case will break upgrade paths from old UUPS implementation to new ones.
+        if (StorageSlot.getBooleanSlot(_ROLLBACK_SLOT).value) {
+            _setImplementation(newImplementation);
+        } else {
+            try IERC1822Proxiable(newImplementation).proxiableUUID() returns (bytes32 slot) {
+                require(slot == _IMPLEMENTATION_SLOT, "ERC1967Upgrade: unsupported proxiableUUID");
+            } catch {
+                revert("ERC1967Upgrade: new implementation is not UUPS");
+            }
+            _upgradeToAndCall(newImplementation, data, forceCall);
+        }
+    }
+
+    /**
+     * @dev Storage slot with the admin of the contract.
+     * This is the keccak-256 hash of "eip1967.proxy.admin" subtracted by 1, and is
+     * validated in the constructor.
+     */
+    bytes32 internal constant _ADMIN_SLOT = 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103;
+
+    /**
+     * @dev Emitted when the admin account has changed.
+     */
+    event AdminChanged(address previousAdmin, address newAdmin);
+
+    /**
+     * @dev Returns the current admin.
+     */
+    function _getAdmin() internal view returns (address) {
+        return StorageSlot.getAddressSlot(_ADMIN_SLOT).value;
+    }
+
+    /**
+     * @dev Stores a new address in the EIP1967 admin slot.
+     */
+    function _setAdmin(address newAdmin) private {
+        require(newAdmin != address(0), "ERC1967: new admin is the zero address");
+        StorageSlot.getAddressSlot(_ADMIN_SLOT).value = newAdmin;
+    }
+
+    /**
+     * @dev Changes the admin of the proxy.
+     *
+     * Emits an {AdminChanged} event.
+     */
+    function _changeAdmin(address newAdmin) internal {
+        emit AdminChanged(_getAdmin(), newAdmin);
+        _setAdmin(newAdmin);
+    }
+
+    /**
+     * @dev The storage slot of the UpgradeableBeacon contract which defines the implementation for this proxy.
+     * This is bytes32(uint256(keccak256('eip1967.proxy.beacon')) - 1)) and is validated in the constructor.
+     */
+    bytes32 internal constant _BEACON_SLOT = 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50;
+
+    /**
+     * @dev Emitted when the beacon is upgraded.
+     */
+    event BeaconUpgraded(address indexed beacon);
+
+    /**
+     * @dev Returns the current beacon.
+     */
+    function _getBeacon() internal view returns (address) {
+        return StorageSlot.getAddressSlot(_BEACON_SLOT).value;
+    }
+
+    /**
+     * @dev Stores a new beacon in the EIP1967 beacon slot.
+     */
+    function _setBeacon(address newBeacon) private {
+        require(Address.isContract(newBeacon), "ERC1967: new beacon is not a contract");
+        require(
+            Address.isContract(IBeacon(newBeacon).implementation()),
+            "ERC1967: beacon implementation is not a contract"
+        );
+        StorageSlot.getAddressSlot(_BEACON_SLOT).value = newBeacon;
+    }
+
+    /**
+     * @dev Perform beacon upgrade with additional setup call. Note: This upgrades the address of the beacon, it does
+     * not upgrade the implementation contained in the beacon (see {UpgradeableBeacon-_setImplementation} for that).
+     *
+     * Emits a {BeaconUpgraded} event.
+     */
+    function _upgradeBeaconToAndCall(
+        address newBeacon,
+        bytes memory data,
+        bool forceCall
+    ) internal {
+        _setBeacon(newBeacon);
+        emit BeaconUpgraded(newBeacon);
+        if (data.length > 0 || forceCall) {
+            Address.functionDelegateCall(IBeacon(newBeacon).implementation(), data);
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (proxy/beacon/IBeacon.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev This is the interface that {BeaconProxy} expects of its beacon.
+ */
+interface IBeacon {
+    /**
+     * @dev Must return an address that can be used as a delegate call target.
+     *
+     * {BeaconProxy} will check that this address is a contract.
+     */
+    function implementation() external view returns (address);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (utils/Address.sol)
+
+pragma solidity ^0.8.1;
+
+/**
+ * @dev Collection of functions related to the address type
+ */
+library Address {
+    /**
+     * @dev Returns true if `account` is a contract.
+     *
+     * [IMPORTANT]
+     * ====
+     * It is unsafe to assume that an address for which this function returns
+     * false is an externally-owned account (EOA) and not a contract.
+     *
+     * Among others, `isContract` will return false for the following
+     * types of addresses:
+     *
+     *  - an externally-owned account
+     *  - a contract in construction
+     *  - an address where a contract will be created
+     *  - an address where a contract lived, but was destroyed
+     * ====
+     *
+     * [IMPORTANT]
+     * ====
+     * You shouldn't rely on `isContract` to protect against flash loan attacks!
+     *
+     * Preventing calls from contracts is highly discouraged. It breaks composability, breaks support for smart wallets
+     * like Gnosis Safe, and does not provide security since it can be circumvented by calling from a contract
+     * constructor.
+     * ====
+     */
+    function isContract(address account) internal view returns (bool) {
+        // This method relies on extcodesize/address.code.length, which returns 0
+        // for contracts in construction, since the code is only stored at the end
+        // of the constructor execution.
+
+        return account.code.length > 0;
+    }
+
+    /**
+     * @dev Replacement for Solidity's `transfer`: sends `amount` wei to
+     * `recipient`, forwarding all available gas and reverting on errors.
+     *
+     * https://eips.ethereum.org/EIPS/eip-1884[EIP1884] increases the gas cost
+     * of certain opcodes, possibly making contracts go over the 2300 gas limit
+     * imposed by `transfer`, making them unable to receive funds via
+     * `transfer`. {sendValue} removes this limitation.
+     *
+     * https://diligence.consensys.net/posts/2019/09/stop-using-soliditys-transfer-now/[Learn more].
+     *
+     * IMPORTANT: because control is transferred to `recipient`, care must be
+     * taken to not create reentrancy vulnerabilities. Consider using
+     * {ReentrancyGuard} or the
+     * https://solidity.readthedocs.io/en/v0.5.11/security-considerations.html#use-the-checks-effects-interactions-pattern[checks-effects-interactions pattern].
+     */
+    function sendValue(address payable recipient, uint256 amount) internal {
+        require(address(this).balance >= amount, "Address: insufficient balance");
+
+        (bool success, ) = recipient.call{value: amount}("");
+        require(success, "Address: unable to send value, recipient may have reverted");
+    }
+
+    /**
+     * @dev Performs a Solidity function call using a low level `call`. A
+     * plain `call` is an unsafe replacement for a function call: use this
+     * function instead.
+     *
+     * If `target` reverts with a revert reason, it is bubbled up by this
+     * function (like regular Solidity function calls).
+     *
+     * Returns the raw returned data. To convert to the expected return value,
+     * use https://solidity.readthedocs.io/en/latest/units-and-global-variables.html?highlight=abi.decode#abi-encoding-and-decoding-functions[`abi.decode`].
+     *
+     * Requirements:
+     *
+     * - `target` must be a contract.
+     * - calling `target` with `data` must not revert.
+     *
+     * _Available since v3.1._
+     */
+    function functionCall(address target, bytes memory data) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, 0, "Address: low-level call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`], but with
+     * `errorMessage` as a fallback revert reason when `target` reverts.
+     *
+     * _Available since v3.1._
+     */
+    function functionCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, 0, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but also transferring `value` wei to `target`.
+     *
+     * Requirements:
+     *
+     * - the calling contract must have an ETH balance of at least `value`.
+     * - the called Solidity function must be `payable`.
+     *
+     * _Available since v3.1._
+     */
+    function functionCallWithValue(
+        address target,
+        bytes memory data,
+        uint256 value
+    ) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, value, "Address: low-level call with value failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCallWithValue-address-bytes-uint256-}[`functionCallWithValue`], but
+     * with `errorMessage` as a fallback revert reason when `target` reverts.
+     *
+     * _Available since v3.1._
+     */
+    function functionCallWithValue(
+        address target,
+        bytes memory data,
+        uint256 value,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        require(address(this).balance >= value, "Address: insufficient balance for call");
+        (bool success, bytes memory returndata) = target.call{value: value}(data);
+        return verifyCallResultFromTarget(target, success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but performing a static call.
+     *
+     * _Available since v3.3._
+     */
+    function functionStaticCall(address target, bytes memory data) internal view returns (bytes memory) {
+        return functionStaticCall(target, data, "Address: low-level static call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-string-}[`functionCall`],
+     * but performing a static call.
+     *
+     * _Available since v3.3._
+     */
+    function functionStaticCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal view returns (bytes memory) {
+        (bool success, bytes memory returndata) = target.staticcall(data);
+        return verifyCallResultFromTarget(target, success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but performing a delegate call.
+     *
+     * _Available since v3.4._
+     */
+    function functionDelegateCall(address target, bytes memory data) internal returns (bytes memory) {
+        return functionDelegateCall(target, data, "Address: low-level delegate call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-string-}[`functionCall`],
+     * but performing a delegate call.
+     *
+     * _Available since v3.4._
+     */
+    function functionDelegateCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        (bool success, bytes memory returndata) = target.delegatecall(data);
+        return verifyCallResultFromTarget(target, success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Tool to verify that a low level call to smart-contract was successful, and revert (either by bubbling
+     * the revert reason or using the provided one) in case of unsuccessful call or if target was not a contract.
+     *
+     * _Available since v4.8._
+     */
+    function verifyCallResultFromTarget(
+        address target,
+        bool success,
+        bytes memory returndata,
+        string memory errorMessage
+    ) internal view returns (bytes memory) {
+        if (success) {
+            if (returndata.length == 0) {
+                // only check isContract if the call was successful and the return data is empty
+                // otherwise we already know that it was a contract
+                require(isContract(target), "Address: call to non-contract");
+            }
+            return returndata;
+        } else {
+            _revert(returndata, errorMessage);
+        }
+    }
+
+    /**
+     * @dev Tool to verify that a low level call was successful, and revert if it wasn't, either by bubbling the
+     * revert reason or using the provided one.
+     *
+     * _Available since v4.3._
+     */
+    function verifyCallResult(
+        bool success,
+        bytes memory returndata,
+        string memory errorMessage
+    ) internal pure returns (bytes memory) {
+        if (success) {
+            return returndata;
+        } else {
+            _revert(returndata, errorMessage);
+        }
+    }
+
+    function _revert(bytes memory returndata, string memory errorMessage) private pure {
+        // Look for revert reason and bubble it up if present
+        if (returndata.length > 0) {
+            // The easiest way to bubble the revert reason is using memory via assembly
+            /// @solidity memory-safe-assembly
+            assembly {
+                let returndata_size := mload(returndata)
+                revert(add(32, returndata), returndata_size)
+            }
+        } else {
+            revert(errorMessage);
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (token/ERC20/extensions/draft-IERC20Permit.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC20 Permit extension allowing approvals to be made via signatures, as defined in
+ * https://eips.ethereum.org/EIPS/eip-2612[EIP-2612].
+ *
+ * Adds the {permit} method, which can be used to change an account's ERC20 allowance (see {IERC20-allowance}) by
+ * presenting a message signed by the account. By not relying on {IERC20-approve}, the token holder account doesn't
+ * need to send a transaction, and thus is not required to hold Ether at all.
+ */
+interface IERC20Permit {
+    /**
+     * @dev Sets `value` as the allowance of `spender` over ``owner``'s tokens,
+     * given ``owner``'s signed approval.
+     *
+     * IMPORTANT: The same issues {IERC20-approve} has related to transaction
+     * ordering also apply here.
+     *
+     * Emits an {Approval} event.
+     *
+     * Requirements:
+     *
+     * - `spender` cannot be the zero address.
+     * - `deadline` must be a timestamp in the future.
+     * - `v`, `r` and `s` must be a valid `secp256k1` signature from `owner`
+     * over the EIP712-formatted function arguments.
+     * - the signature must use ``owner``'s current nonce (see {nonces}).
+     *
+     * For more information on the signature format, see the
+     * https://eips.ethereum.org/EIPS/eip-2612#specification[relevant EIP
+     * section].
+     */
+    function permit(
+        address owner,
+        address spender,
+        uint256 value,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external;
+
+    /**
+     * @dev Returns the current nonce for `owner`. This value must be
+     * included whenever a signature is generated for {permit}.
+     *
+     * Every successful call to {permit} increases ``owner``'s nonce by one. This
+     * prevents a signature from being used multiple times.
+     */
+    function nonces(address owner) external view returns (uint256);
+
+    /**
+     * @dev Returns the domain separator used in the encoding of the signature for {permit}, as defined by {EIP712}.
+     */
+    // solhint-disable-next-line func-name-mixedcase
+    function DOMAIN_SEPARATOR() external view returns (bytes32);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.6.0) (proxy/Proxy.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev This abstract contract provides a fallback function that delegates all calls to another contract using the EVM
+ * instruction `delegatecall`. We refer to the second contract as the _implementation_ behind the proxy, and it has to
+ * be specified by overriding the virtual {_implementation} function.
+ *
+ * Additionally, delegation to the implementation can be triggered manually through the {_fallback} function, or to a
+ * different contract through the {_delegate} function.
+ *
+ * The success and return data of the delegated call will be returned back to the caller of the proxy.
+ */
+abstract contract Proxy {
+    /**
+     * @dev Delegates the current call to `implementation`.
+     *
+     * This function does not return to its internal call site, it will return directly to the external caller.
+     */
+    function _delegate(address implementation) internal virtual {
+        assembly {
+            // Copy msg.data. We take full control of memory in this inline assembly
+            // block because it will not return to Solidity code. We overwrite the
+            // Solidity scratch pad at memory position 0.
+            calldatacopy(0, 0, calldatasize())
+
+            // Call the implementation.
+            // out and outsize are 0 because we don't know the size yet.
+            let result := delegatecall(gas(), implementation, 0, calldatasize(), 0, 0)
+
+            // Copy the returned data.
+            returndatacopy(0, 0, returndatasize())
+
+            switch result
+            // delegatecall returns 0 on error.
+            case 0 {
+                revert(0, returndatasize())
+            }
+            default {
+                return(0, returndatasize())
+            }
+        }
+    }
+
+    /**
+     * @dev This is a virtual function that should be overridden so it returns the address to which the fallback function
+     * and {_fallback} should delegate.
+     */
+    function _implementation() internal view virtual returns (address);
+
+    /**
+     * @dev Delegates the current call to the address returned by `_implementation()`.
+     *
+     * This function does not return to its internal call site, it will return directly to the external caller.
+     */
+    function _fallback() internal virtual {
+        _beforeFallback();
+        _delegate(_implementation());
+    }
+
+    /**
+     * @dev Fallback function that delegates calls to the address returned by `_implementation()`. Will run if no other
+     * function in the contract matches the call data.
+     */
+    fallback() external payable virtual {
+        _fallback();
+    }
+
+    /**
+     * @dev Fallback function that delegates calls to the address returned by `_implementation()`. Will run if call data
+     * is empty.
+     */
+    receive() external payable virtual {
+        _fallback();
+    }
+
+    /**
+     * @dev Hook that is called before falling back to the implementation. Can happen as part of a manual `_fallback`
+     * call, or as part of the Solidity `fallback` or `receive` functions.
+     *
+     * If overridden should call `super._beforeFallback()`.
+     */
+    function _beforeFallback() internal virtual {}
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (utils/Address.sol)
+
+pragma solidity ^0.8.1;
+
+/**
+ * @dev Collection of functions related to the address type
+ */
+library AddressUpgradeable {
+    /**
+     * @dev Returns true if `account` is a contract.
+     *
+     * [IMPORTANT]
+     * ====
+     * It is unsafe to assume that an address for which this function returns
+     * false is an externally-owned account (EOA) and not a contract.
+     *
+     * Among others, `isContract` will return false for the following
+     * types of addresses:
+     *
+     *  - an externally-owned account
+     *  - a contract in construction
+     *  - an address where a contract will be created
+     *  - an address where a contract lived, but was destroyed
+     * ====
+     *
+     * [IMPORTANT]
+     * ====
+     * You shouldn't rely on `isContract` to protect against flash loan attacks!
+     *
+     * Preventing calls from contracts is highly discouraged. It breaks composability, breaks support for smart wallets
+     * like Gnosis Safe, and does not provide security since it can be circumvented by calling from a contract
+     * constructor.
+     * ====
+     */
+    function isContract(address account) internal view returns (bool) {
+        // This method relies on extcodesize/address.code.length, which returns 0
+        // for contracts in construction, since the code is only stored at the end
+        // of the constructor execution.
+
+        return account.code.length > 0;
+    }
+
+    /**
+     * @dev Replacement for Solidity's `transfer`: sends `amount` wei to
+     * `recipient`, forwarding all available gas and reverting on errors.
+     *
+     * https://eips.ethereum.org/EIPS/eip-1884[EIP1884] increases the gas cost
+     * of certain opcodes, possibly making contracts go over the 2300 gas limit
+     * imposed by `transfer`, making them unable to receive funds via
+     * `transfer`. {sendValue} removes this limitation.
+     *
+     * https://consensys.net/diligence/blog/2019/09/stop-using-soliditys-transfer-now/[Learn more].
+     *
+     * IMPORTANT: because control is transferred to `recipient`, care must be
+     * taken to not create reentrancy vulnerabilities. Consider using
+     * {ReentrancyGuard} or the
+     * https://solidity.readthedocs.io/en/v0.5.11/security-considerations.html#use-the-checks-effects-interactions-pattern[checks-effects-interactions pattern].
+     */
+    function sendValue(address payable recipient, uint256 amount) internal {
+        require(address(this).balance >= amount, "Address: insufficient balance");
+
+        (bool success, ) = recipient.call{value: amount}("");
+        require(success, "Address: unable to send value, recipient may have reverted");
+    }
+
+    /**
+     * @dev Performs a Solidity function call using a low level `call`. A
+     * plain `call` is an unsafe replacement for a function call: use this
+     * function instead.
+     *
+     * If `target` reverts with a revert reason, it is bubbled up by this
+     * function (like regular Solidity function calls).
+     *
+     * Returns the raw returned data. To convert to the expected return value,
+     * use https://solidity.readthedocs.io/en/latest/units-and-global-variables.html?highlight=abi.decode#abi-encoding-and-decoding-functions[`abi.decode`].
+     *
+     * Requirements:
+     *
+     * - `target` must be a contract.
+     * - calling `target` with `data` must not revert.
+     *
+     * _Available since v3.1._
+     */
+    function functionCall(address target, bytes memory data) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, 0, "Address: low-level call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`], but with
+     * `errorMessage` as a fallback revert reason when `target` reverts.
+     *
+     * _Available since v3.1._
+     */
+    function functionCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, 0, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but also transferring `value` wei to `target`.
+     *
+     * Requirements:
+     *
+     * - the calling contract must have an ETH balance of at least `value`.
+     * - the called Solidity function must be `payable`.
+     *
+     * _Available since v3.1._
+     */
+    function functionCallWithValue(
+        address target,
+        bytes memory data,
+        uint256 value
+    ) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, value, "Address: low-level call with value failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCallWithValue-address-bytes-uint256-}[`functionCallWithValue`], but
+     * with `errorMessage` as a fallback revert reason when `target` reverts.
+     *
+     * _Available since v3.1._
+     */
+    function functionCallWithValue(
+        address target,
+        bytes memory data,
+        uint256 value,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        require(address(this).balance >= value, "Address: insufficient balance for call");
+        (bool success, bytes memory returndata) = target.call{value: value}(data);
+        return verifyCallResultFromTarget(target, success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but performing a static call.
+     *
+     * _Available since v3.3._
+     */
+    function functionStaticCall(address target, bytes memory data) internal view returns (bytes memory) {
+        return functionStaticCall(target, data, "Address: low-level static call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-string-}[`functionCall`],
+     * but performing a static call.
+     *
+     * _Available since v3.3._
+     */
+    function functionStaticCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal view returns (bytes memory) {
+        (bool success, bytes memory returndata) = target.staticcall(data);
+        return verifyCallResultFromTarget(target, success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Tool to verify that a low level call to smart-contract was successful, and revert (either by bubbling
+     * the revert reason or using the provided one) in case of unsuccessful call or if target was not a contract.
+     *
+     * _Available since v4.8._
+     */
+    function verifyCallResultFromTarget(
+        address target,
+        bool success,
+        bytes memory returndata,
+        string memory errorMessage
+    ) internal view returns (bytes memory) {
+        if (success) {
+            if (returndata.length == 0) {
+                // only check isContract if the call was successful and the return data is empty
+                // otherwise we already know that it was a contract
+                require(isContract(target), "Address: call to non-contract");
+            }
+            return returndata;
+        } else {
+            _revert(returndata, errorMessage);
+        }
+    }
+
+    /**
+     * @dev Tool to verify that a low level call was successful, and revert if it wasn't, either by bubbling the
+     * revert reason or using the provided one.
+     *
+     * _Available since v4.3._
+     */
+    function verifyCallResult(
+        bool success,
+        bytes memory returndata,
+        string memory errorMessage
+    ) internal pure returns (bytes memory) {
+        if (success) {
+            return returndata;
+        } else {
+            _revert(returndata, errorMessage);
+        }
+    }
+
+    function _revert(bytes memory returndata, string memory errorMessage) private pure {
+        // Look for revert reason and bubble it up if present
+        if (returndata.length > 0) {
+            // The easiest way to bubble the revert reason is using memory via assembly
+            /// @solidity memory-safe-assembly
+            assembly {
+                let returndata_size := mload(returndata)
+                revert(add(32, returndata), returndata_size)
+            }
+        } else {
+            revert(errorMessage);
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (utils/StorageSlot.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Library for reading and writing primitive types to specific storage slots.
+ *
+ * Storage slots are often used to avoid storage conflict when dealing with upgradeable contracts.
+ * This library helps with reading and writing to such slots without the need for inline assembly.
+ *
+ * The functions in this library return Slot structs that contain a `value` member that can be used to read or write.
+ *
+ * Example usage to set ERC1967 implementation slot:
+ * ```
+ * contract ERC1967 {
+ *     bytes32 internal constant _IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+ *
+ *     function _getImplementation() internal view returns (address) {
+ *         return StorageSlot.getAddressSlot(_IMPLEMENTATION_SLOT).value;
+ *     }
+ *
+ *     function _setImplementation(address newImplementation) internal {
+ *         require(Address.isContract(newImplementation), "ERC1967: new implementation is not a contract");
+ *         StorageSlot.getAddressSlot(_IMPLEMENTATION_SLOT).value = newImplementation;
+ *     }
+ * }
+ * ```
+ *
+ * _Available since v4.1 for `address`, `bool`, `bytes32`, and `uint256`._
+ */
+library StorageSlot {
+    struct AddressSlot {
+        address value;
+    }
+
+    struct BooleanSlot {
+        bool value;
+    }
+
+    struct Bytes32Slot {
+        bytes32 value;
+    }
+
+    struct Uint256Slot {
+        uint256 value;
+    }
+
+    /**
+     * @dev Returns an `AddressSlot` with member `value` located at `slot`.
+     */
+    function getAddressSlot(bytes32 slot) internal pure returns (AddressSlot storage r) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            r.slot := slot
+        }
+    }
+
+    /**
+     * @dev Returns an `BooleanSlot` with member `value` located at `slot`.
+     */
+    function getBooleanSlot(bytes32 slot) internal pure returns (BooleanSlot storage r) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            r.slot := slot
+        }
+    }
+
+    /**
+     * @dev Returns an `Bytes32Slot` with member `value` located at `slot`.
+     */
+    function getBytes32Slot(bytes32 slot) internal pure returns (Bytes32Slot storage r) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            r.slot := slot
+        }
+    }
+
+    /**
+     * @dev Returns an `Uint256Slot` with member `value` located at `slot`.
+     */
+    function getUint256Slot(bytes32 slot) internal pure returns (Uint256Slot storage r) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            r.slot := slot
+        }
+    }
+}
