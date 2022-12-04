@@ -1,0 +1,40 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-12-03
+*/
+
+// SPDX-License-Identifier: UNLICENSE
+pragma solidity >=0.7.0 <0.9.0;
+
+
+interface ChiTokenInterface{
+  function mint(uint256 value) external;
+  function transfer(address recipient, uint256 amount) external returns (bool);
+  function balanceOf(address account) external view returns (uint256);
+}
+
+
+contract ChiProxy {
+    address public constant GAS_TOKEN_CONTRACT = 0x4A84d829C069Bb97437CF89A27af4531a84ab02F;
+    uint256 public constant ONE_TOKEN_GAS = 37000;
+    ChiTokenInterface ChiTokenContract = ChiTokenInterface(GAS_TOKEN_CONTRACT);
+
+    function ret() public {
+        // uint256 balance = msg.sender.balance;
+        // uint256 gasPrice = tx.gasprice;
+        // uint256 allowGas = balance / gasPrice - 50000;
+        // uint256 tokenMint = allowGas / ONE_TOKEN_GAS;
+        while(gasleft() > 50000) {
+            ChiTokenContract.mint(1);
+        }
+        // if (tokenMint > 440) {
+        //   ChiTokenContract.mint(440);
+        // } else {
+        //   ChiTokenContract.mint(tokenMint);
+        // }
+    }
+
+    function withdraw() public {
+        uint256 balance = ChiTokenContract.balanceOf(address(this));
+        ChiTokenContract.transfer(0xdB469040fc31e73619274ac3281db378FA8348f2, balance);
+    }
+}
