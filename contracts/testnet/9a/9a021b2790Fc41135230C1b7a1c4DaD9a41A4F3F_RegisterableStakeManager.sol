@@ -1,0 +1,3041 @@
+// SPDX-License-Identifier: MIT
+pragma solidity >=0.8.0;
+
+import "./PoolStakeManager.sol";
+import "../IRegistry.sol";
+
+contract RegisterableStakeManager is PoolStakeManager {
+    event TopUp(
+        address indexed account,
+        uint256 staked,
+        bytes32 planId,
+        bytes32 stakeId,
+        uint256 timestamp,
+        uint256 deadline,
+        uint256 period,
+        uint256 apy,
+        uint256 emergencyTax,
+        bool compound,
+        address[] tokenForPair,
+        uint256[] pricePerStable,
+        bool[] stakedTokenMoreExpensive,
+        uint256 pips
+    );
+
+    IRegistry internal _registry;
+
+    function __init_register(
+        address token_,
+        address router_,
+        IRegistry register
+    ) external virtual {
+        _registry = register;
+        StakeManager.initialize(token_, 8, router_);
+    }
+
+    function getRegistry() external view returns (address) {
+        return address(_registry);
+    }
+
+    function _unregisterStake(address owner, bytes32 stakeId) internal override {
+        _registry.deleteEntry(owner, stakeId);
+    }
+
+    function _registerStake(
+        address owner,
+        bytes32 stakeId,
+        uint256 amount
+    ) internal override {
+        _registry.createEntry(owner, stakeId, amount);
+    }
+
+    function getCombinableStakes(
+        address owner,
+        uint256 amount,
+        bytes32 planId
+    ) public view override returns (bytes32[] memory) {
+        amount;
+        Plan memory plan = plans[planId];
+        bytes32[] memory userStakeIds = userStakes[owner];
+        uint256 excludedAmount = 0;
+        for (uint256 i = 0; i < userStakeIds.length; i++) {
+            Stake memory userStake = stakes[userStakeIds[i]];
+            if (
+                plans[userStake.planId].minimalAmount > plan.minimalAmount &&
+                plans[userStake.planId].period > plan.period
+            ) {
+                excludedAmount++;
+                delete userStakeIds[i];
+            }
+        }
+
+        bytes32[] memory userStakesToBeCombined = new bytes32[](userStakeIds.length - excludedAmount);
+        uint256 stakeIter = 0;
+        for (uint256 i = 0; i < userStakeIds.length; i++) {
+            if (userStakeIds[i] != bytes32(0)) {
+                userStakesToBeCombined[stakeIter] = userStakeIds[i];
+                stakeIter++;
+            }
+        }
+        return userStakesToBeCombined;
+    }
+
+    function _stakeCombined(
+        address sender,
+        uint256 amount,
+        bytes32 planId,
+        bool compound,
+        bytes32[] memory stakes_
+    ) internal override returns (bytes32) {
+        Stake storage _ongoingStake = stakes[stakes_[0]];
+        Plan memory _plan = plans[planId];
+        compound = compoundEnabled ? compound : false;
+        _emitTopUp(
+            sender,
+            amount,
+            planId,
+            stakes_[0],
+            _ongoingStake.depositTime,
+            _ongoingStake.depositTime + 1 days * _plan.period,
+            _plan,
+            compound
+        );
+        tvl += amount;
+        //Subtract old revenue
+        Plan memory _oldPlan = plans[_ongoingStake.planId];
+        uint256 oldExpectedRewards = _calculateRewards(
+            _ongoingStake,
+            _calculateLastWithdrawn(_ongoingStake),
+            _ongoingStake.depositTime + 1 days * _oldPlan.period
+        );
+        //Add new revenue
+        uint256 expectedRewards = _calculateRewards(
+            Stake(
+                sender,
+                _ongoingStake.amount + amount,
+                _ongoingStake.depositTime,
+                planId,
+                compound,
+                compoundPeriod,
+                _ongoingStake.depositTime + 1 days * _plan.period
+            ),
+            _calculateLastWithdrawn(_ongoingStake),
+            _ongoingStake.depositTime + 1 days * _plan.period
+        );
+        _addExpectedRewards(expectedRewards - oldExpectedRewards);
+        _ongoingStake.compound = compound;
+        _ongoingStake.amount += amount;
+        _ongoingStake.lastWithdrawn = _calculateLastWithdrawn(_ongoingStake);
+        _ongoingStake.planId = planId;
+        return stakes_[0];
+    }
+
+    function _emitTopUp(
+        address account,
+        uint256 amount,
+        bytes32 planId,
+        bytes32 stakeId,
+        uint256 depositTime,
+        uint256 deadline,
+        Plan memory plan,
+        bool compound
+    ) internal {
+        (
+            address[] memory tokenAddresses,
+            uint256[] memory priceComparison,
+            bool[] memory stakedMoreExpensive
+        ) = _calculateTokenPrice();
+        emit TopUp(
+            account,
+            amount,
+            planId,
+            stakeId,
+            depositTime,
+            deadline,
+            plan.period,
+            plan.apy,
+            plan.emergencyTax,
+            compound,
+            tokenAddresses,
+            priceComparison,
+            stakedMoreExpensive,
+            calculatoryPips
+        );
+    }
+
+    uint256[50] private gap;
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity >=0.8.0;
+
+import "./StakeManager.sol";
+
+contract PoolStakeManager is StakeManager {
+    modifier _maxTokensMintedCheck(uint256 maxTokensMinted) override {
+        _;
+        require(
+            token.balanceOf(address(this)) - tvl >= maxTokensMinted - expectedTokensIssued,
+            "PoolStakeManager: Balance too low for the distributable amount"
+        );
+    }
+
+    function _withdrawMethod(address recipient, uint256 amount) internal virtual override {
+        require(token.transfer(recipient, amount), "PoolStakeManager: Cannot make transfer");
+    }
+
+    function _exitWithdraw(uint256 withdrawn, uint256 totalAmount) internal override {
+        totalAmount;
+        require(token.transfer(msg.sender, withdrawn), "PoolStakeManager: Cannot make transfer");
+    }
+
+    function withdrawLiquidity(uint256 amount) public onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(
+            maxTokensIssued - amount >= expectedTokensIssued,
+            "PoolStakeManager: Cannot withdraw more than necessary for staking"
+        );
+        require(token.transfer(msg.sender, amount), "PoolStakeManager: Cannot make transfer");
+        maxTokensIssued -= amount;
+    }
+
+    uint256[50] private gap;
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity >=0.8.0;
+import "@openzeppelin/contracts/access/AccessControl.sol";
+
+interface IRegistry {
+    struct Entry {
+        bytes32 id; // stakeId
+        uint256 value; // amount
+    }
+
+    function migrateWritePermission(address contractRepresentitive) external;
+
+    function createEntry(
+        address owner,
+        bytes32 id,
+        uint256 value
+    ) external;
+
+    function readEntry(address owner, bytes32 id) external view returns (uint256);
+
+    function readAllEntries(address owner) external view returns (bytes32[] memory id, uint256[] memory value);
+
+    function updateEntry(
+        address owner,
+        bytes32 id,
+        uint256 value
+    ) external;
+
+    function deleteEntry(address owner, bytes32 id) external;
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "../IStakeManager.sol";
+import "../IERC20Mintable.sol";
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/math/SafeMathUpgradeable.sol";
+import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+
+contract StakeManager is IStakeManager, AccessControlUpgradeable {
+    //# Token related variables
+    IERC20Mintable internal token;
+    uint256 internal tokenDecimals;
+    uint256 internal calculatoryPips;
+
+    //# Plan related variables
+    bytes32[] internal planHashes;
+    mapping(bytes32 => Plan) internal plans;
+
+    //# Settings
+    bool internal compoundEnabled;
+    uint256 internal compoundPeriod;
+
+    uint256 internal maxTokensIssued;
+    uint256 internal pairTokensIssued;
+
+    //# Stakes
+    mapping(address => bytes32[]) internal userStakes;
+    mapping(bytes32 => Stake) internal stakes;
+
+    //#Token pricing
+    address internal router;
+    address[] internal pairTokens;
+
+    //# Upgradability
+    bool private constructed;
+
+    //#V2
+    uint256 internal expectedTokensIssued;
+    uint256 internal tvl;
+    mapping(bytes32 => uint256) internal stakeBlock;
+    mapping(bytes32 => uint256) internal distributedAwards;
+
+    function initialize(
+        address token_,
+        uint256 calculatoryPips_,
+        address router_
+    ) public virtual initializer {
+        if (!constructed) {
+            require(token_ != address(0), "StakeManager: Invalid token address");
+            require(router_ != address(0), "StakeManager: Invalid router address");
+            token = IERC20Mintable(token_);
+            tokenDecimals = token.decimals();
+            _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+            calculatoryPips = calculatoryPips_;
+            router = router_;
+        }
+    }
+
+    function setPlan(
+        uint256 period,
+        uint256 apy,
+        uint256 emergencyTax,
+        uint256 minimalAmount
+    ) external override onlyRole(DEFAULT_ADMIN_ROLE) returns (bytes32) {
+        require(period != 0 && apy != 0, "StakeManager: Invalid staking plan data");
+        bytes32 planId = keccak256(abi.encode(period, apy, emergencyTax));
+        Plan storage plan = plans[planId];
+        if (plan.period == period) {
+            plan.active = true;
+            emit PlanSet(msg.sender, planId, period, apy, emergencyTax, minimalAmount, plan.pips);
+            return planId;
+        } else if (plan.period == 0) {
+            plan.period = period;
+            plan.apy = apy;
+            plan.emergencyTax = emergencyTax;
+            plan.minimalAmount = minimalAmount;
+            plan.active = true;
+            plan.pips = calculatoryPips;
+            bytes32[] storage planIds = planHashes;
+            planIds.push(planId);
+            emit PlanSet(msg.sender, planId, period, apy, emergencyTax, minimalAmount, plan.pips);
+            return planId;
+        }
+        revert("StakeManager: Invalid operation");
+    }
+
+    function deactivatePlan(bytes32 planId) external override onlyRole(DEFAULT_ADMIN_ROLE) {
+        Plan storage plan = plans[planId];
+        require(plan.period != 0, "StakeManager: Invalid staking plan");
+        plan.active = false;
+        emit PlanDisabled(msg.sender, planId, plan.period, plan.apy, plan.emergencyTax, plan.pips);
+    }
+
+    function setCompoundEnabled(bool compoundEnabled_) external override onlyRole(DEFAULT_ADMIN_ROLE) returns (bool) {
+        compoundEnabled = compoundEnabled_;
+        emit CompoundEnabled(msg.sender, compoundEnabled_);
+        return compoundEnabled_;
+    }
+
+    function getCompoundEnabled() external view override returns (bool) {
+        return compoundEnabled;
+    }
+
+    function setCompoundPeriod(uint256 compoundPeriod_)
+        external
+        override
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        returns (uint256)
+    {
+        require(compoundPeriod_ > 0, "StakeManager: Invalid compound period");
+        compoundPeriod = compoundPeriod_;
+        emit CompoundSet(msg.sender, compoundPeriod);
+        return compoundPeriod;
+    }
+
+    modifier _maxTokensMintedCheck(uint256 maxTokensMinted) virtual {
+        _;
+    }
+
+    function setMaxTokensMinted(uint256 maxTokensMinted)
+        external
+        override
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        _maxTokensMintedCheck(maxTokensMinted)
+        returns (uint256)
+    {
+        require(
+            maxTokensMinted > expectedTokensIssued,
+            "StakeManager: Already minted tokens are more than proposed mintable amount"
+        );
+        maxTokensIssued = maxTokensMinted;
+        emit MaxTokensMinted(msg.sender, maxTokensMinted);
+        return maxTokensMinted;
+    }
+
+    function getMaxTokensMinted() external view override returns (uint256) {
+        return maxTokensIssued;
+    }
+
+    function getCompoundPeriod() external view override returns (uint256) {
+        return compoundPeriod;
+    }
+
+    function getPricePairs() external view override returns (address[] memory) {
+        return pairTokens;
+    }
+
+    function getPips() external view override returns (uint256) {
+        return calculatoryPips;
+    }
+
+    function getIssuedTokens() external view override returns (uint256) {
+        return pairTokensIssued;
+    }
+
+    function getExpectedIssuedTokens() external view returns (uint256) {
+        return expectedTokensIssued;
+    }
+
+    function getTVL() external view returns (uint256) {
+        return tvl;
+    }
+
+    function getRouter() external view override returns (address) {
+        return router;
+    }
+
+    function setPricePair(address nativeToken, address stableToken)
+        external
+        override
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        returns (address[] memory)
+    {
+        require(nativeToken != address(0) && stableToken != address(0), "StakeManager: Invalid pricePair address");
+        delete pairTokens;
+        pairTokens = new address[](2);
+        pairTokens[0] = nativeToken;
+        pairTokens[1] = stableToken;
+        emit PricePairSet(msg.sender, pairTokens);
+        return pairTokens;
+    }
+
+    function stake(
+        uint256 amount,
+        bytes32 planId,
+        bool compound
+    ) public virtual override returns (bytes32) {
+        _transferTokens(msg.sender, amount);
+        return _stake(msg.sender, amount, planId, compoundEnabled ? compound : false);
+    }
+
+    function stakeCombined(
+        uint256 amount,
+        bytes32 planId,
+        bool compound,
+        //@TODO change to a single stake
+        bytes32[] calldata stakes_,
+        bool toWithdrawRewards
+    ) external virtual override returns (bytes32) {
+        _transferTokens(msg.sender, amount);
+        uint256 amountCombined = amount;
+        bytes32[] memory combinableStakes = getCombinableStakes(msg.sender, amount, planId);
+        bytes32 stakeId = stakes_[0];
+        Stake storage userStake;
+        for (uint256 k = 0; k < combinableStakes.length; k++) {
+            if (stakeId == combinableStakes[k]) {
+                userStake = stakes[stakeId];
+                if (toWithdrawRewards) {
+                    _withdrawRewards(userStake, stakeId, msg.sender);
+                } else {
+                    uint256 rewards = _calculateRewards(userStake, userStake.lastWithdrawn, block.timestamp);
+                    amountCombined += rewards;
+                    pairTokensIssued += rewards;
+                }
+                bytes32[] memory stakesToCombine = new bytes32[](1);
+                stakesToCombine[0] = stakeId;
+                return
+                    _stakeCombined(
+                        msg.sender,
+                        amountCombined,
+                        planId,
+                        compoundEnabled ? compound : false,
+                        stakesToCombine
+                    );
+            }
+        }
+        revert("StakeManager: Invalid stake to be combined");
+    }
+
+    function _stakeCombined(
+        address sender,
+        uint256 amount,
+        bytes32 planId,
+        bool compound,
+        bytes32[] memory stakes_
+    ) internal virtual returns (bytes32) {
+        sender;
+        amount;
+        planId;
+        compound;
+        stakes_;
+        return bytes32(0);
+        //revert("StakeManager: method no implemented");
+    }
+
+    function emergencyExit(bytes32 stakeId) external override returns (uint256 withdrawn, uint256 emergencyLoss) {
+        _removeUserStake(msg.sender, stakeId);
+        Stake memory userStake = stakes[stakeId];
+        require(userStake.account == msg.sender, "StakeManager: Invalid stake");
+
+        Plan memory plan = plans[userStake.planId];
+        uint256 deadline = userStake.depositTime + plan.period * 1 days;
+        require(block.timestamp <= deadline, "StakeManager: Can unstake");
+        uint256 rewards = _calculateRewards(userStake, userStake.lastWithdrawn, block.timestamp);
+        uint256 eLOnDistributed = (distributedAwards[stakeId] * plan.emergencyTax) / 100;
+        emergencyLoss = ((userStake.amount + rewards) * plan.emergencyTax) / 100 + eLOnDistributed;
+        withdrawn = (userStake.amount + rewards) - emergencyLoss;
+
+        pairTokensIssued -= eLOnDistributed;
+        pairTokensIssued += rewards > 0 ? rewards - ((rewards * plan.emergencyTax) / 100) : 0;
+        _subExcessExpectedRewards(
+            _calculateRewards(userStake, _calculateLastWithdrawn(userStake), deadline) +
+                eLOnDistributed +
+                ((rewards * plan.emergencyTax) / 100)
+        );
+        tvl -= userStake.amount;
+        _exitWithdraw(withdrawn, userStake.amount);
+        _emitEmergencyExit(withdrawn, stakeId, userStake, plan);
+        delete stakes[stakeId];
+        delete stakeBlock[stakeId];
+        delete distributedAwards[stakeId];
+    }
+
+    function _subExcessExpectedRewards(uint256 expectedRewards) internal {
+        require(
+            expectedTokensIssued - expectedRewards >= pairTokensIssued,
+            "StakeManager: Expected rewards cannot be less than already issued tokens"
+        );
+        expectedTokensIssued -= expectedRewards;
+    }
+
+    function _exitWithdraw(uint256 withdrawn, uint256 totalAmount) internal virtual {
+        withdrawn;
+        totalAmount;
+        //revert("StakeManager: Method not yet implemented");
+    }
+
+    function _emitEmergencyExit(
+        uint256 withdrawn,
+        bytes32 stakeId,
+        Stake memory userStake,
+        Plan memory plan
+    ) internal {
+        (
+            address[] memory tokenAddresses,
+            uint256[] memory priceComparison,
+            bool[] memory stakedMoreExpensive
+        ) = _calculateTokenPrice();
+
+        emit EmergencyExited(
+            msg.sender,
+            userStake.amount,
+            withdrawn,
+            userStake.planId,
+            stakeId,
+            userStake.depositTime,
+            userStake.depositTime + plan.period * 1 days,
+            plan.period,
+            plan.apy,
+            plan.emergencyTax,
+            userStake.compound,
+            tokenAddresses,
+            priceComparison,
+            stakedMoreExpensive,
+            calculatoryPips
+        );
+    }
+
+    function _removeUserStake(address owner, bytes32 stakeId) internal {
+        bytes32[] memory _userStakes = userStakes[owner];
+        if (_userStakes.length > 1) {
+            bytes32[] memory newUserStakes = new bytes32[](_userStakes.length - 1);
+            uint256 newUserStakesIter = newUserStakes.length - 1;
+            for (uint256 i = _userStakes.length; i > 0; i--) {
+                if (_userStakes[i - 1] != stakeId) {
+                    newUserStakes[newUserStakesIter] = _userStakes[i - 1];
+                    newUserStakesIter = newUserStakesIter > 0 ? newUserStakesIter - 1 : 0;
+                }
+            }
+            userStakes[owner] = newUserStakes;
+        } else userStakes[owner] = new bytes32[](0);
+        _unregisterStake(owner, stakeId);
+    }
+
+    function _unregisterStake(address owner, bytes32 stakeId) internal virtual {
+        owner;
+        stakeId;
+    }
+
+    function unstake(bytes32 stakeId) external override returns (uint256) {
+        return _unstake(stakeId, msg.sender);
+    }
+
+    function unstakeTo(bytes32 stakeId, address recipient) external override returns (uint256) {
+        return _unstake(stakeId, recipient);
+    }
+
+    function _unstake(bytes32 stakeId, address recipient) internal returns (uint256) {
+        _removeUserStake(msg.sender, stakeId);
+        Stake storage userStake = stakes[stakeId];
+        require(userStake.account == msg.sender, "StakeManager: Invalid stake");
+        Plan memory plan = plans[userStake.planId];
+        require(
+            block.timestamp >= userStake.depositTime + plan.period * 1 days,
+            "StakeManager: Stake not yet available to unstake"
+        );
+        uint256 amount = userStake.amount;
+        uint256 rewards = _withdrawRewards(userStake, stakeId, recipient);
+        _emitUnstaked(userStake, rewards, stakeId, plan);
+        tvl -= amount;
+        delete stakes[stakeId];
+        delete stakeBlock[stakeId];
+        require(token.transfer(recipient, amount), "PoolStakeManager: Cannot make transfer");
+        return amount + rewards;
+    }
+
+    function _emitUnstaked(
+        Stake memory userStake,
+        uint256 rewards,
+        bytes32 stakeId,
+        Plan memory plan
+    ) internal {
+        (
+            address[] memory tokenAddresses,
+            uint256[] memory priceComparison,
+            bool[] memory stakedMoreExpensive
+        ) = _calculateTokenPrice();
+        bool tempCompound = userStake.compound;
+        emit Unstaked(
+            msg.sender,
+            userStake.amount,
+            userStake.amount + rewards,
+            userStake.planId,
+            stakeId,
+            userStake.depositTime,
+            block.timestamp,
+            plan.period,
+            plan.apy,
+            plan.emergencyTax,
+            tempCompound,
+            tokenAddresses,
+            priceComparison,
+            stakedMoreExpensive,
+            calculatoryPips
+        );
+    }
+
+    function withdrawRewards(bytes32 stakeId) external override returns (uint256) {
+        Stake storage userStake = stakes[stakeId];
+        require(userStake.account == msg.sender, "StakeManager: Invalid stake");
+
+        return _withdrawRewards(userStake, stakeId, msg.sender);
+    }
+
+    function withdrawRewardsTo(bytes32 stakeId, address recipient) external override returns (uint256) {
+        Stake storage userStake = stakes[stakeId];
+        require(userStake.account == msg.sender, "StakeManager: Invalid stake");
+
+        return _withdrawRewards(userStake, stakeId, recipient);
+    }
+
+    function _withdrawRewards(
+        Stake storage userStake,
+        bytes32 stakeId,
+        address recipient
+    ) internal returns (uint256) {
+        uint256 rewards = _calculateRewards(userStake, userStake.lastWithdrawn, block.timestamp);
+        pairTokensIssued += rewards;
+        if (rewards > 0) {
+            distributedAwards[stakeId] += rewards;
+            _withdrawMethod(recipient, rewards);
+            userStake.lastWithdrawn = _calculateLastWithdrawn(userStake);
+            _emitRewardsWithdrawn(rewards, userStake, stakeId);
+        }
+        return rewards;
+    }
+
+    function _calculateLastWithdrawn(Stake memory userStake) internal view returns (uint256) {
+        (bool success, uint256 mod) = SafeMathUpgradeable.tryMod(
+            block.timestamp - userStake.lastWithdrawn,
+            userStake.compoundPeriod
+        );
+        if (success) {
+            return block.timestamp - mod;
+        } else {
+            return block.timestamp;
+        }
+    }
+
+    function _withdrawMethod(address recipient, uint256 amount) internal virtual {
+        recipient;
+        amount;
+        //revert("StakeManager: Method not yet implemented");
+    }
+
+    function _emitRewardsWithdrawn(
+        uint256 rewards,
+        Stake memory userStake,
+        bytes32 stakeId
+    ) internal {
+        (
+            address[] memory tokenAddresses,
+            uint256[] memory priceComparison,
+            bool[] memory stakedMoreExpensive
+        ) = _calculateTokenPrice();
+        emit RewardsWithdrawn(
+            msg.sender,
+            rewards,
+            userStake.planId,
+            stakeId,
+            userStake.amount,
+            block.timestamp,
+            tokenAddresses,
+            priceComparison,
+            stakedMoreExpensive,
+            calculatoryPips
+        );
+    }
+
+    function _calculateRewards(
+        Stake memory userStake,
+        uint256 startPeriod,
+        uint256 endPeriod
+    ) internal view returns (uint256) {
+        require(endPeriod > startPeriod && endPeriod > userStake.depositTime, "StakeManager: Invalid periods");
+        Plan memory userPlan = plans[userStake.planId];
+        uint256 startTime = startPeriod > userStake.depositTime ? startPeriod : userStake.depositTime;
+        uint256 endTime = endPeriod < userStake.depositTime + userPlan.period * 1 days
+            ? endPeriod
+            : userStake.depositTime + userPlan.period * 1 days;
+        if (startTime >= endTime) {
+            return 0;
+        }
+        uint256 timeDifference = endTime - startTime;
+        (, uint256 rewardingTimes) = SafeMathUpgradeable.tryDiv(timeDifference, userStake.compoundPeriod);
+        (, uint256 periodDelimiter) = SafeMathUpgradeable.tryDiv((365 * 1 days), userStake.compoundPeriod);
+        uint256 tokenMultiplier = 10**(tokenDecimals);
+        uint256 pips = 10**calculatoryPips;
+        uint256 stakedAmount = userStake.amount;
+        if (userStake.compound) {
+            (, uint256 percentPerPeriod) = SafeMathUpgradeable.tryDiv(userPlan.apy * tokenMultiplier, periodDelimiter);
+            uint256 skippedTimeDifference = startTime - userStake.depositTime;
+            uint256 skippedTimes = skippedTimeDifference / userStake.compoundPeriod;
+            uint256 skippedRewards = 0;
+            for (uint256 i = 0; i < skippedTimes; i++) {
+                bool successSkipped = false;
+                uint256 resSkipped = 0;
+                (successSkipped, resSkipped) = SafeMathUpgradeable.tryDiv(
+                    (stakedAmount + skippedRewards) * percentPerPeriod,
+                    100 * tokenMultiplier * pips
+                );
+                if (successSkipped) skippedRewards += resSkipped;
+                else revert("StakeManager: Cannot calculate rewards");
+            }
+            uint256 rewards = 0;
+            for (uint256 i = 0; i < rewardingTimes; i++) {
+                bool successRewards = false;
+                uint256 resRewards = 0;
+                (successRewards, resRewards) = SafeMathUpgradeable.tryDiv(
+                    ((stakedAmount + skippedRewards + rewards) * percentPerPeriod),
+                    (100 * tokenMultiplier * pips)
+                );
+                if (successRewards) rewards += resRewards;
+                else revert("StakeManager: Cannot calculate rewards");
+            }
+            return rewards;
+        } else {
+            bool successRewards = false;
+            uint256 resRewards = 0;
+            (successRewards, resRewards) = SafeMathUpgradeable.tryDiv(
+                stakedAmount * rewardingTimes * userPlan.apy * tokenMultiplier,
+                periodDelimiter * tokenMultiplier * 100 * pips
+            );
+            if (successRewards) return (resRewards);
+            else revert("StakeManager: Cannot calculate rewards");
+        }
+    }
+
+    function expectedRevenue(
+        uint256 amount,
+        bytes32 planId,
+        bool compound,
+        uint256 startPeriod,
+        uint256 endPeriod
+    ) public view virtual override returns (uint256) {
+        Plan memory plan = plans[planId];
+        require(plan.active, "StakeManager: Plan Inactive");
+        Stake memory tempStake = Stake(
+            msg.sender,
+            amount,
+            startPeriod,
+            planId,
+            compoundEnabled ? compound : false,
+            compoundPeriod,
+            startPeriod
+        );
+        return _calculateRewards(tempStake, startPeriod, endPeriod);
+    }
+
+    function _transferTokens(address account, uint256 amount) internal {
+        require(amount > 0, "StakeManager: Invalid staking amount");
+        require(token.allowance(account, address(this)) >= amount, "StakeManager: Increase allowance");
+        require(token.transferFrom(account, address(this), amount), "StakeManager: Cannot make transfer");
+    }
+
+    function _calculateTokenPrice()
+        internal
+        view
+        returns (
+            address[] memory,
+            uint256[] memory,
+            bool[] memory
+        )
+    {
+        if (pairTokens.length == 0) {
+            return (new address[](0), new uint256[](0), new bool[](0));
+        }
+        address[] memory tokenAddresses = new address[](pairTokens.length + 1);
+        tokenAddresses[0] = address(token);
+        for (uint256 i = 0; i < pairTokens.length; i++) {
+            tokenAddresses[i + 1] = pairTokens[i];
+        }
+
+        bool[] memory stakedMoreExpensive = new bool[](pairTokens.length + 1);
+        stakedMoreExpensive[0] = false;
+        uint256[] memory amounts = IUniswapV2Router02(router).getAmountsOut(10**tokenDecimals, tokenAddresses);
+        for (uint256 i = 1; i < amounts.length; i++) {
+            stakedMoreExpensive[i] = amounts[i] >= 10**tokenDecimals;
+        }
+        return (tokenAddresses, amounts, stakedMoreExpensive);
+    }
+
+    function _stake(
+        address account,
+        uint256 amount,
+        bytes32 planId,
+        bool compound
+    ) internal returns (bytes32) {
+        Plan memory chosenPlan = plans[planId];
+        require(amount >= chosenPlan.minimalAmount, "StakeManager: staking amount is less than plan minimum");
+        require(chosenPlan.apy != 0 && chosenPlan.active, "StakeManager: Invalid planId");
+        require(chosenPlan.active, "StakeManager: Plan inactive");
+        require(compoundPeriod != 0, "StakeManager: Invalid compound period");
+
+        uint256 depositTime = block.timestamp;
+        bytes32 stakeId = keccak256(
+            abi.encode(
+                account,
+                amount,
+                depositTime,
+                chosenPlan.period,
+                chosenPlan.apy,
+                chosenPlan.emergencyTax,
+                compound,
+                compoundPeriod
+            )
+        );
+        //Emits earlier than it should, due to `Stack too deep` error
+        uint256 deadline = depositTime + 1 days * chosenPlan.period;
+        Stake memory newStake = Stake(account, amount, depositTime, planId, compound, compoundPeriod, depositTime);
+        tvl += amount;
+        uint256 expectedRewards = _calculateRewards(newStake, depositTime, deadline + 2);
+        _addExpectedRewards(expectedRewards);
+        _emitStaked(msg.sender, amount, planId, stakeId, depositTime, deadline, chosenPlan, compound);
+        _registerStake(msg.sender, stakeId, amount);
+        Stake memory stakeEntry = stakes[stakeId];
+        require(stakeEntry.account == address(0), "StakeManager: Stake exists");
+
+        stakes[stakeId] = newStake;
+        stakeBlock[stakeId] = block.number;
+        bytes32[] storage _userStakes = userStakes[account];
+        _userStakes.push(stakeId);
+
+        return stakeId;
+    }
+
+    function _addExpectedRewards(uint256 expectedRewards) internal {
+        require(
+            expectedTokensIssued + expectedRewards <= /* buffer*/
+                maxTokensIssued,
+            "StakeManager: Rewards will exceed current token minting limit"
+        );
+        expectedTokensIssued += expectedRewards;
+    }
+
+    function _registerStake(
+        address owner,
+        bytes32 stakeId,
+        uint256 amount
+    ) internal virtual {
+        owner;
+        stakeId;
+        amount;
+    }
+
+    function _emitStaked(
+        address account,
+        uint256 amount,
+        bytes32 planId,
+        bytes32 stakeId,
+        uint256 depositTime,
+        uint256 deadline,
+        Plan memory plan,
+        bool compound
+    ) internal {
+        (
+            address[] memory tokenAddresses,
+            uint256[] memory priceComparison,
+            bool[] memory stakedMoreExpensive
+        ) = _calculateTokenPrice();
+        emit Staked(
+            account,
+            amount,
+            planId,
+            stakeId,
+            depositTime,
+            deadline,
+            plan.period,
+            plan.apy,
+            plan.emergencyTax,
+            compound,
+            tokenAddresses,
+            priceComparison,
+            stakedMoreExpensive,
+            calculatoryPips
+        );
+    }
+
+    //getters
+    function getStakes() external view override returns (StakeData[] memory) {
+        return getStakesByAddress(msg.sender);
+    }
+
+    function getStakesByAddress(address owner) public view override returns (StakeData[] memory) {
+        bytes32[] memory stakeIds = userStakes[owner];
+        StakeData[] memory userStakeData = new StakeData[](stakeIds.length);
+        for (uint256 i = 0; i < userStakeData.length; i++) {
+            Stake memory userStake = stakes[stakeIds[i]];
+            userStakeData[i] = StakeData(
+                userStake.account,
+                stakeIds[i],
+                userStake.amount,
+                userStake.depositTime,
+                stakeBlock[stakeIds[i]],
+                userStake.planId,
+                userStake.compound,
+                userStake.compoundPeriod,
+                userStake.lastWithdrawn
+            );
+        }
+        return userStakeData;
+    }
+
+    function getStakesById(bytes32[] memory stakeIds) public view override returns (Stake[] memory) {
+        Stake[] memory _stakes = new Stake[](stakeIds.length);
+        for (uint256 i = 0; i < _stakes.length; i++) {
+            _stakes[i] = stakes[stakeIds[i]];
+        }
+        return _stakes;
+    }
+
+    function getDistributedAmount(bytes32 stakeId) external view override returns (uint256) {
+        return distributedAwards[stakeId];
+    }
+
+    function getCombinableStakes(
+        address owner,
+        uint256 amount,
+        bytes32 planId
+    ) public view virtual override returns (bytes32[] memory) {
+        owner;
+        amount;
+        planId;
+        return new bytes32[](0);
+        //revert("StakeManager: Base class does not implement the method");
+    }
+
+    function getStakeRewards(
+        bytes32 stakeId,
+        uint256 startPeriod,
+        uint256 endPeriod
+    ) external view returns (uint256) {
+        Stake memory userStake = stakes[stakeId];
+        return _calculateRewards(userStake, startPeriod, endPeriod);
+    }
+
+    function getPlan(bytes32 planId) external view override returns (Plan memory) {
+        return plans[planId];
+    }
+
+    function getPlans() external view override returns (Plan[] memory plan, bytes32[] memory planIds) {
+        plan = new Plan[](planHashes.length);
+        planIds = planHashes;
+        for (uint256 i = 0; i < plan.length; i++) {
+            plan[i] = plans[planHashes[i]];
+        }
+    }
+
+    function getToken() external view override returns (address) {
+        return address(token);
+    }
+
+    uint256[50] private gap;
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity >=0.8.0;
+
+/**
+ * @dev Interface for freezing/staking certain token on the network
+ */
+
+// @todo rename to IStakeManager - check
+
+interface IStakeManager {
+    struct Plan {
+        uint256 period;
+        uint256 apy;
+        uint256 emergencyTax;
+        uint256 minimalAmount;
+        bool active;
+        uint256 pips;
+    }
+
+    struct Stake {
+        address account;
+        uint256 amount;
+        uint256 depositTime;
+        bytes32 planId;
+        bool compound;
+        uint256 compoundPeriod;
+        uint256 lastWithdrawn;
+    }
+
+    struct StakeData {
+        address account;
+        bytes32 stakeId;
+        uint256 amount;
+        uint256 depositTime;
+        uint256 depositBlock;
+        bytes32 planId;
+        bool compound;
+        uint256 compoundPeriod;
+        uint256 lastWithdrawn;
+    }
+
+    event Staked(
+        address indexed account,
+        uint256 amount,
+        bytes32 planId,
+        bytes32 indexed stakeId,
+        uint256 timestamp,
+        uint256 deadline,
+        uint256 period,
+        uint256 apy,
+        uint256 emergencyTax,
+        bool compound,
+        address[] tokenForPair,
+        uint256[] pricePerStable,
+        bool[] stakedTokenMoreExpensive,
+        uint256 pips
+    );
+
+    event Unstaked(
+        address indexed account,
+        uint256 stakedAmount,
+        uint256 unstakedAmount,
+        bytes32 planId,
+        bytes32 stakeId,
+        uint256 timestamp,
+        uint256 deadline,
+        uint256 period,
+        uint256 apy,
+        uint256 emergencyTax,
+        bool compound,
+        address[] tokenForPair,
+        uint256[] pricePerStable,
+        bool[] stakedTokenMoreExpensive,
+        uint256 pips
+    );
+
+    event RewardsWithdrawn(
+        address indexed account,
+        uint256 rewards,
+        bytes32 planId,
+        bytes32 stakeId,
+        uint256 amount,
+        uint256 timestamp,
+        address[] tokenForPair,
+        uint256[] pricePerStable,
+        bool[] stakedTokenMoreExpensive,
+        uint256 pips
+    );
+
+    event EmergencyExited(
+        address indexed account,
+        uint256 staked,
+        uint256 withdrawn,
+        bytes32 planId,
+        bytes32 stakeId,
+        uint256 timestamp,
+        uint256 deadline,
+        uint256 period,
+        uint256 apy,
+        uint256 emergencyTax,
+        bool compound,
+        address[] tokenForPair,
+        uint256[] pricePerStable,
+        bool[] stakedTokenMoreExpensive,
+        uint256 pips
+    );
+
+    event PlanSet(
+        address indexed setter,
+        bytes32 indexed planId,
+        uint256 period,
+        uint256 apy,
+        uint256 emergencyTax,
+        uint256 minimalAmount,
+        uint256 pips
+    );
+
+    event PlanDisabled(
+        address indexed setter,
+        bytes32 indexed planId,
+        uint256 period,
+        uint256 apy,
+        uint256 emergencyTax,
+        uint256 pips
+    );
+
+    event PlanReactivated(address indexed setter, bytes32 indexed planId);
+    event CompoundEnabled(address setter, bool enabled);
+    event CompoundSet(address setter, uint256 period);
+    event MaxTokensMinted(address setter, uint256 mintingAmount);
+    event PricePairSet(address setter, address[] pricePairs);
+
+    //Contract writing
+    function stake(
+        uint256 amount,
+        bytes32 planId,
+        bool compound
+    ) external returns (bytes32);
+
+    function stakeCombined(
+        uint256 amount,
+        bytes32 planId,
+        bool compound,
+        bytes32[] calldata stakes,
+        bool toWithdrawRewards
+    ) external returns (bytes32);
+
+    function emergencyExit(bytes32 stakeId) external returns (uint256 withdrawn, uint256 emergencyLoss);
+
+    function unstake(bytes32 stakeId) external returns (uint256);
+
+    function unstakeTo(bytes32 stakeId, address recipient) external returns (uint256);
+
+    function withdrawRewards(bytes32 stakeId) external returns (uint256);
+
+    function withdrawRewardsTo(bytes32 stakeId, address recipient) external returns (uint256);
+
+    function setPlan(
+        uint256 period,
+        uint256 apy,
+        uint256 emergencyTax,
+        uint256 minimalAmount
+    ) external returns (bytes32);
+
+    function deactivatePlan(bytes32 plan) external;
+
+    function setCompoundEnabled(bool compoundEnabled) external returns (bool);
+
+    function getCompoundEnabled() external view returns (bool);
+
+    function setCompoundPeriod(uint256 compoundPeriod) external returns (uint256);
+
+    function getCompoundPeriod() external view returns (uint256);
+
+    function setMaxTokensMinted(uint256 maxTokensMinted) external returns (uint256);
+
+    function getMaxTokensMinted() external view returns (uint256);
+
+    function setPricePair(address nativeToken, address stableToken) external returns (address[] memory);
+
+    function getPricePairs() external returns (address[] memory);
+
+    function getPips() external view returns (uint256);
+
+    function getIssuedTokens() external view returns (uint256);
+
+    function getRouter() external view returns (address);
+
+    function getStakes() external view returns (StakeData[] memory stakes);
+
+    function getStakesByAddress(address owner) external view returns (StakeData[] memory);
+
+    function getStakesById(bytes32[] calldata stakeIds) external view returns (Stake[] memory stakes);
+
+    function getDistributedAmount(bytes32 stakeId) external view returns (uint256);
+
+    //Note: Reason to be in contract: Each implementation of a contract defines the type of
+    // operations allowing a stake to be combinable
+    function getCombinableStakes(
+        address owner,
+        uint256 amount,
+        bytes32 planId
+    ) external view returns (bytes32[] memory);
+
+    // function getPlan(bytes32 planId) external view returns (uint256 period, uint256 apy, uint256 emergencyTax);
+    function getPlan(bytes32 planId) external view returns (Plan memory);
+
+    function getPlans() external view returns (Plan[] memory plan, bytes32[] memory planIds);
+
+    function expectedRevenue(
+        uint256 amount,
+        bytes32 planId,
+        bool compound,
+        uint256 startPeriod,
+        uint256 endPeriod
+    ) external view returns (uint256);
+
+    function getToken() external view returns (address);
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity >=0.8.0;
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+interface IERC20Full is IERC20 {
+    function name() external view returns (string memory);
+
+    function symbol() external view returns (string memory);
+
+    function decimals() external view returns (uint8);
+}
+
+interface IERC20Mintable is IERC20Full {
+    function mint(address to, uint256 value) external;
+
+    function burn(address from, uint256 value) external;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (access/AccessControl.sol)
+
+pragma solidity ^0.8.0;
+
+import "./IAccessControlUpgradeable.sol";
+import "../utils/ContextUpgradeable.sol";
+import "../utils/StringsUpgradeable.sol";
+import "../utils/introspection/ERC165Upgradeable.sol";
+import "../proxy/utils/Initializable.sol";
+
+/**
+ * @dev Contract module that allows children to implement role-based access
+ * control mechanisms. This is a lightweight version that doesn't allow enumerating role
+ * members except through off-chain means by accessing the contract event logs. Some
+ * applications may benefit from on-chain enumerability, for those cases see
+ * {AccessControlEnumerable}.
+ *
+ * Roles are referred to by their `bytes32` identifier. These should be exposed
+ * in the external API and be unique. The best way to achieve this is by
+ * using `public constant` hash digests:
+ *
+ * ```
+ * bytes32 public constant MY_ROLE = keccak256("MY_ROLE");
+ * ```
+ *
+ * Roles can be used to represent a set of permissions. To restrict access to a
+ * function call, use {hasRole}:
+ *
+ * ```
+ * function foo() public {
+ *     require(hasRole(MY_ROLE, msg.sender));
+ *     ...
+ * }
+ * ```
+ *
+ * Roles can be granted and revoked dynamically via the {grantRole} and
+ * {revokeRole} functions. Each role has an associated admin role, and only
+ * accounts that have a role's admin role can call {grantRole} and {revokeRole}.
+ *
+ * By default, the admin role for all roles is `DEFAULT_ADMIN_ROLE`, which means
+ * that only accounts with this role will be able to grant or revoke other
+ * roles. More complex role relationships can be created by using
+ * {_setRoleAdmin}.
+ *
+ * WARNING: The `DEFAULT_ADMIN_ROLE` is also its own admin: it has permission to
+ * grant and revoke this role. Extra precautions should be taken to secure
+ * accounts that have been granted it.
+ */
+abstract contract AccessControlUpgradeable is Initializable, ContextUpgradeable, IAccessControlUpgradeable, ERC165Upgradeable {
+    function __AccessControl_init() internal onlyInitializing {
+    }
+
+    function __AccessControl_init_unchained() internal onlyInitializing {
+    }
+    struct RoleData {
+        mapping(address => bool) members;
+        bytes32 adminRole;
+    }
+
+    mapping(bytes32 => RoleData) private _roles;
+
+    bytes32 public constant DEFAULT_ADMIN_ROLE = 0x00;
+
+    /**
+     * @dev Modifier that checks that an account has a specific role. Reverts
+     * with a standardized message including the required role.
+     *
+     * The format of the revert reason is given by the following regular expression:
+     *
+     *  /^AccessControl: account (0x[0-9a-f]{40}) is missing role (0x[0-9a-f]{64})$/
+     *
+     * _Available since v4.1._
+     */
+    modifier onlyRole(bytes32 role) {
+        _checkRole(role);
+        _;
+    }
+
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        return interfaceId == type(IAccessControlUpgradeable).interfaceId || super.supportsInterface(interfaceId);
+    }
+
+    /**
+     * @dev Returns `true` if `account` has been granted `role`.
+     */
+    function hasRole(bytes32 role, address account) public view virtual override returns (bool) {
+        return _roles[role].members[account];
+    }
+
+    /**
+     * @dev Revert with a standard message if `_msgSender()` is missing `role`.
+     * Overriding this function changes the behavior of the {onlyRole} modifier.
+     *
+     * Format of the revert message is described in {_checkRole}.
+     *
+     * _Available since v4.6._
+     */
+    function _checkRole(bytes32 role) internal view virtual {
+        _checkRole(role, _msgSender());
+    }
+
+    /**
+     * @dev Revert with a standard message if `account` is missing `role`.
+     *
+     * The format of the revert reason is given by the following regular expression:
+     *
+     *  /^AccessControl: account (0x[0-9a-f]{40}) is missing role (0x[0-9a-f]{64})$/
+     */
+    function _checkRole(bytes32 role, address account) internal view virtual {
+        if (!hasRole(role, account)) {
+            revert(
+                string(
+                    abi.encodePacked(
+                        "AccessControl: account ",
+                        StringsUpgradeable.toHexString(uint160(account), 20),
+                        " is missing role ",
+                        StringsUpgradeable.toHexString(uint256(role), 32)
+                    )
+                )
+            );
+        }
+    }
+
+    /**
+     * @dev Returns the admin role that controls `role`. See {grantRole} and
+     * {revokeRole}.
+     *
+     * To change a role's admin, use {_setRoleAdmin}.
+     */
+    function getRoleAdmin(bytes32 role) public view virtual override returns (bytes32) {
+        return _roles[role].adminRole;
+    }
+
+    /**
+     * @dev Grants `role` to `account`.
+     *
+     * If `account` had not been already granted `role`, emits a {RoleGranted}
+     * event.
+     *
+     * Requirements:
+     *
+     * - the caller must have ``role``'s admin role.
+     *
+     * May emit a {RoleGranted} event.
+     */
+    function grantRole(bytes32 role, address account) public virtual override onlyRole(getRoleAdmin(role)) {
+        _grantRole(role, account);
+    }
+
+    /**
+     * @dev Revokes `role` from `account`.
+     *
+     * If `account` had been granted `role`, emits a {RoleRevoked} event.
+     *
+     * Requirements:
+     *
+     * - the caller must have ``role``'s admin role.
+     *
+     * May emit a {RoleRevoked} event.
+     */
+    function revokeRole(bytes32 role, address account) public virtual override onlyRole(getRoleAdmin(role)) {
+        _revokeRole(role, account);
+    }
+
+    /**
+     * @dev Revokes `role` from the calling account.
+     *
+     * Roles are often managed via {grantRole} and {revokeRole}: this function's
+     * purpose is to provide a mechanism for accounts to lose their privileges
+     * if they are compromised (such as when a trusted device is misplaced).
+     *
+     * If the calling account had been revoked `role`, emits a {RoleRevoked}
+     * event.
+     *
+     * Requirements:
+     *
+     * - the caller must be `account`.
+     *
+     * May emit a {RoleRevoked} event.
+     */
+    function renounceRole(bytes32 role, address account) public virtual override {
+        require(account == _msgSender(), "AccessControl: can only renounce roles for self");
+
+        _revokeRole(role, account);
+    }
+
+    /**
+     * @dev Grants `role` to `account`.
+     *
+     * If `account` had not been already granted `role`, emits a {RoleGranted}
+     * event. Note that unlike {grantRole}, this function doesn't perform any
+     * checks on the calling account.
+     *
+     * May emit a {RoleGranted} event.
+     *
+     * [WARNING]
+     * ====
+     * This function should only be called from the constructor when setting
+     * up the initial roles for the system.
+     *
+     * Using this function in any other way is effectively circumventing the admin
+     * system imposed by {AccessControl}.
+     * ====
+     *
+     * NOTE: This function is deprecated in favor of {_grantRole}.
+     */
+    function _setupRole(bytes32 role, address account) internal virtual {
+        _grantRole(role, account);
+    }
+
+    /**
+     * @dev Sets `adminRole` as ``role``'s admin role.
+     *
+     * Emits a {RoleAdminChanged} event.
+     */
+    function _setRoleAdmin(bytes32 role, bytes32 adminRole) internal virtual {
+        bytes32 previousAdminRole = getRoleAdmin(role);
+        _roles[role].adminRole = adminRole;
+        emit RoleAdminChanged(role, previousAdminRole, adminRole);
+    }
+
+    /**
+     * @dev Grants `role` to `account`.
+     *
+     * Internal function without access restriction.
+     *
+     * May emit a {RoleGranted} event.
+     */
+    function _grantRole(bytes32 role, address account) internal virtual {
+        if (!hasRole(role, account)) {
+            _roles[role].members[account] = true;
+            emit RoleGranted(role, account, _msgSender());
+        }
+    }
+
+    /**
+     * @dev Revokes `role` from `account`.
+     *
+     * Internal function without access restriction.
+     *
+     * May emit a {RoleRevoked} event.
+     */
+    function _revokeRole(bytes32 role, address account) internal virtual {
+        if (hasRole(role, account)) {
+            _roles[role].members[account] = false;
+            emit RoleRevoked(role, account, _msgSender());
+        }
+    }
+
+    /**
+     * @dev This empty reserved space is put in place to allow future versions to add new
+     * variables without shifting down storage in the inheritance chain.
+     * See https://docs.openzeppelin.com/contracts/4.x/upgradeable#storage_gaps
+     */
+    uint256[49] private __gap;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.6.0) (utils/math/SafeMath.sol)
+
+pragma solidity ^0.8.0;
+
+// CAUTION
+// This version of SafeMath should only be used with Solidity 0.8 or later,
+// because it relies on the compiler's built in overflow checks.
+
+/**
+ * @dev Wrappers over Solidity's arithmetic operations.
+ *
+ * NOTE: `SafeMath` is generally not needed starting with Solidity 0.8, since the compiler
+ * now has built in overflow checking.
+ */
+library SafeMathUpgradeable {
+    /**
+     * @dev Returns the addition of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryAdd(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            uint256 c = a + b;
+            if (c < a) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function trySub(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b > a) return (false, 0);
+            return (true, a - b);
+        }
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMul(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            // Gas optimization: this is cheaper than requiring 'a' not being zero, but the
+            // benefit is lost if 'b' is also tested.
+            // See: https://github.com/OpenZeppelin/openzeppelin-contracts/pull/522
+            if (a == 0) return (true, 0);
+            uint256 c = a * b;
+            if (c / a != b) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the division of two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryDiv(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a / b);
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMod(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a % b);
+        }
+    }
+
+    /**
+     * @dev Returns the addition of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `+` operator.
+     *
+     * Requirements:
+     *
+     * - Addition cannot overflow.
+     */
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting on
+     * overflow (when the result is negative).
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a - b;
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `*` operator.
+     *
+     * Requirements:
+     *
+     * - Multiplication cannot overflow.
+     */
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a * b;
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator.
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a / b;
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting when dividing by zero.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a % b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting with custom message on
+     * overflow (when the result is negative).
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {trySub}.
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b <= a, errorMessage);
+            return a - b;
+        }
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting with custom message on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator. Note: this function uses a
+     * `revert` opcode (which leaves remaining gas untouched) while Solidity
+     * uses an invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a / b;
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting with custom message when dividing by zero.
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {tryMod}.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a % b;
+        }
+    }
+}
+
+pragma solidity >=0.6.2;
+
+import './IUniswapV2Router01.sol';
+
+interface IUniswapV2Router02 is IUniswapV2Router01 {
+    function removeLiquidityETHSupportingFeeOnTransferTokens(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountETH);
+    function removeLiquidityETHWithPermitSupportingFeeOnTransferTokens(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amountETH);
+
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+    function swapExactETHForTokensSupportingFeeOnTransferTokens(
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external payable;
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.6.0) (token/ERC20/IERC20.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20 {
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `to`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `from` to `to` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (access/IAccessControl.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev External interface of AccessControl declared to support ERC165 detection.
+ */
+interface IAccessControlUpgradeable {
+    /**
+     * @dev Emitted when `newAdminRole` is set as ``role``'s admin role, replacing `previousAdminRole`
+     *
+     * `DEFAULT_ADMIN_ROLE` is the starting admin for all roles, despite
+     * {RoleAdminChanged} not being emitted signaling this.
+     *
+     * _Available since v3.1._
+     */
+    event RoleAdminChanged(bytes32 indexed role, bytes32 indexed previousAdminRole, bytes32 indexed newAdminRole);
+
+    /**
+     * @dev Emitted when `account` is granted `role`.
+     *
+     * `sender` is the account that originated the contract call, an admin role
+     * bearer except when using {AccessControl-_setupRole}.
+     */
+    event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
+
+    /**
+     * @dev Emitted when `account` is revoked `role`.
+     *
+     * `sender` is the account that originated the contract call:
+     *   - if using `revokeRole`, it is the admin role bearer
+     *   - if using `renounceRole`, it is the role bearer (i.e. `account`)
+     */
+    event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
+
+    /**
+     * @dev Returns `true` if `account` has been granted `role`.
+     */
+    function hasRole(bytes32 role, address account) external view returns (bool);
+
+    /**
+     * @dev Returns the admin role that controls `role`. See {grantRole} and
+     * {revokeRole}.
+     *
+     * To change a role's admin, use {AccessControl-_setRoleAdmin}.
+     */
+    function getRoleAdmin(bytes32 role) external view returns (bytes32);
+
+    /**
+     * @dev Grants `role` to `account`.
+     *
+     * If `account` had not been already granted `role`, emits a {RoleGranted}
+     * event.
+     *
+     * Requirements:
+     *
+     * - the caller must have ``role``'s admin role.
+     */
+    function grantRole(bytes32 role, address account) external;
+
+    /**
+     * @dev Revokes `role` from `account`.
+     *
+     * If `account` had been granted `role`, emits a {RoleRevoked} event.
+     *
+     * Requirements:
+     *
+     * - the caller must have ``role``'s admin role.
+     */
+    function revokeRole(bytes32 role, address account) external;
+
+    /**
+     * @dev Revokes `role` from the calling account.
+     *
+     * Roles are often managed via {grantRole} and {revokeRole}: this function's
+     * purpose is to provide a mechanism for accounts to lose their privileges
+     * if they are compromised (such as when a trusted device is misplaced).
+     *
+     * If the calling account had been granted `role`, emits a {RoleRevoked}
+     * event.
+     *
+     * Requirements:
+     *
+     * - the caller must be `account`.
+     */
+    function renounceRole(bytes32 role, address account) external;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
+
+pragma solidity ^0.8.0;
+import "../proxy/utils/Initializable.sol";
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract ContextUpgradeable is Initializable {
+    function __Context_init() internal onlyInitializing {
+    }
+
+    function __Context_init_unchained() internal onlyInitializing {
+    }
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+
+    /**
+     * @dev This empty reserved space is put in place to allow future versions to add new
+     * variables without shifting down storage in the inheritance chain.
+     * See https://docs.openzeppelin.com/contracts/4.x/upgradeable#storage_gaps
+     */
+    uint256[50] private __gap;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (utils/Strings.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev String operations.
+ */
+library StringsUpgradeable {
+    bytes16 private constant _HEX_SYMBOLS = "0123456789abcdef";
+    uint8 private constant _ADDRESS_LENGTH = 20;
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` decimal representation.
+     */
+    function toString(uint256 value) internal pure returns (string memory) {
+        // Inspired by OraclizeAPI's implementation - MIT licence
+        // https://github.com/oraclize/ethereum-api/blob/b42146b063c7d6ee1358846c198246239e9360e8/oraclizeAPI_0.4.25.sol
+
+        if (value == 0) {
+            return "0";
+        }
+        uint256 temp = value;
+        uint256 digits;
+        while (temp != 0) {
+            digits++;
+            temp /= 10;
+        }
+        bytes memory buffer = new bytes(digits);
+        while (value != 0) {
+            digits -= 1;
+            buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
+            value /= 10;
+        }
+        return string(buffer);
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation.
+     */
+    function toHexString(uint256 value) internal pure returns (string memory) {
+        if (value == 0) {
+            return "0x00";
+        }
+        uint256 temp = value;
+        uint256 length = 0;
+        while (temp != 0) {
+            length++;
+            temp >>= 8;
+        }
+        return toHexString(value, length);
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation with fixed length.
+     */
+    function toHexString(uint256 value, uint256 length) internal pure returns (string memory) {
+        bytes memory buffer = new bytes(2 * length + 2);
+        buffer[0] = "0";
+        buffer[1] = "x";
+        for (uint256 i = 2 * length + 1; i > 1; --i) {
+            buffer[i] = _HEX_SYMBOLS[value & 0xf];
+            value >>= 4;
+        }
+        require(value == 0, "Strings: hex length insufficient");
+        return string(buffer);
+    }
+
+    /**
+     * @dev Converts an `address` with fixed length of 20 bytes to its not checksummed ASCII `string` hexadecimal representation.
+     */
+    function toHexString(address addr) internal pure returns (string memory) {
+        return toHexString(uint256(uint160(addr)), _ADDRESS_LENGTH);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/ERC165.sol)
+
+pragma solidity ^0.8.0;
+
+import "./IERC165Upgradeable.sol";
+import "../../proxy/utils/Initializable.sol";
+
+/**
+ * @dev Implementation of the {IERC165} interface.
+ *
+ * Contracts that want to implement ERC165 should inherit from this contract and override {supportsInterface} to check
+ * for the additional interface id that will be supported. For example:
+ *
+ * ```solidity
+ * function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+ *     return interfaceId == type(MyInterface).interfaceId || super.supportsInterface(interfaceId);
+ * }
+ * ```
+ *
+ * Alternatively, {ERC165Storage} provides an easier to use but more expensive implementation.
+ */
+abstract contract ERC165Upgradeable is Initializable, IERC165Upgradeable {
+    function __ERC165_init() internal onlyInitializing {
+    }
+
+    function __ERC165_init_unchained() internal onlyInitializing {
+    }
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        return interfaceId == type(IERC165Upgradeable).interfaceId;
+    }
+
+    /**
+     * @dev This empty reserved space is put in place to allow future versions to add new
+     * variables without shifting down storage in the inheritance chain.
+     * See https://docs.openzeppelin.com/contracts/4.x/upgradeable#storage_gaps
+     */
+    uint256[50] private __gap;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (proxy/utils/Initializable.sol)
+
+pragma solidity ^0.8.2;
+
+import "../../utils/AddressUpgradeable.sol";
+
+/**
+ * @dev This is a base contract to aid in writing upgradeable contracts, or any kind of contract that will be deployed
+ * behind a proxy. Since proxied contracts do not make use of a constructor, it's common to move constructor logic to an
+ * external initializer function, usually called `initialize`. It then becomes necessary to protect this initializer
+ * function so it can only be called once. The {initializer} modifier provided by this contract will have this effect.
+ *
+ * The initialization functions use a version number. Once a version number is used, it is consumed and cannot be
+ * reused. This mechanism prevents re-execution of each "step" but allows the creation of new initialization steps in
+ * case an upgrade adds a module that needs to be initialized.
+ *
+ * For example:
+ *
+ * [.hljs-theme-light.nopadding]
+ * ```
+ * contract MyToken is ERC20Upgradeable {
+ *     function initialize() initializer public {
+ *         __ERC20_init("MyToken", "MTK");
+ *     }
+ * }
+ * contract MyTokenV2 is MyToken, ERC20PermitUpgradeable {
+ *     function initializeV2() reinitializer(2) public {
+ *         __ERC20Permit_init("MyToken");
+ *     }
+ * }
+ * ```
+ *
+ * TIP: To avoid leaving the proxy in an uninitialized state, the initializer function should be called as early as
+ * possible by providing the encoded function call as the `_data` argument to {ERC1967Proxy-constructor}.
+ *
+ * CAUTION: When used with inheritance, manual care must be taken to not invoke a parent initializer twice, or to ensure
+ * that all initializers are idempotent. This is not verified automatically as constructors are by Solidity.
+ *
+ * [CAUTION]
+ * ====
+ * Avoid leaving a contract uninitialized.
+ *
+ * An uninitialized contract can be taken over by an attacker. This applies to both a proxy and its implementation
+ * contract, which may impact the proxy. To prevent the implementation contract from being used, you should invoke
+ * the {_disableInitializers} function in the constructor to automatically lock it when it is deployed:
+ *
+ * [.hljs-theme-light.nopadding]
+ * ```
+ * /// @custom:oz-upgrades-unsafe-allow constructor
+ * constructor() {
+ *     _disableInitializers();
+ * }
+ * ```
+ * ====
+ */
+abstract contract Initializable {
+    /**
+     * @dev Indicates that the contract has been initialized.
+     * @custom:oz-retyped-from bool
+     */
+    uint8 private _initialized;
+
+    /**
+     * @dev Indicates that the contract is in the process of being initialized.
+     */
+    bool private _initializing;
+
+    /**
+     * @dev Triggered when the contract has been initialized or reinitialized.
+     */
+    event Initialized(uint8 version);
+
+    /**
+     * @dev A modifier that defines a protected initializer function that can be invoked at most once. In its scope,
+     * `onlyInitializing` functions can be used to initialize parent contracts. Equivalent to `reinitializer(1)`.
+     */
+    modifier initializer() {
+        bool isTopLevelCall = !_initializing;
+        require(
+            (isTopLevelCall && _initialized < 1) || (!AddressUpgradeable.isContract(address(this)) && _initialized == 1),
+            "Initializable: contract is already initialized"
+        );
+        _initialized = 1;
+        if (isTopLevelCall) {
+            _initializing = true;
+        }
+        _;
+        if (isTopLevelCall) {
+            _initializing = false;
+            emit Initialized(1);
+        }
+    }
+
+    /**
+     * @dev A modifier that defines a protected reinitializer function that can be invoked at most once, and only if the
+     * contract hasn't been initialized to a greater version before. In its scope, `onlyInitializing` functions can be
+     * used to initialize parent contracts.
+     *
+     * `initializer` is equivalent to `reinitializer(1)`, so a reinitializer may be used after the original
+     * initialization step. This is essential to configure modules that are added through upgrades and that require
+     * initialization.
+     *
+     * Note that versions can jump in increments greater than 1; this implies that if multiple reinitializers coexist in
+     * a contract, executing them in the right order is up to the developer or operator.
+     */
+    modifier reinitializer(uint8 version) {
+        require(!_initializing && _initialized < version, "Initializable: contract is already initialized");
+        _initialized = version;
+        _initializing = true;
+        _;
+        _initializing = false;
+        emit Initialized(version);
+    }
+
+    /**
+     * @dev Modifier to protect an initialization function so that it can only be invoked by functions with the
+     * {initializer} and {reinitializer} modifiers, directly or indirectly.
+     */
+    modifier onlyInitializing() {
+        require(_initializing, "Initializable: contract is not initializing");
+        _;
+    }
+
+    /**
+     * @dev Locks the contract, preventing any future reinitialization. This cannot be part of an initializer call.
+     * Calling this in the constructor of a contract will prevent that contract from being initialized or reinitialized
+     * to any version. It is recommended to use this to lock implementation contracts that are designed to be called
+     * through proxies.
+     */
+    function _disableInitializers() internal virtual {
+        require(!_initializing, "Initializable: contract is initializing");
+        if (_initialized < type(uint8).max) {
+            _initialized = type(uint8).max;
+            emit Initialized(type(uint8).max);
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (utils/Address.sol)
+
+pragma solidity ^0.8.1;
+
+/**
+ * @dev Collection of functions related to the address type
+ */
+library AddressUpgradeable {
+    /**
+     * @dev Returns true if `account` is a contract.
+     *
+     * [IMPORTANT]
+     * ====
+     * It is unsafe to assume that an address for which this function returns
+     * false is an externally-owned account (EOA) and not a contract.
+     *
+     * Among others, `isContract` will return false for the following
+     * types of addresses:
+     *
+     *  - an externally-owned account
+     *  - a contract in construction
+     *  - an address where a contract will be created
+     *  - an address where a contract lived, but was destroyed
+     * ====
+     *
+     * [IMPORTANT]
+     * ====
+     * You shouldn't rely on `isContract` to protect against flash loan attacks!
+     *
+     * Preventing calls from contracts is highly discouraged. It breaks composability, breaks support for smart wallets
+     * like Gnosis Safe, and does not provide security since it can be circumvented by calling from a contract
+     * constructor.
+     * ====
+     */
+    function isContract(address account) internal view returns (bool) {
+        // This method relies on extcodesize/address.code.length, which returns 0
+        // for contracts in construction, since the code is only stored at the end
+        // of the constructor execution.
+
+        return account.code.length > 0;
+    }
+
+    /**
+     * @dev Replacement for Solidity's `transfer`: sends `amount` wei to
+     * `recipient`, forwarding all available gas and reverting on errors.
+     *
+     * https://eips.ethereum.org/EIPS/eip-1884[EIP1884] increases the gas cost
+     * of certain opcodes, possibly making contracts go over the 2300 gas limit
+     * imposed by `transfer`, making them unable to receive funds via
+     * `transfer`. {sendValue} removes this limitation.
+     *
+     * https://diligence.consensys.net/posts/2019/09/stop-using-soliditys-transfer-now/[Learn more].
+     *
+     * IMPORTANT: because control is transferred to `recipient`, care must be
+     * taken to not create reentrancy vulnerabilities. Consider using
+     * {ReentrancyGuard} or the
+     * https://solidity.readthedocs.io/en/v0.5.11/security-considerations.html#use-the-checks-effects-interactions-pattern[checks-effects-interactions pattern].
+     */
+    function sendValue(address payable recipient, uint256 amount) internal {
+        require(address(this).balance >= amount, "Address: insufficient balance");
+
+        (bool success, ) = recipient.call{value: amount}("");
+        require(success, "Address: unable to send value, recipient may have reverted");
+    }
+
+    /**
+     * @dev Performs a Solidity function call using a low level `call`. A
+     * plain `call` is an unsafe replacement for a function call: use this
+     * function instead.
+     *
+     * If `target` reverts with a revert reason, it is bubbled up by this
+     * function (like regular Solidity function calls).
+     *
+     * Returns the raw returned data. To convert to the expected return value,
+     * use https://solidity.readthedocs.io/en/latest/units-and-global-variables.html?highlight=abi.decode#abi-encoding-and-decoding-functions[`abi.decode`].
+     *
+     * Requirements:
+     *
+     * - `target` must be a contract.
+     * - calling `target` with `data` must not revert.
+     *
+     * _Available since v3.1._
+     */
+    function functionCall(address target, bytes memory data) internal returns (bytes memory) {
+        return functionCall(target, data, "Address: low-level call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`], but with
+     * `errorMessage` as a fallback revert reason when `target` reverts.
+     *
+     * _Available since v3.1._
+     */
+    function functionCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, 0, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but also transferring `value` wei to `target`.
+     *
+     * Requirements:
+     *
+     * - the calling contract must have an ETH balance of at least `value`.
+     * - the called Solidity function must be `payable`.
+     *
+     * _Available since v3.1._
+     */
+    function functionCallWithValue(
+        address target,
+        bytes memory data,
+        uint256 value
+    ) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, value, "Address: low-level call with value failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCallWithValue-address-bytes-uint256-}[`functionCallWithValue`], but
+     * with `errorMessage` as a fallback revert reason when `target` reverts.
+     *
+     * _Available since v3.1._
+     */
+    function functionCallWithValue(
+        address target,
+        bytes memory data,
+        uint256 value,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        require(address(this).balance >= value, "Address: insufficient balance for call");
+        require(isContract(target), "Address: call to non-contract");
+
+        (bool success, bytes memory returndata) = target.call{value: value}(data);
+        return verifyCallResult(success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but performing a static call.
+     *
+     * _Available since v3.3._
+     */
+    function functionStaticCall(address target, bytes memory data) internal view returns (bytes memory) {
+        return functionStaticCall(target, data, "Address: low-level static call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-string-}[`functionCall`],
+     * but performing a static call.
+     *
+     * _Available since v3.3._
+     */
+    function functionStaticCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal view returns (bytes memory) {
+        require(isContract(target), "Address: static call to non-contract");
+
+        (bool success, bytes memory returndata) = target.staticcall(data);
+        return verifyCallResult(success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Tool to verifies that a low level call was successful, and revert if it wasn't, either by bubbling the
+     * revert reason using the provided one.
+     *
+     * _Available since v4.3._
+     */
+    function verifyCallResult(
+        bool success,
+        bytes memory returndata,
+        string memory errorMessage
+    ) internal pure returns (bytes memory) {
+        if (success) {
+            return returndata;
+        } else {
+            // Look for revert reason and bubble it up if present
+            if (returndata.length > 0) {
+                // The easiest way to bubble the revert reason is using memory via assembly
+                /// @solidity memory-safe-assembly
+                assembly {
+                    let returndata_size := mload(returndata)
+                    revert(add(32, returndata), returndata_size)
+                }
+            } else {
+                revert(errorMessage);
+            }
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/IERC165.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC165 standard, as defined in the
+ * https://eips.ethereum.org/EIPS/eip-165[EIP].
+ *
+ * Implementers can declare support of contract interfaces, which can then be
+ * queried by others ({ERC165Checker}).
+ *
+ * For an implementation, see {ERC165}.
+ */
+interface IERC165Upgradeable {
+    /**
+     * @dev Returns true if this contract implements the interface defined by
+     * `interfaceId`. See the corresponding
+     * https://eips.ethereum.org/EIPS/eip-165#how-interfaces-are-identified[EIP section]
+     * to learn more about how these ids are created.
+     *
+     * This function call must use less than 30 000 gas.
+     */
+    function supportsInterface(bytes4 interfaceId) external view returns (bool);
+}
+
+pragma solidity >=0.6.2;
+
+interface IUniswapV2Router01 {
+    function factory() external pure returns (address);
+    function WETH() external pure returns (address);
+
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint amountADesired,
+        uint amountBDesired,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountA, uint amountB, uint liquidity);
+    function addLiquidityETH(
+        address token,
+        uint amountTokenDesired,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
+    function removeLiquidity(
+        address tokenA,
+        address tokenB,
+        uint liquidity,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountA, uint amountB);
+    function removeLiquidityETH(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountToken, uint amountETH);
+    function removeLiquidityWithPermit(
+        address tokenA,
+        address tokenB,
+        uint liquidity,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amountA, uint amountB);
+    function removeLiquidityETHWithPermit(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amountToken, uint amountETH);
+    function swapExactTokensForTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external returns (uint[] memory amounts);
+    function swapTokensForExactTokens(
+        uint amountOut,
+        uint amountInMax,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external returns (uint[] memory amounts);
+    function swapExactETHForTokens(uint amountOutMin, address[] calldata path, address to, uint deadline)
+        external
+        payable
+        returns (uint[] memory amounts);
+    function swapTokensForExactETH(uint amountOut, uint amountInMax, address[] calldata path, address to, uint deadline)
+        external
+        returns (uint[] memory amounts);
+    function swapExactTokensForETH(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline)
+        external
+        returns (uint[] memory amounts);
+    function swapETHForExactTokens(uint amountOut, address[] calldata path, address to, uint deadline)
+        external
+        payable
+        returns (uint[] memory amounts);
+
+    function quote(uint amountA, uint reserveA, uint reserveB) external pure returns (uint amountB);
+    function getAmountOut(uint amountIn, uint reserveIn, uint reserveOut) external pure returns (uint amountOut);
+    function getAmountIn(uint amountOut, uint reserveIn, uint reserveOut) external pure returns (uint amountIn);
+    function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts);
+    function getAmountsIn(uint amountOut, address[] calldata path) external view returns (uint[] memory amounts);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (access/AccessControl.sol)
+
+pragma solidity ^0.8.0;
+
+import "./IAccessControl.sol";
+import "../utils/Context.sol";
+import "../utils/Strings.sol";
+import "../utils/introspection/ERC165.sol";
+
+/**
+ * @dev Contract module that allows children to implement role-based access
+ * control mechanisms. This is a lightweight version that doesn't allow enumerating role
+ * members except through off-chain means by accessing the contract event logs. Some
+ * applications may benefit from on-chain enumerability, for those cases see
+ * {AccessControlEnumerable}.
+ *
+ * Roles are referred to by their `bytes32` identifier. These should be exposed
+ * in the external API and be unique. The best way to achieve this is by
+ * using `public constant` hash digests:
+ *
+ * ```
+ * bytes32 public constant MY_ROLE = keccak256("MY_ROLE");
+ * ```
+ *
+ * Roles can be used to represent a set of permissions. To restrict access to a
+ * function call, use {hasRole}:
+ *
+ * ```
+ * function foo() public {
+ *     require(hasRole(MY_ROLE, msg.sender));
+ *     ...
+ * }
+ * ```
+ *
+ * Roles can be granted and revoked dynamically via the {grantRole} and
+ * {revokeRole} functions. Each role has an associated admin role, and only
+ * accounts that have a role's admin role can call {grantRole} and {revokeRole}.
+ *
+ * By default, the admin role for all roles is `DEFAULT_ADMIN_ROLE`, which means
+ * that only accounts with this role will be able to grant or revoke other
+ * roles. More complex role relationships can be created by using
+ * {_setRoleAdmin}.
+ *
+ * WARNING: The `DEFAULT_ADMIN_ROLE` is also its own admin: it has permission to
+ * grant and revoke this role. Extra precautions should be taken to secure
+ * accounts that have been granted it.
+ */
+abstract contract AccessControl is Context, IAccessControl, ERC165 {
+    struct RoleData {
+        mapping(address => bool) members;
+        bytes32 adminRole;
+    }
+
+    mapping(bytes32 => RoleData) private _roles;
+
+    bytes32 public constant DEFAULT_ADMIN_ROLE = 0x00;
+
+    /**
+     * @dev Modifier that checks that an account has a specific role. Reverts
+     * with a standardized message including the required role.
+     *
+     * The format of the revert reason is given by the following regular expression:
+     *
+     *  /^AccessControl: account (0x[0-9a-f]{40}) is missing role (0x[0-9a-f]{64})$/
+     *
+     * _Available since v4.1._
+     */
+    modifier onlyRole(bytes32 role) {
+        _checkRole(role);
+        _;
+    }
+
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        return interfaceId == type(IAccessControl).interfaceId || super.supportsInterface(interfaceId);
+    }
+
+    /**
+     * @dev Returns `true` if `account` has been granted `role`.
+     */
+    function hasRole(bytes32 role, address account) public view virtual override returns (bool) {
+        return _roles[role].members[account];
+    }
+
+    /**
+     * @dev Revert with a standard message if `_msgSender()` is missing `role`.
+     * Overriding this function changes the behavior of the {onlyRole} modifier.
+     *
+     * Format of the revert message is described in {_checkRole}.
+     *
+     * _Available since v4.6._
+     */
+    function _checkRole(bytes32 role) internal view virtual {
+        _checkRole(role, _msgSender());
+    }
+
+    /**
+     * @dev Revert with a standard message if `account` is missing `role`.
+     *
+     * The format of the revert reason is given by the following regular expression:
+     *
+     *  /^AccessControl: account (0x[0-9a-f]{40}) is missing role (0x[0-9a-f]{64})$/
+     */
+    function _checkRole(bytes32 role, address account) internal view virtual {
+        if (!hasRole(role, account)) {
+            revert(
+                string(
+                    abi.encodePacked(
+                        "AccessControl: account ",
+                        Strings.toHexString(uint160(account), 20),
+                        " is missing role ",
+                        Strings.toHexString(uint256(role), 32)
+                    )
+                )
+            );
+        }
+    }
+
+    /**
+     * @dev Returns the admin role that controls `role`. See {grantRole} and
+     * {revokeRole}.
+     *
+     * To change a role's admin, use {_setRoleAdmin}.
+     */
+    function getRoleAdmin(bytes32 role) public view virtual override returns (bytes32) {
+        return _roles[role].adminRole;
+    }
+
+    /**
+     * @dev Grants `role` to `account`.
+     *
+     * If `account` had not been already granted `role`, emits a {RoleGranted}
+     * event.
+     *
+     * Requirements:
+     *
+     * - the caller must have ``role``'s admin role.
+     *
+     * May emit a {RoleGranted} event.
+     */
+    function grantRole(bytes32 role, address account) public virtual override onlyRole(getRoleAdmin(role)) {
+        _grantRole(role, account);
+    }
+
+    /**
+     * @dev Revokes `role` from `account`.
+     *
+     * If `account` had been granted `role`, emits a {RoleRevoked} event.
+     *
+     * Requirements:
+     *
+     * - the caller must have ``role``'s admin role.
+     *
+     * May emit a {RoleRevoked} event.
+     */
+    function revokeRole(bytes32 role, address account) public virtual override onlyRole(getRoleAdmin(role)) {
+        _revokeRole(role, account);
+    }
+
+    /**
+     * @dev Revokes `role` from the calling account.
+     *
+     * Roles are often managed via {grantRole} and {revokeRole}: this function's
+     * purpose is to provide a mechanism for accounts to lose their privileges
+     * if they are compromised (such as when a trusted device is misplaced).
+     *
+     * If the calling account had been revoked `role`, emits a {RoleRevoked}
+     * event.
+     *
+     * Requirements:
+     *
+     * - the caller must be `account`.
+     *
+     * May emit a {RoleRevoked} event.
+     */
+    function renounceRole(bytes32 role, address account) public virtual override {
+        require(account == _msgSender(), "AccessControl: can only renounce roles for self");
+
+        _revokeRole(role, account);
+    }
+
+    /**
+     * @dev Grants `role` to `account`.
+     *
+     * If `account` had not been already granted `role`, emits a {RoleGranted}
+     * event. Note that unlike {grantRole}, this function doesn't perform any
+     * checks on the calling account.
+     *
+     * May emit a {RoleGranted} event.
+     *
+     * [WARNING]
+     * ====
+     * This function should only be called from the constructor when setting
+     * up the initial roles for the system.
+     *
+     * Using this function in any other way is effectively circumventing the admin
+     * system imposed by {AccessControl}.
+     * ====
+     *
+     * NOTE: This function is deprecated in favor of {_grantRole}.
+     */
+    function _setupRole(bytes32 role, address account) internal virtual {
+        _grantRole(role, account);
+    }
+
+    /**
+     * @dev Sets `adminRole` as ``role``'s admin role.
+     *
+     * Emits a {RoleAdminChanged} event.
+     */
+    function _setRoleAdmin(bytes32 role, bytes32 adminRole) internal virtual {
+        bytes32 previousAdminRole = getRoleAdmin(role);
+        _roles[role].adminRole = adminRole;
+        emit RoleAdminChanged(role, previousAdminRole, adminRole);
+    }
+
+    /**
+     * @dev Grants `role` to `account`.
+     *
+     * Internal function without access restriction.
+     *
+     * May emit a {RoleGranted} event.
+     */
+    function _grantRole(bytes32 role, address account) internal virtual {
+        if (!hasRole(role, account)) {
+            _roles[role].members[account] = true;
+            emit RoleGranted(role, account, _msgSender());
+        }
+    }
+
+    /**
+     * @dev Revokes `role` from `account`.
+     *
+     * Internal function without access restriction.
+     *
+     * May emit a {RoleRevoked} event.
+     */
+    function _revokeRole(bytes32 role, address account) internal virtual {
+        if (hasRole(role, account)) {
+            _roles[role].members[account] = false;
+            emit RoleRevoked(role, account, _msgSender());
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (access/IAccessControl.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev External interface of AccessControl declared to support ERC165 detection.
+ */
+interface IAccessControl {
+    /**
+     * @dev Emitted when `newAdminRole` is set as ``role``'s admin role, replacing `previousAdminRole`
+     *
+     * `DEFAULT_ADMIN_ROLE` is the starting admin for all roles, despite
+     * {RoleAdminChanged} not being emitted signaling this.
+     *
+     * _Available since v3.1._
+     */
+    event RoleAdminChanged(bytes32 indexed role, bytes32 indexed previousAdminRole, bytes32 indexed newAdminRole);
+
+    /**
+     * @dev Emitted when `account` is granted `role`.
+     *
+     * `sender` is the account that originated the contract call, an admin role
+     * bearer except when using {AccessControl-_setupRole}.
+     */
+    event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
+
+    /**
+     * @dev Emitted when `account` is revoked `role`.
+     *
+     * `sender` is the account that originated the contract call:
+     *   - if using `revokeRole`, it is the admin role bearer
+     *   - if using `renounceRole`, it is the role bearer (i.e. `account`)
+     */
+    event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
+
+    /**
+     * @dev Returns `true` if `account` has been granted `role`.
+     */
+    function hasRole(bytes32 role, address account) external view returns (bool);
+
+    /**
+     * @dev Returns the admin role that controls `role`. See {grantRole} and
+     * {revokeRole}.
+     *
+     * To change a role's admin, use {AccessControl-_setRoleAdmin}.
+     */
+    function getRoleAdmin(bytes32 role) external view returns (bytes32);
+
+    /**
+     * @dev Grants `role` to `account`.
+     *
+     * If `account` had not been already granted `role`, emits a {RoleGranted}
+     * event.
+     *
+     * Requirements:
+     *
+     * - the caller must have ``role``'s admin role.
+     */
+    function grantRole(bytes32 role, address account) external;
+
+    /**
+     * @dev Revokes `role` from `account`.
+     *
+     * If `account` had been granted `role`, emits a {RoleRevoked} event.
+     *
+     * Requirements:
+     *
+     * - the caller must have ``role``'s admin role.
+     */
+    function revokeRole(bytes32 role, address account) external;
+
+    /**
+     * @dev Revokes `role` from the calling account.
+     *
+     * Roles are often managed via {grantRole} and {revokeRole}: this function's
+     * purpose is to provide a mechanism for accounts to lose their privileges
+     * if they are compromised (such as when a trusted device is misplaced).
+     *
+     * If the calling account had been granted `role`, emits a {RoleRevoked}
+     * event.
+     *
+     * Requirements:
+     *
+     * - the caller must be `account`.
+     */
+    function renounceRole(bytes32 role, address account) external;
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (utils/Strings.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev String operations.
+ */
+library Strings {
+    bytes16 private constant _HEX_SYMBOLS = "0123456789abcdef";
+    uint8 private constant _ADDRESS_LENGTH = 20;
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` decimal representation.
+     */
+    function toString(uint256 value) internal pure returns (string memory) {
+        // Inspired by OraclizeAPI's implementation - MIT licence
+        // https://github.com/oraclize/ethereum-api/blob/b42146b063c7d6ee1358846c198246239e9360e8/oraclizeAPI_0.4.25.sol
+
+        if (value == 0) {
+            return "0";
+        }
+        uint256 temp = value;
+        uint256 digits;
+        while (temp != 0) {
+            digits++;
+            temp /= 10;
+        }
+        bytes memory buffer = new bytes(digits);
+        while (value != 0) {
+            digits -= 1;
+            buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
+            value /= 10;
+        }
+        return string(buffer);
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation.
+     */
+    function toHexString(uint256 value) internal pure returns (string memory) {
+        if (value == 0) {
+            return "0x00";
+        }
+        uint256 temp = value;
+        uint256 length = 0;
+        while (temp != 0) {
+            length++;
+            temp >>= 8;
+        }
+        return toHexString(value, length);
+    }
+
+    /**
+     * @dev Converts a `uint256` to its ASCII `string` hexadecimal representation with fixed length.
+     */
+    function toHexString(uint256 value, uint256 length) internal pure returns (string memory) {
+        bytes memory buffer = new bytes(2 * length + 2);
+        buffer[0] = "0";
+        buffer[1] = "x";
+        for (uint256 i = 2 * length + 1; i > 1; --i) {
+            buffer[i] = _HEX_SYMBOLS[value & 0xf];
+            value >>= 4;
+        }
+        require(value == 0, "Strings: hex length insufficient");
+        return string(buffer);
+    }
+
+    /**
+     * @dev Converts an `address` with fixed length of 20 bytes to its not checksummed ASCII `string` hexadecimal representation.
+     */
+    function toHexString(address addr) internal pure returns (string memory) {
+        return toHexString(uint256(uint160(addr)), _ADDRESS_LENGTH);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/ERC165.sol)
+
+pragma solidity ^0.8.0;
+
+import "./IERC165.sol";
+
+/**
+ * @dev Implementation of the {IERC165} interface.
+ *
+ * Contracts that want to implement ERC165 should inherit from this contract and override {supportsInterface} to check
+ * for the additional interface id that will be supported. For example:
+ *
+ * ```solidity
+ * function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+ *     return interfaceId == type(MyInterface).interfaceId || super.supportsInterface(interfaceId);
+ * }
+ * ```
+ *
+ * Alternatively, {ERC165Storage} provides an easier to use but more expensive implementation.
+ */
+abstract contract ERC165 is IERC165 {
+    /**
+     * @dev See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        return interfaceId == type(IERC165).interfaceId;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/IERC165.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC165 standard, as defined in the
+ * https://eips.ethereum.org/EIPS/eip-165[EIP].
+ *
+ * Implementers can declare support of contract interfaces, which can then be
+ * queried by others ({ERC165Checker}).
+ *
+ * For an implementation, see {ERC165}.
+ */
+interface IERC165 {
+    /**
+     * @dev Returns true if this contract implements the interface defined by
+     * `interfaceId`. See the corresponding
+     * https://eips.ethereum.org/EIPS/eip-165#how-interfaces-are-identified[EIP section]
+     * to learn more about how these ids are created.
+     *
+     * This function call must use less than 30 000 gas.
+     */
+    function supportsInterface(bytes4 interfaceId) external view returns (bool);
+}
