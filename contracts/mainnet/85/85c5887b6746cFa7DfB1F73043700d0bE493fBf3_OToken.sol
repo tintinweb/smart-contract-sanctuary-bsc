@@ -1,0 +1,1739 @@
+// SPDX-License-Identifier: agpl-3.0
+pragma solidity 0.8.9;
+
+import {IERC20} from './dependencies/openzeppelin/contracts/IERC20.sol';
+import {GPv2SafeERC20} from './dependencies/gnosis/contracts/GPv2SafeERC20.sol';
+import {IVault} from './interfaces/IVault.sol';
+import {IOToken} from './interfaces/IOToken.sol';
+
+import {WadRayMath} from './libraries/math/WadRayMath.sol';
+import {Errors} from './libraries/helpers/Errors.sol';
+import {VersionedInitializable} from './libraries/aave-upgradeability/VersionedInitializable.sol';
+import {IncentivizedERC20} from './IncentivizedERC20.sol';
+
+/**
+ * @title Aave ERC20 OToken
+ * @dev Implementation of the interest bearing token for the Aave protocol
+ * @author Aave
+ * @author Onebit
+ */
+contract OToken is
+  VersionedInitializable,
+  IncentivizedERC20('OTOKEN_IMPL', 'OTOKEN_IMPL', 0),
+  IOToken
+{
+  using WadRayMath for uint256;
+  using GPv2SafeERC20 for IERC20;
+
+  bytes public constant EIP712_REVISION = bytes('1');
+  bytes32 internal constant EIP712_DOMAIN =
+    keccak256('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)');
+  bytes32 public constant PERMIT_TYPEHASH =
+    keccak256('Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)');
+
+  uint256 public constant OTOKEN_REVISION = 0x1;
+
+  /// @dev owner => next valid nonce to submit with permit()
+  mapping(address => uint256) public _nonces;
+
+  bytes32 public DOMAIN_SEPARATOR;
+
+  IVault internal _vault;
+  address internal _underlyingAsset;
+
+  modifier onlyVault {
+    require(_msgSender() == address(_vault), Errors.CT_CALLER_MUST_BE_VAULT);
+    _;
+  }
+
+  constructor () {
+    _vault = IVault(address(0));
+  }
+
+  function getRevision() internal pure virtual override returns (uint256) {
+    return OTOKEN_REVISION;
+  }
+
+  /**
+   * @dev Initializes the oToken
+   * @param vault The address of the vault where this oToken will be used
+   * @param underlyingAsset The address of the underlying asset of this oToken (E.g. WETH for aWETH)
+   * @param oTokenDecimals The decimals of the oToken, same as the underlying asset's
+   * @param oTokenName The name of the oToken
+   * @param oTokenSymbol The symbol of the oToken
+   */
+  function initialize(
+    IVault vault,
+    address underlyingAsset,
+    uint8 oTokenDecimals,
+    string calldata oTokenName,
+    string calldata oTokenSymbol,
+    bytes calldata params
+  ) external override initializer {
+    uint256 chainId;
+
+    //solium-disable-next-line
+    assembly {
+      chainId := chainid()
+    }
+
+    DOMAIN_SEPARATOR = keccak256(
+      abi.encode(
+        EIP712_DOMAIN,
+        keccak256(bytes(oTokenName)),
+        keccak256(EIP712_REVISION),
+        chainId,
+        address(this)
+      )
+    );
+
+    _setName(oTokenName);
+    _setSymbol(oTokenSymbol);
+    _setDecimals(oTokenDecimals);
+
+    _vault = vault;
+    _underlyingAsset = underlyingAsset;
+
+    emit Initialized(
+      underlyingAsset,
+      address(vault),
+      oTokenDecimals,
+      oTokenName,
+      oTokenSymbol,
+      params
+    );
+  }
+
+  /**
+   * @dev Burns oTokens from `user` and sends the equivalent amount of underlying to `receiverOfUnderlying`
+   * - Only callable by the Vault, as extra state updates there need to be managed
+   * @param user The owner of the oTokens, getting them burned
+   * @param receiverOfUnderlying The address that will receive the underlying
+   * @param amount The amount being burned
+   * @param index The new liquidity index of the reserve
+   **/
+  function burn(
+    address user,
+    address receiverOfUnderlying,
+    uint256 amount,
+    uint256 index
+  ) external override onlyVault {
+    uint256 amountScaled = amount.rayDiv(index);
+    require(amountScaled != 0, Errors.CT_INVALID_BURN_AMOUNT);
+    _burn(user, amountScaled);
+
+    IERC20(_underlyingAsset).safeTransfer(receiverOfUnderlying, amount);
+
+    emit Transfer(user, address(0), amount);
+    emit Burn(user, receiverOfUnderlying, amount, index);
+  }
+
+  /**
+   * @dev Mints `amount` oTokens to `user`
+   * - Only callable by the Vault, as extra state updates there need to be managed
+   * @param user The address receiving the minted tokens
+   * @param amount The amount of tokens getting minted
+   * @param index The new liquidity index of the reserve
+   * @return `true` if the the previous balance of the user was 0
+   */
+  function mint(
+    address user,
+    uint256 amount,
+    uint256 index
+  ) external override onlyVault returns (bool) {
+    uint256 previousBalance = super.balanceOf(user);
+
+    uint256 amountScaled = amount.rayDiv(index);
+    require(amountScaled != 0, Errors.CT_INVALID_MINT_AMOUNT);
+    _mint(user, amountScaled);
+
+    emit Transfer(address(0), user, amount);
+    emit Mint(user, amount, index);
+
+    return previousBalance == 0;
+  }
+
+  /**
+   * @dev Calculates the balance of the user: principal balance + interest generated by the principal
+   * @param user The user whose balance is calculated
+   * @return The balance of the user
+   **/
+  function balanceOf(address user)
+    public
+    view
+    override(IncentivizedERC20, IERC20)
+    returns (uint256)
+  {
+    return super.balanceOf(user).rayMulAndFloor(_vault.getReserveNormalizedIncome());
+  }
+
+  /**
+   * @dev Returns the scaled balance of the user. The scaled balance is the sum of all the
+   * updated stored balance divided by the reserve's liquidity index at the moment of the update
+   * @param user The user whose balance is calculated
+   * @return The scaled balance of the user
+   **/
+  function scaledBalanceOf(address user) external view override returns (uint256) {
+    return super.balanceOf(user);
+  }
+
+  /**
+   * @dev Returns the scaled balance of the user and the scaled total supply.
+   * @param user The address of the user
+   * @return The scaled balance of the user
+   * @return The scaled balance and the scaled total supply
+   **/
+  function getScaledUserBalanceAndSupply(address user)
+    external
+    view
+    override
+    returns (uint256, uint256)
+  {
+    return (super.balanceOf(user), super.totalSupply());
+  }
+
+  /**
+   * @dev calculates the total supply of the specific oToken
+   * since the balance of every single user increases over time, the total supply
+   * does that too.
+   * @return the current total supply
+   **/
+  function totalSupply() public view override(IncentivizedERC20, IERC20) returns (uint256) {
+    uint256 currentSupplyScaled = super.totalSupply();
+
+    if (currentSupplyScaled == 0) {
+      return 0;
+    }
+
+    return currentSupplyScaled.rayMul(_vault.getReserveNormalizedIncome());
+  }
+
+  /**
+   * @dev Returns the scaled total supply of the variable debt token. Represents sum(debt/index)
+   * @return the scaled total supply
+   **/
+  function scaledTotalSupply() public view virtual override returns (uint256) {
+    return super.totalSupply();
+  }
+
+  /**
+   * @dev Returns the address of the underlying asset of this oToken (E.g. WETH for aWETH)
+   **/
+  function UNDERLYING_ASSET_ADDRESS() public override view returns (address) {
+    return _underlyingAsset;
+  }
+
+  /**
+   * @dev Returns the address of the vault where this oToken is used
+   **/
+  function VAULT() public view returns (IVault) {
+    return _vault;
+  }
+
+  /**
+   * @dev Transfers the underlying asset to `target`. Used by the Vault to transfer
+   * assets in borrow(), withdraw() and flashLoan()
+   * @param target The recipient of the oTokens
+   * @param amount The amount getting transferred
+   * @return The amount transferred
+   **/
+  function transferUnderlyingTo(address target, uint256 amount)
+    external
+    override
+    onlyVault
+    returns (uint256)
+  {
+    IERC20(_underlyingAsset).safeTransfer(target, amount);
+    return amount;
+  }
+
+  /**
+   * @dev implements the permit function as for
+   * https://github.com/ethereum/EIPs/blob/8a34d644aacf0f9f8f00815307fd7dd5da07655f/EIPS/eip-2612.md
+   * @param owner The owner of the funds
+   * @param spender The spender
+   * @param value The amount
+   * @param deadline The deadline timestamp, type(uint256).max for max deadline
+   * @param v Signature param
+   * @param s Signature param
+   * @param r Signature param
+   */
+  function permit(
+    address owner,
+    address spender,
+    uint256 value,
+    uint256 deadline,
+    uint8 v,
+    bytes32 r,
+    bytes32 s
+  ) external {
+    require(owner != address(0), 'INVALID_OWNER');
+    //solium-disable-next-line
+    require(block.timestamp <= deadline, 'INVALID_EXPIRATION');
+    uint256 currentValidNonce = _nonces[owner];
+    bytes32 digest =
+      keccak256(
+        abi.encodePacked(
+          '\x19\x01',
+          DOMAIN_SEPARATOR,
+          keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, value, currentValidNonce, deadline))
+        )
+      );
+    require(owner == ecrecover(digest, v, r, s), 'INVALID_SIGNATURE');
+    _nonces[owner] = currentValidNonce + 1;
+    _approve(owner, spender, value);
+  }
+
+  /**
+   * @dev Transfers the oTokens between two users. Validates the transfer
+   * (ie checks for valid HF after the transfer) if required
+   * @param from The source address
+   * @param to The destination address
+   * @param amount The amount getting transferred
+   **/
+  function _transfer(
+    address from,
+    address to,
+    uint256 amount
+  ) internal override {
+    address underlyingAsset = _underlyingAsset;
+    IVault vault = _vault;
+
+    uint256 index = vault.getReserveNormalizedIncome();
+
+    super._transfer(from, to, amount.rayDiv(index));
+
+    emit BalanceTransfer(from, to, amount, index);
+  }
+}
+
+// SPDX-License-Identifier: agpl-3.0
+pragma solidity 0.8.9;
+
+import {Context} from './dependencies/openzeppelin/contracts/Context.sol';
+import {IERC20} from './dependencies/openzeppelin/contracts/IERC20.sol';
+import {IERC20Metadata} from './dependencies/openzeppelin/contracts/IERC20Metadata.sol';
+import {SafeMath} from './dependencies/openzeppelin/contracts/SafeMath.sol';
+
+/**
+ * @title ERC20
+ * @notice Basic ERC20 implementation
+ * @author Aave, inspired by the Openzeppelin ERC20 implementation
+ **/
+abstract contract IncentivizedERC20 is Context, IERC20, IERC20Metadata {
+  using SafeMath for uint256;
+
+  mapping(address => uint256) internal _balances;
+
+  mapping(address => mapping(address => uint256)) private _allowances;
+  uint256 internal _totalSupply;
+  string private _name;
+  string private _symbol;
+  uint8 private _decimals;
+
+  constructor(
+    string memory name_,
+    string memory symbol_,
+    uint8 decimals_
+  ) {
+    _name = name_;
+    _symbol = symbol_;
+    _decimals = decimals_;
+  }
+
+  /**
+   * @return The name of the token
+   **/
+  function name() public view override returns (string memory) {
+    return _name;
+  }
+
+  /**
+   * @return The symbol of the token
+   **/
+  function symbol() public view override returns (string memory) {
+    return _symbol;
+  }
+
+  /**
+   * @return The decimals of the token
+   **/
+  function decimals() public view override returns (uint8) {
+    return _decimals;
+  }
+
+  /**
+   * @return The total supply of the token
+   **/
+  function totalSupply() public view virtual override returns (uint256) {
+    return _totalSupply;
+  }
+
+  /**
+   * @return The balance of the token
+   **/
+  function balanceOf(address account) public view virtual override returns (uint256) {
+    return _balances[account];
+  }
+
+  /**
+   * @dev Executes a transfer of tokens from _msgSender() to recipient
+   * @param recipient The recipient of the tokens
+   * @param amount The amount of tokens being transferred
+   * @return `true` if the transfer succeeds, `false` otherwise
+   **/
+  function transfer(address recipient, uint256 amount) public virtual override returns (bool) {
+    _transfer(_msgSender(), recipient, amount);
+    emit Transfer(_msgSender(), recipient, amount);
+    return true;
+  }
+
+  /**
+   * @dev Returns the allowance of spender on the tokens owned by owner
+   * @param owner The owner of the tokens
+   * @param spender The user allowed to spend the owner's tokens
+   * @return The amount of owner's tokens spender is allowed to spend
+   **/
+  function allowance(address owner, address spender)
+    public
+    view
+    virtual
+    override
+    returns (uint256)
+  {
+    return _allowances[owner][spender];
+  }
+
+  /**
+   * @dev Allows `spender` to spend the tokens owned by _msgSender()
+   * @param spender The user allowed to spend _msgSender() tokens
+   * @return `true`
+   **/
+  function approve(address spender, uint256 amount) public virtual override returns (bool) {
+    _approve(_msgSender(), spender, amount);
+    return true;
+  }
+
+  /**
+   * @dev Executes a transfer of token from sender to recipient, if _msgSender() is allowed to do so
+   * @param sender The owner of the tokens
+   * @param recipient The recipient of the tokens
+   * @param amount The amount of tokens being transferred
+   * @return `true` if the transfer succeeds, `false` otherwise
+   **/
+  function transferFrom(
+    address sender,
+    address recipient,
+    uint256 amount
+  ) public virtual override returns (bool) {
+    _transfer(sender, recipient, amount);
+    _approve(
+      sender,
+      _msgSender(),
+      _allowances[sender][_msgSender()].sub(amount, 'ERC20: transfer amount exceeds allowance')
+    );
+    emit Transfer(sender, recipient, amount);
+    return true;
+  }
+
+  /**
+   * @dev Increases the allowance of spender to spend _msgSender() tokens
+   * @param spender The user allowed to spend on behalf of _msgSender()
+   * @param addedValue The amount being added to the allowance
+   * @return `true`
+   **/
+  function increaseAllowance(address spender, uint256 addedValue) public virtual returns (bool) {
+    _approve(_msgSender(), spender, _allowances[_msgSender()][spender] + addedValue);
+    return true;
+  }
+
+  /**
+   * @dev Decreases the allowance of spender to spend _msgSender() tokens
+   * @param spender The user allowed to spend on behalf of _msgSender()
+   * @param subtractedValue The amount being subtracted to the allowance
+   * @return `true`
+   **/
+  function decreaseAllowance(address spender, uint256 subtractedValue)
+    public
+    virtual
+    returns (bool)
+  {
+    _approve(
+      _msgSender(),
+      spender,
+      _allowances[_msgSender()][spender].sub(
+        subtractedValue,
+        'ERC20: decreased allowance below zero'
+      )
+    );
+    return true;
+  }
+
+  function _transfer(
+    address sender,
+    address recipient,
+    uint256 amount
+  ) internal virtual {
+    require(sender != address(0), 'ERC20: transfer from the zero address');
+    require(recipient != address(0), 'ERC20: transfer to the zero address');
+
+    _beforeTokenTransfer(sender, recipient, amount);
+
+    uint256 oldSenderBalance = _balances[sender];
+    _balances[sender] = oldSenderBalance.sub(amount, 'ERC20: transfer amount exceeds balance');
+    uint256 oldRecipientBalance = _balances[recipient];
+    _balances[recipient] = oldRecipientBalance + amount;
+
+  }
+
+  function _mint(address account, uint256 amount) internal virtual {
+    require(account != address(0), 'ERC20: mint to the zero address');
+
+    _beforeTokenTransfer(address(0), account, amount);
+
+    uint256 oldTotalSupply = _totalSupply;
+    _totalSupply = oldTotalSupply + amount;
+
+    uint256 oldAccountBalance = _balances[account];
+    _balances[account] = oldAccountBalance + amount;
+
+  }
+
+  function _burn(address account, uint256 amount) internal virtual {
+    require(account != address(0), 'ERC20: burn from the zero address');
+
+    _beforeTokenTransfer(account, address(0), amount);
+
+    uint256 oldTotalSupply = _totalSupply;
+    _totalSupply = oldTotalSupply - amount;
+
+    uint256 oldAccountBalance = _balances[account];
+    _balances[account] = oldAccountBalance.sub(amount, 'ERC20: burn amount exceeds balance');
+
+  }
+
+  function _approve(
+    address owner,
+    address spender,
+    uint256 amount
+  ) internal virtual {
+    require(owner != address(0), 'ERC20: approve from the zero address');
+    require(spender != address(0), 'ERC20: approve to the zero address');
+
+    _allowances[owner][spender] = amount;
+    emit Approval(owner, spender, amount);
+  }
+
+  function _setName(string memory newName) internal {
+    _name = newName;
+  }
+
+  function _setSymbol(string memory newSymbol) internal {
+    _symbol = newSymbol;
+  }
+
+  function _setDecimals(uint8 newDecimals) internal {
+    _decimals = newDecimals;
+  }
+
+  function _beforeTokenTransfer(
+    address from,
+    address to,
+    uint256 amount
+  ) internal virtual {}
+}
+
+// SPDX-License-Identifier: agpl-3.0
+pragma solidity 0.8.9;
+pragma abicoder v2;
+
+import {IVaultAddressesProvider} from './IVaultAddressesProvider.sol';
+import {DataTypes} from '../libraries/types/DataTypes.sol';
+
+interface IVault {
+  /**
+   * @dev Emitted on deposit()
+   * @param user The address initiating the deposit
+   * @param onBehalfOf The beneficiary of the deposit, receiving the oTokens
+   * @param amount The amount deposited
+   **/
+  event Deposit(
+    address indexed user,
+    address indexed onBehalfOf,
+    uint256 amount,
+    uint16 indexed referral
+  );
+
+  event FundDeposit(address indexed from, uint256 amount);
+
+  /**
+   * @dev Emitted on withdraw()
+   * @param user The address initiating the withdrawal, owner of oTokens
+   * @param to Address that will receive the underlying
+   * @param amount The amount to be withdrawn
+   **/
+  event Withdraw(address indexed user, address indexed to, uint256 amount);
+
+  event FundWithdraw(address indexed to, uint256 amount);
+
+  event FundAddressUpdated(address indexed newFundAddress);
+
+  event NetValueUpdated(uint256 previousNetValue, uint256 newNetValue, uint256 previousLiquidityIndex, uint256 newLiquidityIndex, int256 currentLiquidityRate);
+
+  event PeriodInitialized(uint256 previousLiquidityIndex, uint40 purchaseBeginTimestamp, uint40 purchaseEndTimestamp, uint40 redemptionBeginTimestamp, uint16 managementFeeRate, uint16 performanceFeeRate);
+
+  event PurchaseEndTimestampMoved(uint40 previousTimestamp, uint40 newTimetamp);
+
+  event RedemptionBeginTimestampMoved(uint40 previousTimestamp, uint40 newTimetamp);
+
+  event AddedToWhitelist(address indexed user, uint256 expirationTime);
+
+  event RemoveFromWhitelist(address indexed user);
+
+  event WhitelistExpirationUpdated(uint256 newExpiration);
+
+  /**
+   * @dev Emitted when the pause is triggered.
+   */
+  event Paused();
+
+  /**
+   * @dev Emitted when the pause is lifted.
+   */
+  event Unpaused();
+
+  /**
+   * @dev Deposits an `amount` of underlying asset into the reserve, receiving in return overlying oTokens.
+   * - E.g. User deposits 100 USDC and gets in return 100 aUSDC
+   * @param amount The amount to be deposited
+   * @param onBehalfOf The address that will receive the oTokens, same as msg.sender if the user
+   *   wants to receive them on his own wallet, or a different address if the beneficiary of oTokens
+   *   is a different wallet
+   **/
+  function deposit(
+    uint256 amount,
+    address onBehalfOf,
+    uint16 referralCode
+  ) external returns (uint256);
+
+  /**
+   * @dev Withdraws an `amount` of underlying asset from the reserve, burning the equivalent oTokens owned
+   * E.g. User has 100 aUSDC, calls withdraw() and receives 100 USDC, burning the 100 aUSDC
+   * @param amount The underlying amount to be withdrawn
+   *   - Send the value type(uint256).max in order to withdraw the whole oToken balance
+   * @param to Address that will receive the underlying, same as msg.sender if the user
+   *   wants to receive it on his own wallet, or a different address if the beneficiary is a
+   *   different wallet
+   * @return The final amount withdrawn
+   **/
+  function withdraw(
+    uint256 amount,
+    address to
+  ) external returns (uint256);
+
+  function depositFund(uint256 amount) external;
+
+  function withdrawFund(uint256 amount) external returns (uint256);
+
+  function initReserve(address oToken, address fundAddress) external;
+
+  function addToWhitelist(address user) external;
+
+  function batchAddToWhitelist(address[] memory users) external;
+
+  function removeFromWhitelist(address user) external;
+
+  function batchRemoveFromWhitelist(address[] memory users) external;
+
+  function isInWhitelist(address user) external returns (bool);
+
+  function getUserExpirationTimestamp(address user) external returns(uint256);
+
+  /**
+   * @dev Returns the configuration of the reserve
+   * @return The configuration of the reserve
+   **/
+  function getConfiguration()
+    external
+    view
+    returns (DataTypes.ReserveConfigurationMap memory);
+
+  function setConfiguration(uint256 configuration) external;
+
+  /**
+   * @dev Returns the normalized income normalized income of the reserve
+   * @return The reserve's normalized income
+   */
+  function getReserveNormalizedIncome() external view returns (uint256);
+
+  /**
+   * @dev Returns the state and configuration of the reserve
+   * @return The state of the reserve
+   **/
+  function getReserveData() external view returns (DataTypes.ReserveData memory);
+
+  function getAddressesProvider() external view returns (IVaultAddressesProvider);
+
+  function setPause(bool val) external;
+
+  function paused() external view returns (bool);
+
+  function setFuncAddress(address fundAddress) external;
+
+  function getWhitelistExpiration() external returns(uint256);
+
+  function setWhitelistExpiration(uint256 expiration) external;
+
+  function initializeNextPeriod(uint16 managementFeeRate, uint16 performanceFeeRate, 
+    uint128 purchaseUpperLimit,
+    uint128 softUpperLimit,
+    uint40 purchaseBeginTimestamp, uint40 purchaseEndTimestamp, 
+    uint40 redemptionBeginTimestamp)
+    external;
+
+  function moveTheLockPeriod(uint40 newPurchaseEndTimestamp) external;
+
+  function moveTheRedemptionPeriod(uint40 newRedemptionBeginTimestamp) external;
+}
+
+// SPDX-License-Identifier: agpl-3.0
+pragma solidity 0.8.9;
+
+import {IERC20} from '../dependencies/openzeppelin/contracts/IERC20.sol';
+import {IScaledBalanceToken} from './IScaledBalanceToken.sol';
+import {IInitializableOToken} from './IInitializableOToken.sol';
+
+interface IOToken is IERC20, IScaledBalanceToken, IInitializableOToken {
+  /**
+   * @dev Emitted after the mint action
+   * @param from The address performing the mint
+   * @param value The amount being
+   * @param index The new liquidity index of the reserve
+   **/
+  event Mint(address indexed from, uint256 value, uint256 index);
+
+  /**
+   * @dev Mints `amount` oTokens to `user`
+   * @param user The address receiving the minted tokens
+   * @param amount The amount of tokens getting minted
+   * @param index The new liquidity index of the reserve
+   * @return `true` if the the previous balance of the user was 0
+   */
+  function mint(
+    address user,
+    uint256 amount,
+    uint256 index
+  ) external returns (bool);
+
+  /**
+   * @dev Emitted after oTokens are burned
+   * @param from The owner of the oTokens, getting them burned
+   * @param target The address that will receive the underlying
+   * @param value The amount being burned
+   * @param index The new liquidity index of the reserve
+   **/
+  event Burn(address indexed from, address indexed target, uint256 value, uint256 index);
+
+  /**
+   * @dev Emitted during the transfer action
+   * @param from The user whose tokens are being transferred
+   * @param to The recipient
+   * @param value The amount being transferred
+   * @param index The new liquidity index of the reserve
+   **/
+  event BalanceTransfer(address indexed from, address indexed to, uint256 value, uint256 index);
+
+  /**
+   * @dev Burns oTokens from `user` and sends the equivalent amount of underlying to `receiverOfUnderlying`
+   * @param user The owner of the oTokens, getting them burned
+   * @param receiverOfUnderlying The address that will receive the underlying
+   * @param amount The amount being burned
+   * @param index The new liquidity index of the reserve
+   **/
+  function burn(
+    address user,
+    address receiverOfUnderlying,
+    uint256 amount,
+    uint256 index
+  ) external;
+
+  /**
+   * @dev Transfers the underlying asset to `target`. Used by the Vault to transfer
+   * assets in borrow(), withdraw() and flashLoan()
+   * @param user The recipient of the underlying
+   * @param amount The amount getting transferred
+   * @return The amount transferred
+   **/
+  function transferUnderlyingTo(address user, uint256 amount) external returns (uint256);
+
+  /**
+   * @dev Returns the address of the underlying asset of this oToken (E.g. WETH for aWETH)
+   **/
+  function UNDERLYING_ASSET_ADDRESS() external view returns (address);
+}
+
+// SPDX-License-Identifier: agpl-3.0
+pragma solidity 0.8.9;
+
+import {Errors} from '../helpers/Errors.sol';
+
+/**
+ * @title WadRayMath library
+ * @author Aave
+ * @dev Provides mul and div function for wads (decimal numbers with 18 digits precision) and rays (decimals with 27 digits)
+ **/
+
+library WadRayMath {
+  uint256 internal constant WAD = 1e18;
+  uint256 internal constant halfWAD = WAD / 2;
+
+  uint256 internal constant RAY = 1e27;
+  uint256 internal constant halfRAY = RAY / 2;
+
+  uint256 internal constant WAD_RAY_RATIO = 1e9;
+
+  /**
+   * @return One ray, 1e27
+   **/
+  function ray() internal pure returns (uint256) {
+    return RAY;
+  }
+
+  /**
+   * @return One wad, 1e18
+   **/
+
+  function wad() internal pure returns (uint256) {
+    return WAD;
+  }
+
+  /**
+   * @return Half ray, 1e27/2
+   **/
+  function halfRay() internal pure returns (uint256) {
+    return halfRAY;
+  }
+
+  /**
+   * @return Half ray, 1e18/2
+   **/
+  function halfWad() internal pure returns (uint256) {
+    return halfWAD;
+  }
+
+  /**
+   * @dev Multiplies two wad, rounding half up to the nearest wad
+   * @param a Wad
+   * @param b Wad
+   * @return The result of a*b, in wad
+   **/
+  function wadMul(uint256 a, uint256 b) internal pure returns (uint256) {
+    if (a == 0 || b == 0) {
+      return 0;
+    }
+
+    require(a <= (type(uint256).max - halfWAD) / b, Errors.MATH_MULTIPLICATION_OVERFLOW);
+
+    return (a * b + halfWAD) / WAD;
+  }
+
+  /**
+   * @dev Divides two wad, rounding half up to the nearest wad
+   * @param a Wad
+   * @param b Wad
+   * @return The result of a/b, in wad
+   **/
+  function wadDiv(uint256 a, uint256 b) internal pure returns (uint256) {
+    require(b != 0, Errors.MATH_DIVISION_BY_ZERO);
+    uint256 halfB = b / 2;
+
+    require(a <= (type(uint256).max - halfB) / WAD, Errors.MATH_MULTIPLICATION_OVERFLOW);
+
+    return (a * WAD + halfB) / b;
+  }
+
+  /**
+   * @dev Multiplies two ray, rounding half up to the nearest ray
+   * @param a Ray
+   * @param b Ray
+   * @return The result of a*b, in ray
+   **/
+  function rayMul(uint256 a, uint256 b) internal pure returns (uint256) {
+    if (a == 0 || b == 0) {
+      return 0;
+    }
+
+    require(a <= (type(uint256).max - halfRAY) / b, Errors.MATH_MULTIPLICATION_OVERFLOW);
+
+    return (a * b + halfRAY) / RAY;
+  }
+
+  function rayMulAndFloor(uint256 a, uint256 b) internal pure returns (uint256) {
+    if (a == 0 || b == 0) {
+      return 0;
+    }
+
+    return a * b / RAY;
+  }
+
+
+  /**
+   * @dev Divides two ray, rounding half up to the nearest ray
+   * @param a Ray
+   * @param b Ray
+   * @return The result of a/b, in ray
+   **/
+  function rayDiv(uint256 a, uint256 b) internal pure returns (uint256) {
+    require(b != 0, Errors.MATH_DIVISION_BY_ZERO);
+    uint256 halfB = b / 2;
+
+    require(a <= (type(uint256).max - halfB) / RAY, Errors.MATH_MULTIPLICATION_OVERFLOW);
+
+    return (a * RAY + halfB) / b;
+  }
+
+  function rayDivAndFloor(uint256 a, uint256 b) internal pure returns (uint256) {
+    require(b != 0, Errors.MATH_DIVISION_BY_ZERO);
+    return a * RAY / b;
+  }
+
+  /**
+   * @dev Casts ray down to wad
+   * @param a Ray
+   * @return a casted to wad, rounded half up to the nearest wad
+   **/
+  function rayToWad(uint256 a) internal pure returns (uint256) {
+    uint256 halfRatio = WAD_RAY_RATIO / 2;
+    uint256 result = halfRatio + a;
+    require(result >= halfRatio, Errors.MATH_ADDITION_OVERFLOW);
+
+    return result / WAD_RAY_RATIO;
+  }
+
+  /**
+   * @dev Converts wad up to ray
+   * @param a Wad
+   * @return a converted in ray
+   **/
+  function wadToRay(uint256 a) internal pure returns (uint256) {
+    uint256 result = a * WAD_RAY_RATIO;
+    require(result / WAD_RAY_RATIO == a, Errors.MATH_MULTIPLICATION_OVERFLOW);
+    return result;
+  }
+}
+
+// SPDX-License-Identifier: agpl-3.0
+pragma solidity 0.8.9;
+
+/**
+ * @title Errors library
+ * @author Aave
+ * @author Onebit
+ * @notice Defines the error messages emitted by the different contracts of the Aave protocol
+ * @dev Error messages prefix glossary:
+ *  - VL = ValidationLogic
+ *  - MATH = Math libraries
+ *  - CT = Common errors between tokens (OToken)
+ *  - AT = OToken
+ *  - V = Vault
+ *  - VAPR = VaultAddressesProviderRegistry
+ *  - VC = VaultConfiguration
+ *  - RL = ReserveLogic
+ *  - P = Pausable
+ */
+library Errors {
+  //common errors
+  string public constant CALLER_NOT_VAULT_ADMIN = '33'; // 'The caller must be the vault admin'
+  string public constant BORROW_ALLOWANCE_NOT_ENOUGH = '59'; // User borrows on behalf, but allowance are too small
+
+  //contract specific errors
+  string public constant VL_INVALID_AMOUNT = '1'; // 'Amount must be greater than 0'
+  string public constant VL_NO_ACTIVE_RESERVE = '2'; // 'Action requires an active reserve'
+  string public constant VL_RESERVE_FROZEN = '3'; // 'Action cannot be performed because the reserve is frozen'
+  string public constant VL_CURRENT_AVAILABLE_LIQUIDITY_NOT_ENOUGH = '4'; // 'The current liquidity is not enough'
+  string public constant VL_NOT_ENOUGH_AVAILABLE_USER_BALANCE = '5'; // 'User cannot withdraw more than the available balance'
+  string public constant VL_TRANSFER_NOT_ALLOWED = '6'; // 'Transfer cannot be allowed.'
+  string public constant VL_NOT_IN_PURCHASE_OR_REDEMPTION_PERIOD = '7'; // 'Not in purchase or redemption period.'
+  string public constant VL_PURCHASE_UPPER_LIMIT = '8'; // 'Purchase upper limit.'
+  string public constant VL_NOT_IN_LOCK_PERIOD = '9'; // 'Not in lock period.'
+  string public constant VL_NOT_FINISHED = '10'; // 'Lastest period is not finished yet.'
+  string public constant VL_INVALID_TIMESTAMP = '11'; // 'Timestamps must be in order.'
+  string public constant VL_INVALID_FUND_ADDRESS = '12'; // 'Invalid fund address.'
+  string public constant VL_UNDERLYING_BALANCE_NOT_GREATER_THAN_0 = '19'; // 'The underlying balance needs to be greater than 0'
+  string public constant V_INCONSISTENT_PROTOCOL_ACTUAL_BALANCE = '26'; // 'The actual balance of the protocol is inconsistent'
+  string public constant V_CALLER_NOT_VAULT_CONFIGURATOR = '27';
+  string public constant V_CALLER_NOT_VAULT_OPERATOR = '28'; // 'The caller of the function is not the vault operator.'
+  string public constant CT_CALLER_MUST_BE_VAULT = '29'; // 'The caller of this function must be a vault'
+  string public constant CT_CANNOT_GIVE_ALLOWANCE_TO_HIMSELF = '30'; // 'User cannot give allowance to himself'
+  string public constant CT_TRANSFER_AMOUNT_NOT_GT_0 = '31'; // 'Transferred amount needs to be greater than zero'
+  string public constant RL_RESERVE_ALREADY_INITIALIZED = '32'; // 'Reserve has already been initialized'
+  string public constant VPC_RESERVE_LIQUIDITY_NOT_0 = '34'; // 'The liquidity of the reserve needs to be 0'
+  string public constant VPC_INVALID_OTOKEN_VAULT_ADDRESS = '35'; // 'The liquidity of the reserve needs to be 0'
+  string public constant VPC_INVALID_ADDRESSES_PROVIDER_ID = '40'; // 'The liquidity of the reserve needs to be 0'
+  string public constant VPC_INVALID_CONFIGURATION = '75'; // 'Invalid risk parameters for the reserve'
+  string public constant VPC_CALLER_NOT_EMERGENCY_ADMIN = '76'; // 'The caller must be the emergency admin'
+  string public constant VAPR_PROVIDER_NOT_REGISTERED = '41'; // 'Provider is not registered'
+  string public constant VCM_NO_ERRORS = '46'; // 'No errors'
+  string public constant MATH_MULTIPLICATION_OVERFLOW = '48';
+  string public constant MATH_ADDITION_OVERFLOW = '49';
+  string public constant MATH_DIVISION_BY_ZERO = '50';
+  string public constant RL_LIQUIDITY_INDEX_OVERFLOW = '51'; //  Liquidity index overflows uint128
+  string public constant RL_LIQUIDITY_RATE_OVERFLOW = '53'; //  Liquidity rate overflows uint128
+  string public constant CT_INVALID_MINT_AMOUNT = '56'; //invalid amount to mint
+  string public constant CT_INVALID_BURN_AMOUNT = '58'; //invalid amount to burn
+  string public constant V_REENTRANCY_NOT_ALLOWED = '62';
+  string public constant V_CALLER_MUST_BE_AN_OTOKEN = '63';
+  string public constant V_IS_PAUSED = '64'; // 'Vault is paused'
+  string public constant V_NO_MORE_RESERVES_ALLOWED = '65';
+  string public constant V_NOT_IN_WHITELIST = '66';
+  string public constant RC_INVALID_DECIMALS = '70';
+  string public constant VAPR_INVALID_ADDRESSES_PROVIDER_ID = '72';
+  string public constant UL_INVALID_INDEX = '77';
+  string public constant V_NOT_CONTRACT = '78';
+  string public constant SDT_BURN_EXCEEDS_BALANCE = '80';
+  string public constant CT_CALLER_MUST_BE_CLAIM_ADMIN = '81';
+  string public constant CT_TOKEN_CAN_NOT_BE_UNDERLYING = '82';
+  string public constant CT_TOKEN_CAN_NOT_BE_SELF = '83';
+  string public constant VPC_CALLER_NOT_KYC_ADMIN = '84';
+  string public constant VPC_CALLER_NOT_PORTFOLIO_MANAGER = '85';
+
+}
+
+// SPDX-License-Identifier: agpl-3.0
+pragma solidity 0.8.9;
+
+/**
+ * @title VersionedInitializable
+ *
+ * @dev Helper contract to implement initializer functions. To use it, replace
+ * the constructor with a function that has the `initializer` modifier.
+ * WARNING: Unlike constructors, initializer functions must be manually
+ * invoked. This applies both to deploying an Initializable contract, as well
+ * as extending an Initializable contract via inheritance.
+ * WARNING: When used with inheritance, manual care must be taken to not invoke
+ * a parent initializer twice, or ensure that all initializers are idempotent,
+ * because this is not dealt with automatically as with constructors.
+ *
+ * @author Aave, inspired by the OpenZeppelin Initializable contract
+ */
+abstract contract VersionedInitializable {
+  /**
+   * @dev Indicates that the contract has been initialized.
+   */
+  uint256 private lastInitializedRevision = 0;
+
+  /**
+   * @dev Indicates that the contract is in the process of being initialized.
+   */
+  bool private initializing;
+
+  /**
+   * @dev Modifier to use in the initializer function of a contract.
+   */
+  modifier initializer() {
+    uint256 revision = getRevision();
+    require(
+      initializing || isConstructor() || revision > lastInitializedRevision,
+      'Contract instance has already been initialized'
+    );
+
+    bool isTopLevelCall = !initializing;
+    if (isTopLevelCall) {
+      initializing = true;
+      lastInitializedRevision = revision;
+    }
+
+    _;
+
+    if (isTopLevelCall) {
+      initializing = false;
+    }
+  }
+
+  /**
+   * @dev returns the revision number of the contract
+   * Needs to be defined in the inherited class as a constant.
+   **/
+  function getRevision() internal pure virtual returns (uint256);
+
+  /**
+   * @dev Returns true if and only if the function is running in the constructor
+   **/
+  function isConstructor() private view returns (bool) {
+    // extcodesize checks the size of the code stored in an address, and
+    // address returns the current address. Since the code is still not
+    // deployed when running a constructor, any checks on its code size will
+    // yield zero, making it an effective way to detect if a contract is
+    // under construction or not.
+    uint256 cs;
+    //solium-disable-next-line
+    assembly {
+      cs := extcodesize(address())
+    }
+    return cs == 0;
+  }
+
+  // Reserved storage space to allow for layout changes in the future.
+  uint256[50] private ______gap;
+}
+
+// SPDX-License-Identifier: LGPL-3.0-or-later
+pragma solidity 0.8.9;
+
+import {IERC20} from '../../openzeppelin/contracts/IERC20.sol';
+
+/// @title Gnosis Protocol v2 Safe ERC20 Transfer Library
+/// @author Gnosis Developers
+/// @dev Gas-efficient version of Openzeppelin's SafeERC20 contract.
+library GPv2SafeERC20 {
+  /// @dev Wrapper around a call to the ERC20 function `transfer` that reverts
+  /// also when the token returns `false`.
+  function safeTransfer(
+    IERC20 token,
+    address to,
+    uint256 value
+  ) internal {
+    bytes4 selector_ = token.transfer.selector;
+
+    // solhint-disable-next-line no-inline-assembly
+    assembly {
+      let freeMemoryPointer := mload(0x40)
+      mstore(freeMemoryPointer, selector_)
+      mstore(add(freeMemoryPointer, 4), and(to, 0xffffffffffffffffffffffffffffffffffffffff))
+      mstore(add(freeMemoryPointer, 36), value)
+
+      if iszero(call(gas(), token, 0, freeMemoryPointer, 68, 0, 0)) {
+        returndatacopy(0, 0, returndatasize())
+        revert(0, returndatasize())
+      }
+    }
+
+    require(getLastTransferResult(token), 'GPv2: failed transfer');
+  }
+
+  /// @dev Wrapper around a call to the ERC20 function `transferFrom` that
+  /// reverts also when the token returns `false`.
+  function safeTransferFrom(
+    IERC20 token,
+    address from,
+    address to,
+    uint256 value
+  ) internal {
+    bytes4 selector_ = token.transferFrom.selector;
+
+    // solhint-disable-next-line no-inline-assembly
+    assembly {
+      let freeMemoryPointer := mload(0x40)
+      mstore(freeMemoryPointer, selector_)
+      mstore(add(freeMemoryPointer, 4), and(from, 0xffffffffffffffffffffffffffffffffffffffff))
+      mstore(add(freeMemoryPointer, 36), and(to, 0xffffffffffffffffffffffffffffffffffffffff))
+      mstore(add(freeMemoryPointer, 68), value)
+
+      if iszero(call(gas(), token, 0, freeMemoryPointer, 100, 0, 0)) {
+        returndatacopy(0, 0, returndatasize())
+        revert(0, returndatasize())
+      }
+    }
+
+    require(getLastTransferResult(token), 'GPv2: failed transferFrom');
+  }
+
+  /// @dev Verifies that the last return was a successful `transfer*` call.
+  /// This is done by checking that the return data is either empty, or
+  /// is a valid ABI encoded boolean.
+  function getLastTransferResult(IERC20 token) private view returns (bool success) {
+    // NOTE: Inspecting previous return data requires assembly. Note that
+    // we write the return data to memory 0 in the case where the return
+    // data size is 32, this is OK since the first 64 bytes of memory are
+    // reserved by Solidy as a scratch space that can be used within
+    // assembly blocks.
+    // <https://docs.soliditylang.org/en/v0.7.6/internals/layout_in_memory.html>
+    // solhint-disable-next-line no-inline-assembly
+    assembly {
+      /// @dev Revert with an ABI encoded Solidity error with a message
+      /// that fits into 32-bytes.
+      ///
+      /// An ABI encoded Solidity error has the following memory layout:
+      ///
+      /// ------------+----------------------------------
+      ///  byte range | value
+      /// ------------+----------------------------------
+      ///  0x00..0x04 |        selector("Error(string)")
+      ///  0x04..0x24 |      string offset (always 0x20)
+      ///  0x24..0x44 |                    string length
+      ///  0x44..0x64 | string value, padded to 32-bytes
+      function revertWithMessage(length, message) {
+        mstore(0x00, '\x08\xc3\x79\xa0')
+        mstore(0x04, 0x20)
+        mstore(0x24, length)
+        mstore(0x44, message)
+        revert(0x00, 0x64)
+      }
+
+      switch returndatasize()
+      // Non-standard ERC20 transfer without return.
+      case 0 {
+        // NOTE: When the return data size is 0, verify that there
+        // is code at the address. This is done in order to maintain
+        // compatibility with Solidity calling conventions.
+        // <https://docs.soliditylang.org/en/v0.7.6/control-structures.html#external-function-calls>
+        if iszero(extcodesize(token)) {
+          revertWithMessage(20, 'GPv2: not a contract')
+        }
+
+        success := 1
+      }
+      // Standard ERC20 transfer returning boolean success value.
+      case 32 {
+        returndatacopy(0, 0, returndatasize())
+
+        // NOTE: For ABI encoding v1, any non-zero value is accepted
+        // as `true` for a boolean. In order to stay compatible with
+        // OpenZeppelin's `SafeERC20` library which is known to work
+        // with the existing ERC20 implementation we care about,
+        // make sure we return success for any non-zero return value
+        // from the `transfer*` call.
+        success := iszero(iszero(mload(0)))
+      }
+      default {
+        revertWithMessage(31, 'GPv2: malformed transfer result')
+      }
+    }
+  }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.0 (token/ERC20/IERC20.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20 {
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `recipient`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address recipient, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `sender` to `recipient` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) external returns (bool);
+
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.0 (utils/Context.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.0 (token/ERC20/extensions/IERC20Metadata.sol)
+
+pragma solidity ^0.8.0;
+
+import "./IERC20.sol";
+
+/**
+ * @dev Interface for the optional metadata functions from the ERC20 standard.
+ *
+ * _Available since v4.1._
+ */
+interface IERC20Metadata is IERC20 {
+    /**
+     * @dev Returns the name of the token.
+     */
+    function name() external view returns (string memory);
+
+    /**
+     * @dev Returns the symbol of the token.
+     */
+    function symbol() external view returns (string memory);
+
+    /**
+     * @dev Returns the decimals places of the token.
+     */
+    function decimals() external view returns (uint8);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.0 (utils/math/SafeMath.sol)
+
+pragma solidity ^0.8.0;
+
+// CAUTION
+// This version of SafeMath should only be used with Solidity 0.8 or later,
+// because it relies on the compiler's built in overflow checks.
+
+/**
+ * @dev Wrappers over Solidity's arithmetic operations.
+ *
+ * NOTE: `SafeMath` is generally not needed starting with Solidity 0.8, since the compiler
+ * now has built in overflow checking.
+ */
+library SafeMath {
+    /**
+     * @dev Returns the addition of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryAdd(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            uint256 c = a + b;
+            if (c < a) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the substraction of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function trySub(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b > a) return (false, 0);
+            return (true, a - b);
+        }
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMul(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            // Gas optimization: this is cheaper than requiring 'a' not being zero, but the
+            // benefit is lost if 'b' is also tested.
+            // See: https://github.com/OpenZeppelin/openzeppelin-contracts/pull/522
+            if (a == 0) return (true, 0);
+            uint256 c = a * b;
+            if (c / a != b) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the division of two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryDiv(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a / b);
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMod(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a % b);
+        }
+    }
+
+    /**
+     * @dev Returns the addition of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `+` operator.
+     *
+     * Requirements:
+     *
+     * - Addition cannot overflow.
+     */
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting on
+     * overflow (when the result is negative).
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a - b;
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `*` operator.
+     *
+     * Requirements:
+     *
+     * - Multiplication cannot overflow.
+     */
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a * b;
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator.
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a / b;
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting when dividing by zero.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a % b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting with custom message on
+     * overflow (when the result is negative).
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {trySub}.
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b <= a, errorMessage);
+            return a - b;
+        }
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting with custom message on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator. Note: this function uses a
+     * `revert` opcode (which leaves remaining gas untouched) while Solidity
+     * uses an invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a / b;
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting with custom message when dividing by zero.
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {tryMod}.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a % b;
+        }
+    }
+}
+
+// SPDX-License-Identifier: agpl-3.0
+pragma solidity 0.8.9;
+
+/**
+ * @title VaultAddressesProvider contract
+ * @dev Main registry of addresses part of or connected to the protocol, including permissioned roles
+ * - Acting also as factory of proxies and admin of those, so with right to change its implementations
+ * - Owned by the Aave Governance
+ * @author Aave
+ * @author Onebit
+ **/
+interface IVaultAddressesProvider {
+  event MarketIdSet(string newMarketId);
+  event VaultUpdated(address indexed newAddress);
+  event VaultConfiguratorUpdated(address indexed newAddress);
+  event ConfigurationAdminUpdated(address indexed newAddress);
+  event EmergencyAdminUpdated(address indexed newAddress);
+  event KYCAdminUpdated(address indexed newAddress);
+  event PortfolioManagerUpdated(address indexed newAddress);
+  event VaultOperatorUpdated(address indexed newAddress);
+  event ProxyCreated(bytes32 id, address indexed newAddress);
+  event AddressSet(bytes32 id, address indexed newAddress, bool hasProxy);
+
+  function getMarketId() external view returns (string memory);
+
+  function setMarketId(string calldata marketId) external;
+
+  function setAddress(bytes32 id, address newAddress) external;
+
+  function setAddressAsProxy(bytes32 id, address impl) external;
+
+  function getAddress(bytes32 id) external view returns (address);
+
+  function getVault() external view returns (address);
+
+  function setVaultImpl(address vault) external;
+
+  function getVaultConfigurator() external view returns (address);
+
+  function setVaultConfiguratorImpl(address configurator) external;
+
+  function getVaultOperator() external view returns (address);
+
+  function setVaultOperator(address configurator) external;
+
+  function getVaultAdmin() external view returns (address);
+
+  function setVaultAdmin(address admin) external;
+
+  function getEmergencyAdmin() external view returns (address);
+
+  function setEmergencyAdmin(address admin) external;
+
+  function getKYCAdmin() external view returns (address);
+
+  function setKYCAdmin(address admin) external;
+
+  function getPortfolioManager() external view returns (address);
+
+  function setPortfolioManager(address admin) external;
+}
+
+// SPDX-License-Identifier: agpl-3.0
+pragma solidity 0.8.9;
+
+library DataTypes {
+  // refer to the whitepaper, section 1.1 basic concepts for a formal description of these properties.
+  struct ReserveData {
+    ReserveConfigurationMap configuration;
+    //the liquidity index. Expressed in ray
+    uint128 liquidityIndex;
+    //the current supply rate. Expressed in ray
+    int128 currentLiquidityRate;
+    uint128 previousLiquidityIndex;
+    uint128 purchaseUpperLimit;
+    uint40 lastUpdateTimestamp;
+    uint40 purchaseBeginTimestamp;
+    uint40 purchaseEndTimestamp;
+    uint40 redemptionBeginTimestamp;
+    //fee rate 
+    uint16 managementFeeRate;
+    uint16 performanceFeeRate;
+    //tokens addresses
+    address oTokenAddress;
+    address fundAddress;
+    uint128 softUpperLimit;
+  }
+
+  struct ReserveConfigurationMap {
+    //bit 0-7: Decimals
+    //bit 8: Reserve is active
+    //bit 9: reserve is frozen
+    uint256 data;
+  }
+}
+
+// SPDX-License-Identifier: agpl-3.0
+pragma solidity 0.8.9;
+
+interface IScaledBalanceToken {
+  /**
+   * @dev Returns the scaled balance of the user. The scaled balance is the sum of all the
+   * updated stored balance divided by the reserve's liquidity index at the moment of the update
+   * @param user The user whose balance is calculated
+   * @return The scaled balance of the user
+   **/
+  function scaledBalanceOf(address user) external view returns (uint256);
+
+  /**
+   * @dev Returns the scaled balance of the user and the scaled total supply.
+   * @param user The address of the user
+   * @return The scaled balance of the user
+   * @return The scaled balance and the scaled total supply
+   **/
+  function getScaledUserBalanceAndSupply(address user) external view returns (uint256, uint256);
+
+  /**
+   * @dev Returns the scaled total supply of the variable debt token. Represents sum(debt/index)
+   * @return The scaled total supply
+   **/
+  function scaledTotalSupply() external view returns (uint256);
+}
+
+// SPDX-License-Identifier: agpl-3.0
+pragma solidity 0.8.9;
+
+import {IVault} from './IVault.sol';
+
+/**
+ * @title IInitializableOToken
+ * @notice Interface for the initialize function on OToken
+ * @author Aave
+ * @author Onebit
+ **/
+interface IInitializableOToken {
+  /**
+   * @dev Emitted when an oToken is initialized
+   * @param underlyingAsset The address of the underlying asset
+   * @param vault The address of the associated vault
+   * @param oTokenDecimals the decimals of the underlying
+   * @param oTokenName the name of the oToken
+   * @param oTokenSymbol the symbol of the oToken
+   * @param params A set of encoded parameters for additional initialization
+   **/
+  event Initialized(
+    address indexed underlyingAsset,
+    address indexed vault,
+    uint8 oTokenDecimals,
+    string oTokenName,
+    string oTokenSymbol,
+    bytes params
+  );
+
+  /**
+   * @dev Initializes the oToken
+   * @param vault The address of the vault where this oToken will be used
+   * @param underlyingAsset The address of the underlying asset of this oToken (E.g. WETH for aWETH)
+   * @param oTokenDecimals The decimals of the oToken, same as the underlying asset's
+   * @param oTokenName The name of the oToken
+   * @param oTokenSymbol The symbol of the oToken
+   */
+  function initialize(
+    IVault vault,
+    address underlyingAsset,
+    uint8 oTokenDecimals,
+    string calldata oTokenName,
+    string calldata oTokenSymbol,
+    bytes calldata params
+  ) external;
+}
