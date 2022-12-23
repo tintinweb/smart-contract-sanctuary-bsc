@@ -1,0 +1,1252 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.9;
+
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "./GameTools.sol";
+
+/**
+ * @title PTSS game contract
+ */
+contract PTSS is ReentrancyGuard, GameTools {
+    using Counters for Counters.Counter;
+    using ERC165Checker for address;
+
+    uint256 pricePerMinute = 10**18;
+    uint256 POTgamePeriod = 2.5 minutes;
+    uint256 gameTotalPeriod = 2.75 minutes;
+    uint256 protectionPeriod = 15 seconds;
+
+    mapping(uint256 => GameRoom) public RoomIdToGameRoom;
+    mapping(uint256 => Protection) public RoomIdToProtection;
+
+    struct GameRoom {
+        address player1;
+        address player2;
+        address erc20Address;
+        uint256 betAmount;
+        uint256 startedTime;
+        uint16 result;
+        bool isClosed;
+    }
+
+    struct Protection {
+        uint256 player1ProtectTime;
+        uint256 player2ProtectTime;
+    }
+
+    event GameStarted(uint256 indexed roomId);
+    event GameEnded(uint256 indexed roomId);
+
+    event UserTook(uint256 indexed roomId, address actor);
+    event UserProtected(uint256 indexed roomId, address actor);
+
+    event UserSplited(uint256 indexed roomId, address actor);
+    event UserStole(uint256 indexed roomId, address actor);
+
+    /**
+     * @dev Initialize the contract
+     * @param erc20TokenAddresses list of ERC20 tokens to be whitelisted initially
+     */
+    constructor(address[] memory erc20TokenAddresses)
+        GameTools(erc20TokenAddresses)
+    {}
+
+    receive() external payable {}
+
+    /**
+     * @dev Change pricePerMinute only owner
+     * @param price new price per minute
+     */
+    function changePricePerMinute(uint256 price) external onlyOwner {
+        pricePerMinute = price;
+    }
+
+    function getPricePerMinute() public view returns (uint256) {
+        return pricePerMinute;
+    }
+
+    /**
+     * @dev change protectPeriod
+     * @param period new period by seconds
+     */
+    function changeProtectionPeriod(uint256 period) external onlyOwner {
+        protectionPeriod = period;
+    }
+
+    function getProtectioPeriod() public view returns (uint256) {
+        return protectionPeriod;
+    }
+
+    /**
+     * @dev change gameTotalPeriod
+     * @param period new period by seconds
+     */
+    function changeGameTotalPeriod(uint256 period) external onlyOwner {
+        gameTotalPeriod = period;
+    }
+
+    function getGameTotalPeriod() public view returns (uint256) {
+        return gameTotalPeriod;
+    }
+
+    /**
+     * @dev change POTgamePeriod
+     * @param period new period by seconds
+     */
+    function changePOTGamePeriod(uint256 period) external onlyOwner {
+        POTgamePeriod = period;
+    }
+
+    function getPOTGamePeriod() public view returns (uint256) {
+        return POTgamePeriod;
+    }
+
+    /**
+     * @dev gameRoomNotClosed modifier
+     * @param roomId id of game room
+     */
+    modifier whenGameRoomNotClosed(uint256 roomId) {
+        uint256 currentTime = block.timestamp;
+        GameRoom storage gameRoom = RoomIdToGameRoom[roomId];
+        if (
+            !(gameRoom.startedTime <= currentTime &&
+                gameRoom.startedTime + gameTotalPeriod > currentTime)
+        ) gameRoom.isClosed = true;
+        require(!gameRoom.isClosed, "Game room is closed");
+        _;
+    }
+
+    /**
+     * @dev validUser modifier
+     * @param roomId id of game room
+     * @param user identifies user is playing the gameroom
+     */
+    modifier validUser(uint256 roomId, address user) {
+        GameRoom storage gameRoom = RoomIdToGameRoom[roomId];
+        require(
+            gameRoom.player1 == user || gameRoom.player2 == user,
+            "Invalid User Address"
+        );
+        _;
+    }
+
+    /**
+     * @dev whenUserNotPlaying modifier
+     * @param userAddress address of a user
+     */
+    modifier whenUserNotPlaying(address userAddress) {
+        uint256 currentTime = block.timestamp;
+        if (
+            !(RoomIdToGameRoom[playerState[userAddress]].startedTime <=
+                currentTime &&
+                RoomIdToGameRoom[playerState[userAddress]].startedTime +
+                    gameTotalPeriod >
+                currentTime)
+        ) {
+            RoomIdToGameRoom[playerState[userAddress]].isClosed = true;
+            playerState[userAddress] = 0;
+        }
+        require(
+            playerState[userAddress] == 0,
+            "A player is playing another game"
+        );
+        _;
+    }
+
+    /**
+     * @dev Start Game
+     * @param player1 the first player
+     * @param player2 the second player
+     * @param erc20Address erc20 token address that is used for betting
+     * @param betAmount the amount of bet
+     */
+    function startGame(
+        address player1,
+        address player2,
+        address erc20Address,
+        uint256 betAmount
+    )
+        external
+        whenNotPaused
+        whiteListedToken(erc20Address)
+        whenUserNotPlaying(player1)
+        whenUserNotPlaying(player2)
+    {
+        uint256 startedTime = block.timestamp;
+
+        require(betAmount > 0, "Must bet some amount");
+        if (erc20Address == address(0)) {
+            uint256 requiredBNBAmount = getUsdToBnbPrice(betAmount);
+            require(
+                stakedAmount[player1] >= requiredBNBAmount,
+                "Player1 does not have enough staked BNB."
+            );
+            require(
+                stakedAmount[player2] >= requiredBNBAmount,
+                "Player1 does not have enough staked BNB."
+            );
+        }
+
+        uint256 player1Allowance = IERC20(erc20Address).allowance(
+            player1,
+            address(this)
+        );
+        uint256 player2Allowance = IERC20(erc20Address).allowance(
+            player2,
+            address(this)
+        );
+        require(
+            player1Allowance >= betAmount,
+            "Not enough allowance to manage player1 assets"
+        );
+        require(
+            player2Allowance >= betAmount,
+            "Not enough allowance to manage player2 assets"
+        );
+
+        if (erc20Address != address(0)) {
+            IERC20(erc20Address).transferFrom(
+                player1,
+                address(this),
+                betAmount
+            );
+            IERC20(erc20Address).transferFrom(
+                player2,
+                address(this),
+                betAmount
+            );
+        }
+
+        _roomIds.increment();
+        uint256 roomId = _roomIds.current();
+
+        RoomIdToGameRoom[roomId] = GameRoom(
+            player1,
+            player2,
+            erc20Address,
+            betAmount,
+            startedTime,
+            4,
+            false
+        );
+        RoomIdToProtection[roomId] = Protection(0, 0);
+
+        playerState[player1] = roomId;
+        playerState[player2] = roomId;
+
+        emit GameStarted(roomId);
+    }
+
+    /**
+     * @dev Protect for 15 seconds
+     * @param roomId game room id
+     * @param actor user address who pressed the protect
+     */
+    function Protect(uint256 roomId, address actor)
+        external
+        whenNotPaused
+        validRoomId(roomId)
+        validUser(roomId, actor)
+        whenGameRoomNotClosed(roomId)
+    {
+        uint256 currentTime = block.timestamp;
+
+        GameRoom storage gameRoom = RoomIdToGameRoom[roomId];
+        require(
+            gameRoom.startedTime <= currentTime &&
+                gameRoom.startedTime + POTgamePeriod > currentTime,
+            "POTGame already finished"
+        );
+
+        Protection storage protection = RoomIdToProtection[roomId];
+        if (gameRoom.player1 == actor) {
+            require(
+                !(gameRoom.startedTime <= protection.player1ProtectTime &&
+                    gameRoom.startedTime + POTgamePeriod >
+                    protection.player1ProtectTime),
+                "Can not protect more than once in a game"
+            );
+            protection.player1ProtectTime = currentTime;
+        } else {
+            require(
+                (gameRoom.startedTime <= protection.player2ProtectTime &&
+                    gameRoom.startedTime + POTgamePeriod >
+                    protection.player2ProtectTime),
+                "Can not protect more than once in a game"
+            );
+            protection.player2ProtectTime = currentTime;
+        }
+        emit UserProtected(roomId, actor);
+    }
+
+    /**
+     * @dev Take
+     * @param roomId game room id
+     * @param actor user address who pressed the take
+     */
+    function Take(uint256 roomId, address actor)
+        external
+        whenNotPaused
+        validRoomId(roomId)
+        validUser(roomId, actor)
+        whenGameRoomNotClosed(roomId)
+    {
+        uint256 currentTime = block.timestamp;
+
+        GameRoom storage gameRoom = RoomIdToGameRoom[roomId];
+        require(
+            gameRoom.startedTime < currentTime &&
+                gameRoom.startedTime + POTgamePeriod >= currentTime,
+            "Game already finished"
+        );
+
+        Protection storage protection = RoomIdToProtection[roomId];
+        uint256 profit;
+        if (gameRoom.erc20Address != address(0)) {
+            profit =
+                (gameRoom.betAmount *
+                    pricePerMinute *
+                    (currentTime - gameRoom.startedTime)) /
+                60 /
+                (10**18);
+        } else {
+            profit = getUsdToBnbPrice(
+                (gameRoom.betAmount * (currentTime - gameRoom.startedTime)) / 60
+            );
+        }
+
+        if (gameRoom.player1 == actor) {
+            if (
+                protection.player2ProtectTime <= currentTime &&
+                protection.player2ProtectTime + protectionPeriod >= currentTime
+            ) {
+                if (gameRoom.erc20Address != address(0)) {
+                    IERC20(gameRoom.erc20Address).transfer(
+                        gameRoom.player2,
+                        profit
+                    );
+                } else {
+                    payable(gameRoom.player2).transfer(profit);
+                }
+                gameRoom.result = 1;
+            } else {
+                if (gameRoom.erc20Address != address(0)) {
+                    IERC20(gameRoom.erc20Address).transfer(
+                        gameRoom.player1,
+                        profit
+                    );
+                } else {
+                    payable(gameRoom.player1).transfer(profit);
+                }
+                gameRoom.result = 0;
+            }
+        } else {
+            if (
+                protection.player1ProtectTime <= currentTime &&
+                protection.player1ProtectTime + protectionPeriod >= currentTime
+            ) {
+                if (gameRoom.erc20Address != address(0)) {
+                    IERC20(gameRoom.erc20Address).transfer(
+                        gameRoom.player1,
+                        profit
+                    );
+                } else {
+                    payable(gameRoom.player1).transfer(profit);
+                }
+                gameRoom.result = 0;
+            } else {
+                if (gameRoom.erc20Address != address(0)) {
+                    IERC20(gameRoom.erc20Address).transfer(
+                        gameRoom.player2,
+                        profit
+                    );
+                } else {
+                    payable(gameRoom.player2).transfer(profit);
+                }
+                gameRoom.result = 1;
+            }
+        }
+
+        playerState[gameRoom.player1] = 0;
+        playerState[gameRoom.player2] = 0;
+        gameRoom.isClosed = true;
+
+        emit UserTook(roomId, actor);
+        emit GameEnded(roomId);
+    }
+
+    /**
+     * @dev Split
+     * @param roomId game room id
+     * @param actor user address who pressed the split
+     */
+    function Split(uint256 roomId, address actor)
+        external
+        whenNotPaused
+        validRoomId(roomId)
+        validUser(roomId, actor)
+        whenGameRoomNotClosed(roomId)
+    {
+        uint256 currentTime = block.timestamp;
+        GameRoom storage gameRoom = RoomIdToGameRoom[roomId];
+
+        require(
+            gameRoom.startedTime + POTgamePeriod < currentTime &&
+                gameRoom.startedTime + gameTotalPeriod >= currentTime,
+            "Invalid time"
+        );
+
+        if (gameRoom.player1 == actor) {
+            if (gameRoom.result == 0) {
+                gameRoom.result = 2;
+            } else if (gameRoom.result == 3) {
+                gameRoom.result = 1;
+            }
+        } else {
+            if (gameRoom.result == 1) {
+                gameRoom.result = 2;
+            } else if (gameRoom.result == 3) {
+                gameRoom.result = 0;
+            }
+        }
+        emit UserSplited(roomId, actor);
+    }
+
+    /**
+     * @dev Steal
+     * @param roomId game room id
+     * @param actor user address who pressed the steal
+     */
+    function Steal(uint256 roomId, address actor)
+        external
+        whenNotPaused
+        validRoomId(roomId)
+        validUser(roomId, actor)
+        whenGameRoomNotClosed(roomId)
+    {
+        uint256 currentTime = block.timestamp;
+        GameRoom storage gameRoom = RoomIdToGameRoom[roomId];
+
+        require(
+            gameRoom.startedTime + POTgamePeriod < currentTime &&
+                gameRoom.startedTime + gameTotalPeriod >= currentTime,
+            "Invalid time"
+        );
+
+        if (gameRoom.player1 == actor) {
+            if (gameRoom.result == 1) {
+                gameRoom.result = 3;
+            } else if (gameRoom.result == 2) {
+                gameRoom.result = 0;
+            }
+        } else {
+            if (gameRoom.result == 0) {
+                gameRoom.result = 3;
+            } else if (gameRoom.result == 2) {
+                gameRoom.result = 1;
+            }
+        }
+        emit UserStole(roomId, actor);
+    }
+
+    /**
+     * @dev endGame
+     * @param roomId game room id
+     */
+    function endGame(uint256 roomId)
+        external
+        whenNotPaused
+        validRoomId(roomId)
+        whenGameRoomNotClosed(roomId)
+    {
+        uint256 currentTime = block.timestamp;
+
+        GameRoom storage gameRoom = RoomIdToGameRoom[roomId];
+
+        require(
+            gameRoom.startedTime + POTgamePeriod < currentTime &&
+                gameRoom.startedTime + gameTotalPeriod >= currentTime,
+            "Invalid time"
+        );
+
+        uint256 profit;
+        if (gameRoom.erc20Address != address(0)) {
+            profit = gameRoom.betAmount * 2;
+        } else {
+            profit = getUsdToBnbPrice(gameRoom.betAmount * 2);
+        }
+        uint16 gameResult = gameRoom.result;
+
+        if (gameResult == 0) {
+            if (gameRoom.erc20Address != address(0)) {
+                IERC20(gameRoom.erc20Address).transfer(
+                    gameRoom.player1,
+                    profit * 2
+                );
+            } else {
+                payable(gameRoom.player1).transfer(profit);
+            }
+        } else if (gameResult == 1) {
+            if (gameRoom.erc20Address != address(0)) {
+                IERC20(gameRoom.erc20Address).transfer(
+                    gameRoom.player2,
+                    profit * 2
+                );
+            } else {
+                payable(gameRoom.player2).transfer(profit);
+            }
+        } else if (gameResult == 2) {
+            if (gameRoom.erc20Address != address(0)) {
+                IERC20(gameRoom.erc20Address).transfer(
+                    gameRoom.player1,
+                    profit
+                );
+                IERC20(gameRoom.erc20Address).transfer(
+                    gameRoom.player2,
+                    profit
+                );
+            } else {
+                payable(gameRoom.player1).transfer(profit);
+                payable(gameRoom.player2).transfer(profit);
+            }
+        }
+
+        playerState[gameRoom.player1] = 0;
+        playerState[gameRoom.player2] = 0;
+        gameRoom.isClosed = true;
+
+        emit GameEnded(roomId);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.9;
+
+import "@openzeppelin/contracts/utils/Counters.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
+
+/**
+@title Common functionality for all marketplace contracts
+ */
+abstract contract GameTools is Ownable, Pausable {
+    AggregatorV3Interface internal _BnbToUsdPriceFeed;
+    using Counters for Counters.Counter;
+    using ERC165Checker for address;
+
+    // Game playing status of a player
+    mapping(address => uint256) internal playerState;
+    Counters.Counter internal _roomIds;
+
+    // List of ERC20 token addresses which are allowed to be used
+    mapping(address => bool) public whitelistedERC20;
+
+    mapping(address => uint256) public stakedAmount;
+
+    event staked(address sender, uint256 amount);
+
+    /**
+     * @dev Initializes the contract
+     * @param erc20TokenAddresses List of ERC20 tokens to be whitelisted initially
+     */
+    constructor(address[] memory erc20TokenAddresses) {
+        for (uint256 i = 0; i < erc20TokenAddresses.length; i++) {
+            whitelistedERC20[erc20TokenAddresses[i]] = true;
+        }
+        _BnbToUsdPriceFeed = AggregatorV3Interface(
+            0x2514895c72f50D8bd4B4F9b1110F0D6bD2c97526
+        );
+    }
+
+    /**
+     * @dev whiteListedToken modifier
+     * @param erc20Address token address
+     */
+    modifier whiteListedToken(address erc20Address) {
+        require(
+            whitelistedERC20[erc20Address] || erc20Address == address(0),
+            "Invalid price token"
+        );
+        _;
+    }
+
+    /**
+     * @dev validRoomId modifier
+     * @param roomId Id of game room
+     */
+    modifier validRoomId(uint256 roomId) {
+        require(
+            roomId <= _roomIds.current() && roomId > 0,
+            "Game room does not exist"
+        );
+        _;
+    }
+
+    /**
+     * @dev Returns the latest BNB to USD price
+     */
+    function getBnbToUsdPrice() internal view returns (int256) {
+        (, int256 price, , , ) = _BnbToUsdPriceFeed.latestRoundData();
+        return price;
+    }
+
+    /**
+     * @dev Returns the price decimals
+     */
+    function getBnbToUsdDecimals() internal view returns (uint8) {
+        return _BnbToUsdPriceFeed.decimals();
+    }
+
+    /**
+     * @dev Returns the latest USD to BNB price
+     */
+    function getUsdToBnbPrice(uint256 usdAmount) public view returns (uint256) {
+        uint256 _BnbToUsdPrice = uint256(getBnbToUsdPrice());
+        uint8 _BnbToUsdDecimals = getBnbToUsdDecimals();
+        return (usdAmount * 10**(18 + _BnbToUsdDecimals)) / _BnbToUsdPrice;
+    }
+
+    function stake() public payable {
+        require(msg.value > 0, "The amount should be more than 0.");
+        stakedAmount[msg.sender] += msg.value;
+        emit staked(msg.sender, msg.value);
+    }
+
+    /**
+     * @dev Adds an ERC20 token to the whitelist
+     * @param erc20TokenAddress The address of the token
+     */
+    function addToWhitelist(address erc20TokenAddress) public onlyOwner {
+        whitelistedERC20[erc20TokenAddress] = true;
+    }
+
+    /**
+     * @dev Removes an ERC20 token from the whitelist
+     * @param erc20TokenAddress The address of the token
+     */
+    function removeFromWhitelist(address erc20TokenAddress) public onlyOwner {
+        whitelistedERC20[erc20TokenAddress] = false;
+    }
+
+    /**
+     * @dev Gets the latest listingId used in the contract
+     * @return uint256 listingId
+     */
+    function getLatestRoomId() public view returns (uint256) {
+        return _roomIds.current();
+    }
+
+    /**
+     * @dev Returns the price after the given percentage has been deducted
+     * @param price The original price
+     * @param percent How big percentage should be deducted
+     */
+    function getPriceAfterPercent(uint256 price, uint256 percent)
+        public
+        pure
+        returns (uint256)
+    {
+        uint256 _percent = percent;
+        return (price * _percent) / 100;
+    }
+
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (security/ReentrancyGuard.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Contract module that helps prevent reentrant calls to a function.
+ *
+ * Inheriting from `ReentrancyGuard` will make the {nonReentrant} modifier
+ * available, which can be applied to functions to make sure there are no nested
+ * (reentrant) calls to them.
+ *
+ * Note that because there is a single `nonReentrant` guard, functions marked as
+ * `nonReentrant` may not call one another. This can be worked around by making
+ * those functions `private`, and then adding `external` `nonReentrant` entry
+ * points to them.
+ *
+ * TIP: If you would like to learn more about reentrancy and alternative ways
+ * to protect against it, check out our blog post
+ * https://blog.openzeppelin.com/reentrancy-after-istanbul/[Reentrancy After Istanbul].
+ */
+abstract contract ReentrancyGuard {
+    // Booleans are more expensive than uint256 or any type that takes up a full
+    // word because each write operation emits an extra SLOAD to first read the
+    // slot's contents, replace the bits taken up by the boolean, and then write
+    // back. This is the compiler's defense against contract upgrades and
+    // pointer aliasing, and it cannot be disabled.
+
+    // The values being non-zero value makes deployment a bit more expensive,
+    // but in exchange the refund on every call to nonReentrant will be lower in
+    // amount. Since refunds are capped to a percentage of the total
+    // transaction's gas, it is best to keep them low in cases like this one, to
+    // increase the likelihood of the full refund coming into effect.
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
+
+    uint256 private _status;
+
+    constructor() {
+        _status = _NOT_ENTERED;
+    }
+
+    /**
+     * @dev Prevents a contract from calling itself, directly or indirectly.
+     * Calling a `nonReentrant` function from another `nonReentrant`
+     * function is not supported. It is possible to prevent this from happening
+     * by making the `nonReentrant` function external, and making it call a
+     * `private` function that does the actual work.
+     */
+    modifier nonReentrant() {
+        // On the first call to nonReentrant, _notEntered will be true
+        require(_status != _ENTERED, "ReentrancyGuard: reentrant call");
+
+        // Any calls to nonReentrant after this point will fail
+        _status = _ENTERED;
+
+        _;
+
+        // By storing the original value once again, a refund is triggered (see
+        // https://eips.ethereum.org/EIPS/eip-2200)
+        _status = _NOT_ENTERED;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Counters.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @title Counters
+ * @author Matt Condon (@shrugs)
+ * @dev Provides counters that can only be incremented, decremented or reset. This can be used e.g. to track the number
+ * of elements in a mapping, issuing ERC721 ids, or counting request ids.
+ *
+ * Include with `using Counters for Counters.Counter;`
+ */
+library Counters {
+    struct Counter {
+        // This variable should never be directly accessed by users of the library: interactions must be restricted to
+        // the library's function. As of Solidity v0.5.2, this cannot be enforced, though there is a proposal to add
+        // this feature: see https://github.com/ethereum/solidity/issues/4637
+        uint256 _value; // default: 0
+    }
+
+    function current(Counter storage counter) internal view returns (uint256) {
+        return counter._value;
+    }
+
+    function increment(Counter storage counter) internal {
+        unchecked {
+            counter._value += 1;
+        }
+    }
+
+    function decrement(Counter storage counter) internal {
+        uint256 value = counter._value;
+        require(value > 0, "Counter: decrement overflow");
+        unchecked {
+            counter._value = value - 1;
+        }
+    }
+
+    function reset(Counter storage counter) internal {
+        counter._value = 0;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (access/Ownable.sol)
+
+pragma solidity ^0.8.0;
+
+import "../utils/Context.sol";
+
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owner.
+     */
+    constructor() {
+        _transferOwnership(_msgSender());
+    }
+
+    /**
+     * @dev Throws if called by any account other than the owner.
+     */
+    modifier onlyOwner() {
+        _checkOwner();
+        _;
+    }
+
+    /**
+     * @dev Returns the address of the current owner.
+     */
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    /**
+     * @dev Throws if the sender is not the owner.
+     */
+    function _checkOwner() internal view virtual {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+    }
+
+    /**
+     * @dev Leaves the contract without owner. It will not be possible to call
+     * `onlyOwner` functions anymore. Can only be called by the current owner.
+     *
+     * NOTE: Renouncing ownership will leave the contract without an owner,
+     * thereby removing any functionality that is only available to the owner.
+     */
+    function renounceOwnership() public virtual onlyOwner {
+        _transferOwnership(address(0));
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Can only be called by the current owner.
+     */
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _transferOwnership(newOwner);
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Internal function without access restriction.
+     */
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (security/Pausable.sol)
+
+pragma solidity ^0.8.0;
+
+import "../utils/Context.sol";
+
+/**
+ * @dev Contract module which allows children to implement an emergency stop
+ * mechanism that can be triggered by an authorized account.
+ *
+ * This module is used through inheritance. It will make available the
+ * modifiers `whenNotPaused` and `whenPaused`, which can be applied to
+ * the functions of your contract. Note that they will not be pausable by
+ * simply including this module, only once the modifiers are put in place.
+ */
+abstract contract Pausable is Context {
+    /**
+     * @dev Emitted when the pause is triggered by `account`.
+     */
+    event Paused(address account);
+
+    /**
+     * @dev Emitted when the pause is lifted by `account`.
+     */
+    event Unpaused(address account);
+
+    bool private _paused;
+
+    /**
+     * @dev Initializes the contract in unpaused state.
+     */
+    constructor() {
+        _paused = false;
+    }
+
+    /**
+     * @dev Modifier to make a function callable only when the contract is not paused.
+     *
+     * Requirements:
+     *
+     * - The contract must not be paused.
+     */
+    modifier whenNotPaused() {
+        _requireNotPaused();
+        _;
+    }
+
+    /**
+     * @dev Modifier to make a function callable only when the contract is paused.
+     *
+     * Requirements:
+     *
+     * - The contract must be paused.
+     */
+    modifier whenPaused() {
+        _requirePaused();
+        _;
+    }
+
+    /**
+     * @dev Returns true if the contract is paused, and false otherwise.
+     */
+    function paused() public view virtual returns (bool) {
+        return _paused;
+    }
+
+    /**
+     * @dev Throws if the contract is paused.
+     */
+    function _requireNotPaused() internal view virtual {
+        require(!paused(), "Pausable: paused");
+    }
+
+    /**
+     * @dev Throws if the contract is not paused.
+     */
+    function _requirePaused() internal view virtual {
+        require(paused(), "Pausable: not paused");
+    }
+
+    /**
+     * @dev Triggers stopped state.
+     *
+     * Requirements:
+     *
+     * - The contract must not be paused.
+     */
+    function _pause() internal virtual whenNotPaused {
+        _paused = true;
+        emit Paused(_msgSender());
+    }
+
+    /**
+     * @dev Returns to normal state.
+     *
+     * Requirements:
+     *
+     * - The contract must be paused.
+     */
+    function _unpause() internal virtual whenPaused {
+        _paused = false;
+        emit Unpaused(_msgSender());
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.2) (utils/introspection/ERC165Checker.sol)
+
+pragma solidity ^0.8.0;
+
+import "./IERC165.sol";
+
+/**
+ * @dev Library used to query support of an interface declared via {IERC165}.
+ *
+ * Note that these functions return the actual result of the query: they do not
+ * `revert` if an interface is not supported. It is up to the caller to decide
+ * what to do in these cases.
+ */
+library ERC165Checker {
+    // As per the EIP-165 spec, no interface should ever match 0xffffffff
+    bytes4 private constant _INTERFACE_ID_INVALID = 0xffffffff;
+
+    /**
+     * @dev Returns true if `account` supports the {IERC165} interface,
+     */
+    function supportsERC165(address account) internal view returns (bool) {
+        // Any contract that implements ERC165 must explicitly indicate support of
+        // InterfaceId_ERC165 and explicitly indicate non-support of InterfaceId_Invalid
+        return
+            _supportsERC165Interface(account, type(IERC165).interfaceId) &&
+            !_supportsERC165Interface(account, _INTERFACE_ID_INVALID);
+    }
+
+    /**
+     * @dev Returns true if `account` supports the interface defined by
+     * `interfaceId`. Support for {IERC165} itself is queried automatically.
+     *
+     * See {IERC165-supportsInterface}.
+     */
+    function supportsInterface(address account, bytes4 interfaceId) internal view returns (bool) {
+        // query support of both ERC165 as per the spec and support of _interfaceId
+        return supportsERC165(account) && _supportsERC165Interface(account, interfaceId);
+    }
+
+    /**
+     * @dev Returns a boolean array where each value corresponds to the
+     * interfaces passed in and whether they're supported or not. This allows
+     * you to batch check interfaces for a contract where your expectation
+     * is that some interfaces may not be supported.
+     *
+     * See {IERC165-supportsInterface}.
+     *
+     * _Available since v3.4._
+     */
+    function getSupportedInterfaces(address account, bytes4[] memory interfaceIds)
+        internal
+        view
+        returns (bool[] memory)
+    {
+        // an array of booleans corresponding to interfaceIds and whether they're supported or not
+        bool[] memory interfaceIdsSupported = new bool[](interfaceIds.length);
+
+        // query support of ERC165 itself
+        if (supportsERC165(account)) {
+            // query support of each interface in interfaceIds
+            for (uint256 i = 0; i < interfaceIds.length; i++) {
+                interfaceIdsSupported[i] = _supportsERC165Interface(account, interfaceIds[i]);
+            }
+        }
+
+        return interfaceIdsSupported;
+    }
+
+    /**
+     * @dev Returns true if `account` supports all the interfaces defined in
+     * `interfaceIds`. Support for {IERC165} itself is queried automatically.
+     *
+     * Batch-querying can lead to gas savings by skipping repeated checks for
+     * {IERC165} support.
+     *
+     * See {IERC165-supportsInterface}.
+     */
+    function supportsAllInterfaces(address account, bytes4[] memory interfaceIds) internal view returns (bool) {
+        // query support of ERC165 itself
+        if (!supportsERC165(account)) {
+            return false;
+        }
+
+        // query support of each interface in _interfaceIds
+        for (uint256 i = 0; i < interfaceIds.length; i++) {
+            if (!_supportsERC165Interface(account, interfaceIds[i])) {
+                return false;
+            }
+        }
+
+        // all interfaces supported
+        return true;
+    }
+
+    /**
+     * @notice Query if a contract implements an interface, does not check ERC165 support
+     * @param account The address of the contract to query for support of an interface
+     * @param interfaceId The interface identifier, as specified in ERC-165
+     * @return true if the contract at account indicates support of the interface with
+     * identifier interfaceId, false otherwise
+     * @dev Assumes that account contains a contract that supports ERC165, otherwise
+     * the behavior of this method is undefined. This precondition can be checked
+     * with {supportsERC165}.
+     * Interface identification is specified in ERC-165.
+     */
+    function _supportsERC165Interface(address account, bytes4 interfaceId) private view returns (bool) {
+        // prepare call
+        bytes memory encodedParams = abi.encodeWithSelector(IERC165.supportsInterface.selector, interfaceId);
+
+        // perform static call
+        bool success;
+        uint256 returnSize;
+        uint256 returnValue;
+        assembly {
+            success := staticcall(30000, account, add(encodedParams, 0x20), mload(encodedParams), 0x00, 0x20)
+            returnSize := returndatasize()
+            returnValue := mload(0x00)
+        }
+
+        return success && returnSize >= 0x20 && returnValue > 0;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.6.0) (token/ERC20/IERC20.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20 {
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `to`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `from` to `to` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+}
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+interface AggregatorV3Interface {
+  function decimals() external view returns (uint8);
+
+  function description() external view returns (string memory);
+
+  function version() external view returns (uint256);
+
+  function getRoundData(uint80 _roundId)
+    external
+    view
+    returns (
+      uint80 roundId,
+      int256 answer,
+      uint256 startedAt,
+      uint256 updatedAt,
+      uint80 answeredInRound
+    );
+
+  function latestRoundData()
+    external
+    view
+    returns (
+      uint80 roundId,
+      int256 answer,
+      uint256 startedAt,
+      uint256 updatedAt,
+      uint80 answeredInRound
+    );
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/introspection/IERC165.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC165 standard, as defined in the
+ * https://eips.ethereum.org/EIPS/eip-165[EIP].
+ *
+ * Implementers can declare support of contract interfaces, which can then be
+ * queried by others ({ERC165Checker}).
+ *
+ * For an implementation, see {ERC165}.
+ */
+interface IERC165 {
+    /**
+     * @dev Returns true if this contract implements the interface defined by
+     * `interfaceId`. See the corresponding
+     * https://eips.ethereum.org/EIPS/eip-165#how-interfaces-are-identified[EIP section]
+     * to learn more about how these ids are created.
+     *
+     * This function call must use less than 30 000 gas.
+     */
+    function supportsInterface(bytes4 interfaceId) external view returns (bool);
+}
