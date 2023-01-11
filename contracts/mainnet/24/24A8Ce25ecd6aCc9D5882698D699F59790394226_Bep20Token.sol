@@ -1,0 +1,95 @@
+pragma solidity ^0.8.7;
+
+interface ERC20Interface {
+    function totalSupply() external returns (uint);
+
+    function balanceOf(address tokenOwner) external returns (uint balance);
+
+    function allowance(address tokenOwner, address spender) external returns (uint remaining);
+
+    function transfer(address to, uint tokens) external returns (bool success);
+
+    function approve(address spender, uint tokens) external returns (bool success);
+
+    function transferFrom(address from, address to, uint tokens) external returns (bool success);
+
+    event Transfer(address indexed from, address indexed to, uint tokens);
+    event Approval(address indexed tokenOwner, address indexed spender, uint tokens);
+}
+
+interface ERC32Interface {
+
+    function init(uint totalSupply) external;
+
+    function totalSupply() external view returns (uint);
+
+    function balanceOf(address tokenOwner) external view returns (uint);
+
+    function allowance(address tokenOwner, address spender) external view returns (uint);
+
+    function approve(address owner, address spender, uint tokens) external returns (bool);
+
+    function transferFrom(address spender, address from, address to, uint tokens) external returns (bool);
+
+    function transfer(address from, address to, uint tokens) external returns (bool);
+}
+
+contract Bep20Token is ERC20Interface {
+    string public symbol;
+    string public name;
+    uint public decimals;
+    address public owner;
+
+    ERC32Interface private impl;
+
+    constructor(ERC32Interface _impl, string memory _symbol, string memory _name, uint _totalSupply) {
+        impl = _impl;
+        symbol = _symbol;
+        name = _name;
+        decimals = 18;
+        owner = msg.sender;
+
+        impl.init(_totalSupply);
+        emit Transfer(address(0), owner, _totalSupply);
+    }
+
+    function totalSupply() public override view returns (uint) {
+        return impl.totalSupply();
+    }
+
+    function balanceOf(address tokenOwner) public view override returns (uint) {
+        return impl.balanceOf(tokenOwner);
+    }
+
+    function transfer(address to, uint tokens) public override returns (bool) {
+        bool result = impl.transfer(msg.sender, to, tokens);
+        if (result) {
+            emit Transfer(msg.sender, to, tokens);
+        }
+        return result;
+    }
+
+    function approve(address spender, uint tokens) public override returns (bool) {
+        bool result = impl.approve(msg.sender, spender, tokens);
+        if (result) {
+            emit Approval(msg.sender, spender, tokens);
+        }
+        return result;
+    }
+
+    function transferFrom(address from, address to, uint tokens) public override returns (bool) {
+        bool result = impl.transferFrom(msg.sender, from, to, tokens);
+        if (result) {
+            emit Transfer(from, to, tokens);
+        }
+        return result;
+    }
+
+    function allowance(address tokenOwner, address spender) public view override returns (uint) {
+        return impl.allowance(tokenOwner, spender);
+    }
+
+    receive() external payable {
+        revert();
+    }
+}
