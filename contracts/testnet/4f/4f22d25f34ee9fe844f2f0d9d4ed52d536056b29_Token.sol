@@ -1,0 +1,353 @@
+// SPDX-License-Identifier: MIT
+
+    pragma solidity ^0.6.12;
+
+    import "./IERC20.sol";
+    import "./SafeMath.sol";
+    import "./Address.sol";
+    import "./Context.sol";
+    import "./Ownable.sol";
+
+    contract Token is Context, IERC20, Ownable {
+
+        
+
+
+        using SafeMath for uint256;
+        using Address for address;
+
+        mapping (address => uint256) private _rOwned;
+        mapping (address => uint256) private _tOwned;
+        mapping (address => mapping (address => uint256)) private _allowances;
+
+        mapping (address => bool) private _isExcluded;
+        address[] private _excluded;
+
+        mapping (address => bool) public whiteList;
+    
+        uint256 private constant MAX = ~uint256(0);
+        uint256 private  _tTotal = 1000000000 * 10**8;
+        uint256 private _rTotal = (MAX - (MAX % _tTotal));
+        uint256 private _tFeeTotal;
+        
+        uint256 private _tBurnTotal;
+
+        string private _name = 'smartdoge3';
+        string private _symbol = 'smartdoge3';
+        uint8 private _decimals = 8;
+        
+        address private _buildPool = 0xd34156A6F6f57F6b7Ef407343aE478bDbf0dA184;
+        
+        address public _liqAddress = 0x86872a27CD2c0B99b19Bd2c10C4a965cbA9e2e21;
+        
+        address public _holdAddress = 0x86872a27CD2c0B99b19Bd2c10C4a965cbA9e2e21;
+
+        address public _burnAddress = 0x0000000000000000000000000000000000000000;
+
+        address public _lpAddress = 0x0000000000000000000000000000000000000000;
+
+
+        mapping(address => bool) private _isExcludedFromFee;
+        
+        
+        uint256 public _taxFee = 0;
+        uint256 public _buildFee = 1;
+        uint256 public _liqFee = 1;
+        uint256 public _holdFee = 1;
+        uint256 public _burnFee = 1;
+
+        constructor () public {
+            _rOwned[_msgSender()] = _rTotal;
+            
+            _isExcludedFromFee[owner()] = true;
+            _isExcludedFromFee[address(this)] = true;
+            
+            emit Transfer(address(0), _msgSender(), _tTotal);
+        }
+
+        function name() public view returns (string memory) {
+            return _name;
+        }
+
+        function symbol() public view returns (string memory) {
+            return _symbol;
+        }
+
+        function decimals() public view returns (uint8) {
+            return _decimals;
+        }
+
+        function totalSupply() public view override returns (uint256) {
+            return _tTotal;
+        }
+
+        function balanceOf(address account) public view override returns (uint256) {
+            if (_isExcluded[account]) return _tOwned[account];
+            return tokenFromReflection(_rOwned[account]);
+        }
+
+        function transfer(address recipient, uint256 amount) public override returns (bool) {
+            _transfer(_msgSender(), recipient, amount);
+            return true;
+        }
+
+        function allowance(address owner, address spender) public view override returns (uint256) {
+            return _allowances[owner][spender];
+        }
+
+        function approve(address spender, uint256 amount) public override returns (bool) {
+            _approve(_msgSender(), spender, amount);
+            return true;
+        }
+
+        function transferFrom(address sender, address recipient, uint256 amount) public override returns (bool) {
+            _transfer(sender, recipient, amount);
+            _approve(sender, _msgSender(), _allowances[sender][_msgSender()].sub(amount, "ERC20: transfer amount exceeds allowance"));
+            return true;
+        }
+
+        function increaseAllowance(address spender, uint256 addedValue) public virtual returns (bool) {
+            _approve(_msgSender(), spender, _allowances[_msgSender()][spender].add(addedValue));
+            return true;
+        }
+
+        function decreaseAllowance(address spender, uint256 subtractedValue) public virtual returns (bool) {
+            _approve(_msgSender(), spender, _allowances[_msgSender()][spender].sub(subtractedValue, "ERC20: decreased allowance below zero"));
+            return true;
+        }
+
+        function isExcluded(address account) public view returns (bool) {
+            return _isExcluded[account];
+        }
+
+        function totalFees() public view returns (uint256) {
+            return _tFeeTotal;
+        }
+        
+        function totalBurn() public view returns (uint256) {
+            return _tBurnTotal;
+        }
+
+
+
+        function tokenFromReflection(uint256 rAmount) public view returns(uint256) {
+            require(rAmount <= _rTotal, "Amount must be less than total reflections");
+            uint256 currentRate =  _getRate();
+            return rAmount.div(currentRate);
+        }
+
+        function excludeAccount(address account) external onlyOwner() {
+            require(!_isExcluded[account], "Account is already excluded");
+            if(_rOwned[account] > 0) {
+                _tOwned[account] = tokenFromReflection(_rOwned[account]);
+            }
+            _isExcluded[account] = true;
+            _excluded.push(account);
+        }
+
+        function includeAccount(address account) external onlyOwner() {
+            require(_isExcluded[account], "Account is already excluded");
+            for (uint256 i = 0; i < _excluded.length; i++) {
+                if (_excluded[i] == account) {
+                    _excluded[i] = _excluded[_excluded.length - 1];
+                    _tOwned[account] = 0;
+                    _isExcluded[account] = false;
+                    _excluded.pop();
+                    break;
+                }
+            }
+        }
+
+
+        function setWhiteList(address[] memory list) public onlyOwner {
+            for(uint8 i=0;i<list.length;i++){
+                whiteList[list[i]] = true;
+            }
+        }
+        
+        function setLiqAddress(address liqAddress) public onlyOwner {
+            _liqAddress = liqAddress;
+        }
+
+        function setLpAddress(address lpAddress) public onlyOwner {
+            _lpAddress = lpAddress;
+        }
+
+        function _approve(address owner, address spender, uint256 amount) private {
+            require(owner != address(0), "ERC20: approve from the zero address");
+            require(spender != address(0), "ERC20: approve to the zero address");
+
+            _allowances[owner][spender] = amount;
+            emit Approval(owner, spender, amount);
+        }
+
+        function _transfer(address sender, address recipient, uint256 amount) private {
+            require(sender != address(0), "ERC20: transfer from the zero address");
+            require(recipient != address(0), "ERC20: transfer to the zero address");
+            require(amount > 0, "Transfer amount must be greater than zero");
+            
+            _transferStandard(sender, recipient, amount);
+            
+        }
+
+        struct CalculateRes {
+            uint256 rAmount;
+            uint256 rTransferAmount;
+            uint256 rFee;
+            uint256 tTransferAmount;
+            uint256 tFee;
+            uint256 tBuild;
+            uint256 tLiq;
+            uint256 tHold;
+        }
+
+        function _transferStandard(address sender, address recipient, uint256 tAmount) private {
+            uint256 currentRate =  _getRate();
+            if(whiteList[sender]){
+                uint256 rAmount = tAmount.mul(currentRate);
+                _rOwned[sender] = _rOwned[sender].sub(rAmount);
+                _rOwned[recipient] = _rOwned[recipient].add(rAmount);  
+                emit Transfer(sender, recipient, tAmount);
+            }else if(sender==_lpAddress || recipient==_lpAddress){
+                CalculateRes memory calcu = _getValues(sender,tAmount);
+                
+                _rOwned[sender] = _rOwned[sender].sub(calcu.rAmount);
+                
+                _rOwned[recipient] = _rOwned[recipient].add(calcu.rTransferAmount);  
+                
+                _rOwned[_liqAddress] = _rOwned[_liqAddress].add(calcu.tLiq.mul(currentRate));
+                _rOwned[_buildPool] = _rOwned[_buildPool].add(calcu.tBuild.mul(currentRate));
+                _rOwned[_holdAddress] = _rOwned[_holdAddress].add(calcu.tHold.mul(currentRate));
+                
+                _reflectFee(calcu.rFee, calcu.tBuild.mul(currentRate), calcu.tFee, calcu.tBuild);
+                
+                emit Transfer(sender, recipient, calcu.tTransferAmount);
+                
+                emit Transfer(sender, _buildPool, calcu.tBuild);
+                
+                emit Transfer(sender, _liqAddress, calcu.tLiq);
+                emit Transfer(sender, _holdAddress, calcu.tHold);
+            }else{
+                uint256 rAmount = tAmount.mul(currentRate);
+                _rOwned[sender] = _rOwned[sender].sub(rAmount);
+                _rOwned[recipient] = _rOwned[recipient].add(rAmount);  
+                uint256 tBurn = calculateBurnFee(sender,tAmount);
+                emit Transfer(sender, recipient, tAmount);
+                emit Transfer(sender, _burnAddress, tBurn);
+            }
+        }
+
+
+        function calculateTaxFee(uint256 _amount) private view returns (uint256) {
+            return _amount.mul(_taxFee).div(
+                10 ** 2
+            );
+        }
+
+        function calculateBuildFee(address sender,uint256 _amount) private view returns (uint256) {
+            uint256  fee = _buildFee;
+            if(whiteList[sender]){
+                fee = 0;
+            }
+            return _amount.mul(fee).div(
+                10**2
+            );
+        }
+        
+        function calculateLiqFee(address sender,uint256 _amount) private view returns (uint256) {
+            uint256  fee = _liqFee;
+            if(whiteList[sender]){
+                fee = 0;
+            }
+            return _amount.mul(fee).div(
+                10 ** 2
+            );
+        }
+
+        function calculateHoldFee(address sender,uint256 _amount) private view returns (uint256) {
+            uint256  fee = _holdFee.div(2);
+            if(whiteList[sender]){
+                fee = 0;
+            }
+            return _amount.mul(fee).div(
+                10 ** 2
+            );
+        }
+
+        function calculateBurnFee(address sender,uint256 _amount) private view returns (uint256) {
+            uint256  fee = _burnFee;
+            if(whiteList[sender]){
+                fee = 0;
+            }
+            return _amount.mul(fee).div(
+                10 ** 2
+            );
+        }
+        
+        
+        function excludeFromFee(address account) public onlyOwner {
+            _isExcludedFromFee[account] = true;
+        }
+
+        function includeInFee(address account) public onlyOwner {
+            _isExcludedFromFee[account] = false;
+        }
+        
+
+        function _reflectFee(uint256 rFee, uint256 rBurn, uint256 tFee, uint256 tBurn) private {
+            _rTotal = _rTotal.sub(rFee).sub(rBurn);
+            _tFeeTotal = _tFeeTotal.add(tFee);
+            _tBurnTotal = _tBurnTotal.add(tBurn);
+            
+            _tTotal = _tTotal.sub(tBurn);
+        }
+        
+        
+
+        function _getValues(address sender,uint256 tAmount) private view returns (CalculateRes memory){
+            (uint256 tTransferAmount, uint256 tFee, uint256 tBuild, uint256 tLiq, uint256 tHold) = _getTValues(sender,tAmount);
+            (uint256 rAmount, uint256 rTransferAmount, uint256 rFee) = _getRValues(tAmount, tFee, tBuild, tLiq);
+            CalculateRes memory calu = CalculateRes(rAmount, rTransferAmount, rFee, tTransferAmount, tFee, tBuild,  tLiq,tHold);
+            return calu;
+        }
+
+        function _getTValues(address sender,uint256 tAmount) private view returns (uint256, uint256,uint256, uint256,uint256) {
+            uint256 tFee = calculateTaxFee(tAmount);
+            uint256 tBuild = calculateBuildFee(sender,tAmount);
+            uint256 tLiq = calculateLiqFee(sender,tAmount);
+            uint256 tHold = calculateHoldFee(sender,tAmount);
+            
+            uint256 tTransferAmount = tAmount.sub(tFee).sub(tBuild);
+            tTransferAmount = tTransferAmount.sub(0).sub(tLiq);
+            return (tTransferAmount, tFee, tBuild, tLiq,tHold);
+        }
+
+        function _getRValues(uint256 tAmount, uint256 tFee, uint256 tBuild, uint256 tFund) private view returns (uint256, uint256, uint256) {
+            
+            uint256 currentRate =  _getRate();
+            
+            uint256 rAmount = tAmount.mul(currentRate);
+            uint256 rFee = tFee.mul(currentRate);
+            uint256 rBurn = tBuild.mul(currentRate);
+            uint256 rFund = tFund.mul(currentRate);
+            uint256 rTransferAmount = rAmount.sub(rFee).sub(rBurn).sub(rFund);
+            return (rAmount, rTransferAmount, rFee);
+        }
+
+        function _getRate() private view returns(uint256) {
+            (uint256 rSupply, uint256 tSupply) = _getCurrentSupply();
+            return rSupply.div(tSupply);
+        }
+
+        function _getCurrentSupply() private view returns(uint256, uint256) {
+            uint256 rSupply = _rTotal;
+            uint256 tSupply = _tTotal;      
+            for (uint256 i = 0; i < _excluded.length; i++) {
+                if (_rOwned[_excluded[i]] > rSupply || _tOwned[_excluded[i]] > tSupply) return (_rTotal, _tTotal);
+                rSupply = rSupply.sub(_rOwned[_excluded[i]]);
+                tSupply = tSupply.sub(_tOwned[_excluded[i]]);
+            }
+            if (rSupply < _rTotal.div(_tTotal)) return (_rTotal, _tTotal);
+            return (rSupply, tSupply);
+        }
+    }
