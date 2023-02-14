@@ -1,0 +1,1437 @@
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.7.0) (access/Ownable.sol)
+
+pragma solidity ^0.8.0;
+
+import "../utils/Context.sol";
+
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owner.
+     */
+    constructor() {
+        _transferOwnership(_msgSender());
+    }
+
+    /**
+     * @dev Throws if called by any account other than the owner.
+     */
+    modifier onlyOwner() {
+        _checkOwner();
+        _;
+    }
+
+    /**
+     * @dev Returns the address of the current owner.
+     */
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    /**
+     * @dev Throws if the sender is not the owner.
+     */
+    function _checkOwner() internal view virtual {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
+    }
+
+    /**
+     * @dev Leaves the contract without owner. It will not be possible to call
+     * `onlyOwner` functions anymore. Can only be called by the current owner.
+     *
+     * NOTE: Renouncing ownership will leave the contract without an owner,
+     * thereby removing any functionality that is only available to the owner.
+     */
+    function renounceOwnership() public virtual onlyOwner {
+        _transferOwnership(address(0));
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Can only be called by the current owner.
+     */
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _transferOwnership(newOwner);
+    }
+
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Internal function without access restriction.
+     */
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (interfaces/IERC20.sol)
+
+pragma solidity ^0.8.0;
+
+import "../token/ERC20/IERC20.sol";
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.6.0) (token/ERC20/IERC20.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20 {
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `to`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `from` to `to` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.8.0) (utils/Address.sol)
+
+pragma solidity ^0.8.1;
+
+/**
+ * @dev Collection of functions related to the address type
+ */
+library Address {
+    /**
+     * @dev Returns true if `account` is a contract.
+     *
+     * [IMPORTANT]
+     * ====
+     * It is unsafe to assume that an address for which this function returns
+     * false is an externally-owned account (EOA) and not a contract.
+     *
+     * Among others, `isContract` will return false for the following
+     * types of addresses:
+     *
+     *  - an externally-owned account
+     *  - a contract in construction
+     *  - an address where a contract will be created
+     *  - an address where a contract lived, but was destroyed
+     * ====
+     *
+     * [IMPORTANT]
+     * ====
+     * You shouldn't rely on `isContract` to protect against flash loan attacks!
+     *
+     * Preventing calls from contracts is highly discouraged. It breaks composability, breaks support for smart wallets
+     * like Gnosis Safe, and does not provide security since it can be circumvented by calling from a contract
+     * constructor.
+     * ====
+     */
+    function isContract(address account) internal view returns (bool) {
+        // This method relies on extcodesize/address.code.length, which returns 0
+        // for contracts in construction, since the code is only stored at the end
+        // of the constructor execution.
+
+        return account.code.length > 0;
+    }
+
+    /**
+     * @dev Replacement for Solidity's `transfer`: sends `amount` wei to
+     * `recipient`, forwarding all available gas and reverting on errors.
+     *
+     * https://eips.ethereum.org/EIPS/eip-1884[EIP1884] increases the gas cost
+     * of certain opcodes, possibly making contracts go over the 2300 gas limit
+     * imposed by `transfer`, making them unable to receive funds via
+     * `transfer`. {sendValue} removes this limitation.
+     *
+     * https://diligence.consensys.net/posts/2019/09/stop-using-soliditys-transfer-now/[Learn more].
+     *
+     * IMPORTANT: because control is transferred to `recipient`, care must be
+     * taken to not create reentrancy vulnerabilities. Consider using
+     * {ReentrancyGuard} or the
+     * https://solidity.readthedocs.io/en/v0.5.11/security-considerations.html#use-the-checks-effects-interactions-pattern[checks-effects-interactions pattern].
+     */
+    function sendValue(address payable recipient, uint256 amount) internal {
+        require(address(this).balance >= amount, "Address: insufficient balance");
+
+        (bool success, ) = recipient.call{value: amount}("");
+        require(success, "Address: unable to send value, recipient may have reverted");
+    }
+
+    /**
+     * @dev Performs a Solidity function call using a low level `call`. A
+     * plain `call` is an unsafe replacement for a function call: use this
+     * function instead.
+     *
+     * If `target` reverts with a revert reason, it is bubbled up by this
+     * function (like regular Solidity function calls).
+     *
+     * Returns the raw returned data. To convert to the expected return value,
+     * use https://solidity.readthedocs.io/en/latest/units-and-global-variables.html?highlight=abi.decode#abi-encoding-and-decoding-functions[`abi.decode`].
+     *
+     * Requirements:
+     *
+     * - `target` must be a contract.
+     * - calling `target` with `data` must not revert.
+     *
+     * _Available since v3.1._
+     */
+    function functionCall(address target, bytes memory data) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, 0, "Address: low-level call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`], but with
+     * `errorMessage` as a fallback revert reason when `target` reverts.
+     *
+     * _Available since v3.1._
+     */
+    function functionCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, 0, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but also transferring `value` wei to `target`.
+     *
+     * Requirements:
+     *
+     * - the calling contract must have an ETH balance of at least `value`.
+     * - the called Solidity function must be `payable`.
+     *
+     * _Available since v3.1._
+     */
+    function functionCallWithValue(
+        address target,
+        bytes memory data,
+        uint256 value
+    ) internal returns (bytes memory) {
+        return functionCallWithValue(target, data, value, "Address: low-level call with value failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCallWithValue-address-bytes-uint256-}[`functionCallWithValue`], but
+     * with `errorMessage` as a fallback revert reason when `target` reverts.
+     *
+     * _Available since v3.1._
+     */
+    function functionCallWithValue(
+        address target,
+        bytes memory data,
+        uint256 value,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        require(address(this).balance >= value, "Address: insufficient balance for call");
+        (bool success, bytes memory returndata) = target.call{value: value}(data);
+        return verifyCallResultFromTarget(target, success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but performing a static call.
+     *
+     * _Available since v3.3._
+     */
+    function functionStaticCall(address target, bytes memory data) internal view returns (bytes memory) {
+        return functionStaticCall(target, data, "Address: low-level static call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-string-}[`functionCall`],
+     * but performing a static call.
+     *
+     * _Available since v3.3._
+     */
+    function functionStaticCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal view returns (bytes memory) {
+        (bool success, bytes memory returndata) = target.staticcall(data);
+        return verifyCallResultFromTarget(target, success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-}[`functionCall`],
+     * but performing a delegate call.
+     *
+     * _Available since v3.4._
+     */
+    function functionDelegateCall(address target, bytes memory data) internal returns (bytes memory) {
+        return functionDelegateCall(target, data, "Address: low-level delegate call failed");
+    }
+
+    /**
+     * @dev Same as {xref-Address-functionCall-address-bytes-string-}[`functionCall`],
+     * but performing a delegate call.
+     *
+     * _Available since v3.4._
+     */
+    function functionDelegateCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        (bool success, bytes memory returndata) = target.delegatecall(data);
+        return verifyCallResultFromTarget(target, success, returndata, errorMessage);
+    }
+
+    /**
+     * @dev Tool to verify that a low level call to smart-contract was successful, and revert (either by bubbling
+     * the revert reason or using the provided one) in case of unsuccessful call or if target was not a contract.
+     *
+     * _Available since v4.8._
+     */
+    function verifyCallResultFromTarget(
+        address target,
+        bool success,
+        bytes memory returndata,
+        string memory errorMessage
+    ) internal view returns (bytes memory) {
+        if (success) {
+            if (returndata.length == 0) {
+                // only check isContract if the call was successful and the return data is empty
+                // otherwise we already know that it was a contract
+                require(isContract(target), "Address: call to non-contract");
+            }
+            return returndata;
+        } else {
+            _revert(returndata, errorMessage);
+        }
+    }
+
+    /**
+     * @dev Tool to verify that a low level call was successful, and revert if it wasn't, either by bubbling the
+     * revert reason or using the provided one.
+     *
+     * _Available since v4.3._
+     */
+    function verifyCallResult(
+        bool success,
+        bytes memory returndata,
+        string memory errorMessage
+    ) internal pure returns (bytes memory) {
+        if (success) {
+            return returndata;
+        } else {
+            _revert(returndata, errorMessage);
+        }
+    }
+
+    function _revert(bytes memory returndata, string memory errorMessage) private pure {
+        // Look for revert reason and bubble it up if present
+        if (returndata.length > 0) {
+            // The easiest way to bubble the revert reason is using memory via assembly
+            /// @solidity memory-safe-assembly
+            assembly {
+                let returndata_size := mload(returndata)
+                revert(add(32, returndata), returndata_size)
+            }
+        } else {
+            revert(errorMessage);
+        }
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts v4.4.1 (utils/Counters.sol)
+
+pragma solidity ^0.8.0;
+
+/**
+ * @title Counters
+ * @author Matt Condon (@shrugs)
+ * @dev Provides counters that can only be incremented, decremented or reset. This can be used e.g. to track the number
+ * of elements in a mapping, issuing ERC721 ids, or counting request ids.
+ *
+ * Include with `using Counters for Counters.Counter;`
+ */
+library Counters {
+    struct Counter {
+        // This variable should never be directly accessed by users of the library: interactions must be restricted to
+        // the library's function. As of Solidity v0.5.2, this cannot be enforced, though there is a proposal to add
+        // this feature: see https://github.com/ethereum/solidity/issues/4637
+        uint256 _value; // default: 0
+    }
+
+    function current(Counter storage counter) internal view returns (uint256) {
+        return counter._value;
+    }
+
+    function increment(Counter storage counter) internal {
+        unchecked {
+            counter._value += 1;
+        }
+    }
+
+    function decrement(Counter storage counter) internal {
+        uint256 value = counter._value;
+        require(value > 0, "Counter: decrement overflow");
+        unchecked {
+            counter._value = value - 1;
+        }
+    }
+
+    function reset(Counter storage counter) internal {
+        counter._value = 0;
+    }
+}
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.6.0) (utils/math/SafeMath.sol)
+
+pragma solidity ^0.8.0;
+
+// CAUTION
+// This version of SafeMath should only be used with Solidity 0.8 or later,
+// because it relies on the compiler's built in overflow checks.
+
+/**
+ * @dev Wrappers over Solidity's arithmetic operations.
+ *
+ * NOTE: `SafeMath` is generally not needed starting with Solidity 0.8, since the compiler
+ * now has built in overflow checking.
+ */
+library SafeMath {
+    /**
+     * @dev Returns the addition of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryAdd(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            uint256 c = a + b;
+            if (c < a) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function trySub(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b > a) return (false, 0);
+            return (true, a - b);
+        }
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMul(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            // Gas optimization: this is cheaper than requiring 'a' not being zero, but the
+            // benefit is lost if 'b' is also tested.
+            // See: https://github.com/OpenZeppelin/openzeppelin-contracts/pull/522
+            if (a == 0) return (true, 0);
+            uint256 c = a * b;
+            if (c / a != b) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the division of two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryDiv(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a / b);
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMod(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a % b);
+        }
+    }
+
+    /**
+     * @dev Returns the addition of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `+` operator.
+     *
+     * Requirements:
+     *
+     * - Addition cannot overflow.
+     */
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting on
+     * overflow (when the result is negative).
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a - b;
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `*` operator.
+     *
+     * Requirements:
+     *
+     * - Multiplication cannot overflow.
+     */
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a * b;
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator.
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a / b;
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting when dividing by zero.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a % b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting with custom message on
+     * overflow (when the result is negative).
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {trySub}.
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b <= a, errorMessage);
+            return a - b;
+        }
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting with custom message on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator. Note: this function uses a
+     * `revert` opcode (which leaves remaining gas untouched) while Solidity
+     * uses an invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a / b;
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting with custom message when dividing by zero.
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {tryMod}.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a % b;
+        }
+    }
+}
+
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/interfaces/IERC20.sol";
+import "@openzeppelin/contracts/utils/Context.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
+
+// import "./vesting.s
+import "./vesting.sol";
+// interface IToken {
+//     function transfer(address to, uint256 tokens)
+//         external
+//         returns (bool success);
+
+//     function transferFrom(
+//         address from,
+//         address to,
+//         uint256 amount
+//     ) external returns (bool);
+
+//     function burn(uint256 _amount) external;
+
+//     function balanceOf(address tokenOwner)
+//         external
+//         view
+//         returns (uint256 balance);
+
+//     function decimals() external view returns (uint256);
+// }
+
+interface AggregatorV3Interface {
+  function decimals() external view returns (uint8);
+
+  function latestAnswer() external view returns (int256);
+
+  function description() external view returns (string memory);
+
+  function version() external view returns (uint256);
+
+  function getRoundData(uint80 _roundId)
+    external
+    view
+    returns (
+      uint80 roundId,
+      int256 answer,
+      uint256 startedAt,
+      uint256 updatedAt,
+      uint80 answeredInRound
+    );
+
+  function latestRoundData()
+    external
+    view
+    returns (
+      uint80 roundId,
+      int256 answer,
+      uint256 startedAt,
+      uint256 updatedAt,
+      uint80 answeredInRound
+    );
+}
+
+// interface vesting {
+
+    
+//     function createVesting(address _creator,uint8 _roundId,uint256 _tokenAmount) external ;
+    
+//     function setAdmin(address _account) external ;
+
+//     function setTimeUnit(uint256 _unit) external ;
+
+//     function setRoundTokenPrice(uint8 _roundId,uint256 _price) external;
+
+//     function getClaimableAmount(address _walletAddress,uint256 _vestingId) external view returns(uint256);
+
+//     function userClaimData(address _walletAddress,uint256 _vestingId) external view returns(bool ,address ,uint8 ,uint256 ,uint256 ,uint256 ,uint256 ,uint256 ,uint256 ,uint256 );
+
+//     function getVestingIds(address _walletAddress) external view returns(uint256[] memory);
+
+//     function timeUnit() external view returns(uint256);
+
+//     function launchRound(uint8 _roundId, uint256 _vestingStartTime) external;
+
+//     function getIslaunched(uint8 _roundId) external view returns(bool) ;
+
+//     function setRoundData( uint8 _roundId,  uint256 _totalTokensForSale,uint256 _tokenPrice,uint256 _totalvestingDays,uint256 _vestingStartTime,uint256 _vestingSlicePeriod,uint256 _tgePrecentage) external;
+
+//     function roundData(uint8 _roundId) external view returns(bool,uint256,uint256,uint256,uint256,uint256,uint256);  
+
+//     // function updateTotalTokenClaimed(uint8 _roundIds,uint _amount) external ;
+
+
+// }
+
+contract Presale is Ownable {
+    using SafeMath for uint256;
+    event WalletCreated(address walletAddress,address userAddress,uint256 amount);
+    bool public isPresaleOpen = true;
+    address public admin;
+
+    AggregatorV3Interface internal priceFeed;
+
+    address public tokenAddress;
+    uint256 public tokenDecimals;
+
+    //2 means if you want 100 tokens per eth then set the rate as 100 + number of rateDecimals i.e => 10000
+    uint256 public rateDecimals = 3;
+    // uint256 public tokenSold = 0;
+
+    mapping(uint8 => uint256 ) tokenSold ;
+    // bool private allowance = false;
+    uint256 public totalEthAmount = 0;
+    // uint256 public totalDays;
+    // uint256 public timeUnit;
+    // uint256 public sliceDays;
+    // uint256 public buyTokenPercentage = 500;
+
+
+    uint256 public hardcap = 10000*1e18;  // Total Eth Value
+    address private dev;
+    uint256 private MaxValue;
+
+    vestingC vestingAddress;
+
+    //@dev max and min token buy limit per account
+    uint256 public minEthLimit = 1000000000000000;
+    uint256 public maxEthLimit = 2000000000000000000000000;
+
+    // uint256 public ticketRate ;
+
+    mapping(address => uint256) public usersInvestments;
+
+    address public recipient;
+
+    modifier onlyOwnerAndAdmin()   {
+        require(
+            owner() == _msgSender() || _msgSender() == admin,
+            "Ownable: caller is not the owner or admin"
+        );
+        _;
+    }
+
+    constructor(
+        address _token,
+        address _recipient
+    ) {
+        tokenAddress = _token;
+        tokenDecimals = IToken(_token).decimals();
+        recipient = _recipient;
+        
+        priceFeed = AggregatorV3Interface(0x2514895c72f50D8bd4B4F9b1110F0D6bD2c97526);
+        // sliceDays = 3;
+        admin = _msgSender();
+        // totalDays=9;
+        // ticketRate=25;
+    }
+
+    function setAdmin(address account) external  onlyOwnerAndAdmin{
+        require(account != address(0),"Invalid Address, Address should not be zero");
+        admin = account;
+    }
+    
+    // function setRange(uint256 _range) public onlyOwnerAndAdmin{
+    //     totalDays = _range;
+    // }
+
+    function setvestingAddress(vestingC _vestingAddress) external onlyOwnerAndAdmin {
+        vestingAddress = vestingC(_vestingAddress);
+    }
+
+    function setRecipient(address _recipient) external onlyOwnerAndAdmin {
+        recipient = _recipient;
+    }
+
+    // function setTicketRate(uint256 rate) external onlyOwner {
+    //     ticketRate = rate;
+    // }
+
+    function setHardcap(uint256 _hardcap) external onlyOwnerAndAdmin {
+        hardcap = _hardcap;
+    }
+
+    function startPresale() external onlyOwnerAndAdmin {
+        require(!isPresaleOpen, "Presale is open");
+
+        isPresaleOpen = true;
+    }
+
+    function closePresale() external onlyOwnerAndAdmin {
+        require(isPresaleOpen, "Presale is not open yet.");
+
+        isPresaleOpen = false;
+    }
+
+    function setTokenAddress(address token) external onlyOwnerAndAdmin {
+        require(token != address(0), "Token address zero not allowed.");
+        tokenAddress = token;
+        tokenDecimals = IToken(token).decimals();
+    }
+
+    function setTokenDecimals(uint256 decimals) external onlyOwnerAndAdmin {
+        tokenDecimals = decimals;
+    }
+
+    function setMinEthLimit(uint256 amount) external onlyOwnerAndAdmin {
+        minEthLimit = amount.div(100);
+    }
+
+    function setMaxEthLimit(uint256 amount) external onlyOwnerAndAdmin {
+        maxEthLimit = amount;
+    }
+
+    function setRateDecimals(uint256 decimals) external onlyOwnerAndAdmin {
+        rateDecimals = decimals;
+    }
+
+    // function setBuyTokenPercentage(uint _percentage) public  onlyOwnerAndAdmin{
+    //     buyTokenPercentage = _percentage;  
+    // }
+
+    function setAdminForpreSale(address _address) public onlyOwnerAndAdmin{
+        vestingC(vestingAddress).setAdmin(_address);
+    }
+          
+    function setTimeUnit(uint _unit) public onlyOwnerAndAdmin{
+        vestingC(vestingAddress).setTimeUnit(_unit);
+    }
+
+    receive() external payable {}
+
+    function buyToken(uint8 _roundId) public payable  {
+        require(isPresaleOpen, "Presale is not open.");
+        require(!vestingC(vestingAddress).getIslaunched(_roundId),"Already Listed!");
+
+        require(
+            usersInvestments[msg.sender].add(msg.value) <= maxEthLimit &&
+                usersInvestments[msg.sender].add(msg.value) >= minEthLimit,
+            "Installment Invalid."
+        );
+        uint256 tokenAmount = getTokensPerEth(msg.value,_roundId);
+        
+        vestingCreate(tokenAmount,_msgSender(),_roundId);
+
+        tokenSold[_roundId] += tokenAmount;
+
+        usersInvestments[msg.sender] = usersInvestments[msg.sender].add(msg.value);
+
+        totalEthAmount = totalEthAmount + msg.value;
+
+        payable(recipient).transfer(msg.value);
+
+        if (totalEthAmount > hardcap) {
+            isPresaleOpen = false;
+        }
+    }
+
+    function vestingCreate(
+        uint256 tokenAmount,
+        address _userAddress,
+        uint8 _roundId
+    ) private {
+
+        (,,,,,,uint256 _tgePrecentage) = getRoundData(_roundId);
+
+        if(_tgePrecentage > 0) {
+            uint _tgeAmount = (tokenAmount * _tgePrecentage)/(10**(2+rateDecimals));
+        tokenAmount =  tokenAmount - _tgeAmount;
+
+
+        require(IToken(tokenAddress).transfer(_userAddress, _tgeAmount),
+            "Insufficient balance of presale contract!"
+        );
+
+        }
+        // else{
+
+            vestingC(vestingAddress).createVesting(_userAddress,_roundId,tokenAmount);
+            require(IToken(tokenAddress).transfer(address(vestingAddress), tokenAmount),
+                "Insufficient balance of presale contract!"
+            );
+
+        // }
+
+        // uint _tokenAmount = (tokenAmount * buyTokenPercentage)/(10**(2+rateDecimals));
+        // tokenAmount =  tokenAmount - _tokenAmount;
+
+        // vesting(vestingAddress).createVesting(_userAddress,_roundId,tokenAmount);
+        
+        // require(IToken(tokenAddress).transfer(_userAddress, _tokenAmount),
+        //     "Insufficient balance of presale contract!"
+        // );
+
+        // require(IToken(tokenAddress).transfer(address(vestingAddress), tokenAmount),
+        //     "Insufficient balance of presale contract!"
+        // );
+    }
+
+    function createRoundData( 
+        uint8 _roundId,
+        uint256 _totalTokensForSale,
+        uint256 _tokenPrice,
+        uint256 _totalvestingDays,
+        uint256 _vestingStartTime,
+        uint256 _vestingSlicePeriod,
+        uint256 _tgePrecentage
+        ) public {
+            vestingC(vestingAddress).setRoundData(_roundId,_totalTokensForSale,_tokenPrice,_totalvestingDays,_vestingStartTime,_vestingSlicePeriod,_tgePrecentage);
+        }
+
+    function burnUnsoldTokens() external onlyOwnerAndAdmin {
+        require(
+            !isPresaleOpen,
+            "You cannot burn tokens untitl the presale is closed."
+        );
+
+        IToken(tokenAddress).burn(
+            IToken(tokenAddress).balanceOf(address(this))
+        );
+    }
+
+    function getUnsoldTokens(address to) external onlyOwnerAndAdmin {
+        require(
+            !isPresaleOpen,
+            "You cannot get tokens until the presale is closed."
+        );
+
+        IToken(tokenAddress).transfer(to,IToken(tokenAddress).balanceOf(address(this)));
+    
+    }
+
+    function getvestingAddress() external view returns (address){
+        return address(vestingAddress);
+    }
+
+    function getEthPriceInUsd() public view returns(int256) {
+        return (priceFeed.latestAnswer()/1e8);
+    }
+
+    // function getLaunchedAt(uint8 _roundId) public view returns(uint256 ) {
+    //     return(vesting(vestingAddress).getLaunchedAt(_roundId));
+    // }
+// this function has to be internal
+    function getTicketRate(uint8 _roundId) public view returns(uint256) {
+        (,,uint256 tokenprice,,,,) = getRoundData(_roundId);
+        return tokenprice;
+    }
+
+    function getTokensPerEth(uint256 amount,uint8 _roundId) public view returns (uint256) {
+
+        uint _denominator =(getTicketRate(_roundId)*(10**((uint256(18).sub(tokenDecimals))))) ;
+
+        return (((amount.mul(uint(getEthPriceInUsd()))).mul(10**rateDecimals))/ _denominator) ;
+
+        // return ((amount.mul(uint(getEthPriceInUsd()))).mul(10**rateDecimals)/ ticketRate*(10**((uint256(18).sub(tokenDecimals)))));
+        // return ((amount.mul(uint(getEthPriceInUsd()))).mul(10**rateDecimals)/ getTicketRate(_roundId)*(10**((uint256(18).sub(tokenDecimals))))) ;
+        
+    }
+
+    function getVestingId(address _walletAddress) public view returns(uint256[] memory) {
+        return vestingC(vestingAddress).getVestingIds(_walletAddress);        
+    }
+ 
+    function getTimeUnit() public view returns(uint _timeUnit){
+        return vestingC(vestingAddress).timeUnit();
+    }
+
+    // function editListedAt(uint256 _time) public {
+    //     return vesting(vestingAddress).editListedAt(_time);
+
+    // }
+
+    function launchRound(uint8 _roundId, uint256 _vestingStartTime) public onlyOwnerAndAdmin {
+         vestingC(vestingAddress).launchRound(_roundId,_vestingStartTime);
+    }
+
+    function getClaimAmount(address _walletAddress,uint256 _vestingId) public view returns(uint _claimAmount) {
+        return vestingC(vestingAddress).getClaimableAmount(_walletAddress,_vestingId);
+    }
+
+    function getUserVestingData(address _address,uint256 _vestingId) public view returns(
+        
+        bool ,//_initialized,
+        address ,//_owner,
+        uint8 ,//_roundId,
+        uint256 ,//_totalEligible,
+        uint256 ,//_totalClaimed,
+        uint256 ,//_remainingBalTokens,
+        uint256 ,//_lastClaimedAt,
+        uint256 ,//_startTime,
+        uint256 ,//_totalVestingDays,
+        uint256 //_slicePeriod
+        
+        ){
+        // (_initialized,_owner,_totalEligible,_totalClaimed,_remainingBalTokens,_lastClaimedAt,_startTime,_totalVestingDays,_slicePeriod) 
+        // (_initialized,_owner,_roundId,_totalEligible,_totalClaimed,_remainingBalTokens,_lastClaimedAt,_startTime,_totalVestingDays,_slicePeriod)= 
+        return vestingC(vestingAddress).userClaimData(_address,_vestingId);
+        
+    }
+
+    function getTotalTokensForSale(uint8 _roundId) public view returns(uint256 _totalTokensForSale ){
+        (,_totalTokensForSale,,,,,) = getRoundData(_roundId);
+    }
+
+    function getRoundData(uint8 _roundId) public view returns(bool,uint256,uint256,uint256,uint256,uint256,uint256) {
+        return( vestingC(vestingAddress).roundData(_roundId)) ;
+    }
+
+}
+
+//SPDX-License-Identifier: Unlicense
+pragma solidity >=0.8.0;
+
+import "@openzeppelin/contracts/utils/Context.sol";
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts/utils/Counters.sol";
+
+interface IToken {
+    function transfer(address to, uint256 tokens)
+        external
+        returns (bool success);
+
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+
+    function burn(uint256 _amount) external;
+
+    function balanceOf(address tokenOwner)
+        external
+        view
+        returns (uint256 balance);
+
+    function decimals() external view returns (uint256);
+}
+
+contract vestingC {
+    using Counters for Counters.Counter;
+    using SafeMath for uint256;
+
+    struct roundInfo {
+        bool islaunched;
+        // string roundName;
+        uint256 totalTokensForSale;
+        uint256 tokenPrice;
+        // uint256 roundStartDate;
+        // uint256 roundEndDate;
+        uint256 totalvestingDays;
+        uint256 vestingStartTime;
+        // uint256 vestingClaimPrecentage;
+        uint256 vestingSlicePeriod;
+        uint256 tgePrecentage;
+        // uint256 totalSold ;
+    }
+
+    struct claimInfo {
+        bool initialized;
+        address owner;
+        uint8 roundId;
+        uint256 totalEligible;
+        uint256 totalClaimed;
+        uint256 remainingBalTokens;
+        uint256 lastClaimedAt;
+        uint256 startTime;
+        uint256 totalVestingDays;
+        uint256 slicePeriod;
+    }
+
+    mapping(uint8 => roundInfo) public roundData;
+    mapping(address => uint256[]) vestingIds;
+    mapping(address => mapping(uint256 => claimInfo)) public userClaimData;
+
+    address public admin;
+    address public token;
+
+    // uint256 public listedAt;
+    Counters.Counter private _id;
+
+    uint256 public timeUnit;
+
+    modifier onlyAdmin() {
+        require(
+            msg.sender == admin,
+            "Ownable: caller is not the owner or admin"
+        );
+        _;
+    }
+
+    constructor(address _token, address _admin) {
+        admin = _admin;
+        timeUnit = 60;
+        token = _token;
+    }
+
+    function setAdmin(address account) external {
+        require(admin == msg.sender, "caller is not the admin ");
+        require(
+            account != address(0),
+            "Invalid Address, Address should not be zero"
+        );
+        admin = account;
+    }
+
+    function createVesting(
+        address _creator,
+        uint8 _roundId,
+        uint256 _tokenAmount
+    ) public onlyAdmin {
+        _id.increment();
+
+        vestingIds[_creator].push(_id.current());
+
+        userClaimData[_creator][_id.current()] = claimInfo({
+            initialized: true,
+            roundId: _roundId,
+            owner: _creator,
+            totalEligible: _tokenAmount,
+            totalClaimed: 0,
+            remainingBalTokens: _tokenAmount,
+            lastClaimedAt: 0,
+            startTime: 0,
+            totalVestingDays: roundData[_roundId].totalvestingDays,
+            slicePeriod: roundData[_roundId].vestingSlicePeriod
+        });
+    }
+
+    // function setRoundsData(
+    //     uint8[] memory _roundIds,
+    //     string[] memory _roundNames,
+    //     uint256[] memory _totalTokensForSale,
+    //     uint256[] memory _tokenPrice,
+    //     uint256[] memory _roundStartDate,
+    //     uint256[] memory _roundEndDate,
+    //     uint256[] memory _totalvestingDays,
+    //     uint256[] memory _vestingStartTime,
+    //     uint256[] memory _vestingClaimPrecentage,
+    //     uint256[] memory _vestingSlicePeriod,
+    //     uint256[] memory _tgePrecentage
+    // ) public onlyAdmin {
+    //     // require all lenght should be equal
+    //     for (uint256 i = 0; i < _roundIds.length; i++) {
+    //         roundData[_roundIds[i]].islaunched = false;
+    //         roundData[_roundIds[i]].roundName = _roundNames[i];
+    //         roundData[_roundIds[i]].totalTokensForSale = _totalTokensForSale[i];
+    //         roundData[_roundIds[i]].tokenPrice = _tokenPrice[i];
+    //         roundData[_roundIds[i]].roundStartDate = _roundStartDate[i];
+    //         roundData[_roundIds[i]].roundEndDate = _roundEndDate[i];
+    //         roundData[_roundIds[i]].totalvestingDays = _totalvestingDays[i];
+    //         roundData[_roundIds[i]].vestingStartTime = _vestingStartTime[i];
+    //         roundData[_roundIds[i]]
+    //             .vestingClaimPrecentage = _vestingClaimPrecentage[i];
+    //         roundData[_roundIds[i]].vestingSlicePeriod = _vestingSlicePeriod[i];
+    //         roundData[_roundIds[i]].tgePrecentage = _tgePrecentage[i];
+    //     }
+    // }
+
+    function setRoundData(
+        uint8 _roundIds,
+        // string memory _roundNames,
+        uint256 _totalTokensForSale,
+        uint256 _tokenPrice,
+        // uint256 _roundStartDate,
+        // uint256 _roundEndDate,
+        uint256 _totalvestingDays,
+        uint256 _vestingStartTime,
+        // uint256 _vestingClaimPrecentage,
+        uint256 _vestingSlicePeriod,
+        uint256 _tgePrecentage
+    ) public onlyAdmin {
+        roundData[_roundIds].islaunched = false;
+        // roundData[_roundIds].roundName = _roundNames;
+        roundData[_roundIds].totalTokensForSale = _totalTokensForSale;
+        roundData[_roundIds].tokenPrice = _tokenPrice;
+        // roundData[_roundIds].roundStartDate = _roundStartDate;
+        // roundData[_roundIds].roundEndDate = _roundEndDate;
+        roundData[_roundIds].totalvestingDays = _totalvestingDays;
+        roundData[_roundIds].vestingStartTime = _vestingStartTime;
+        // roundData[_roundIds].vestingClaimPrecentage = _vestingClaimPrecentage;
+        roundData[_roundIds].vestingSlicePeriod = _vestingSlicePeriod;
+        roundData[_roundIds].tgePrecentage = _tgePrecentage;
+        // roundData[_roundIds].totalSold = 0;
+    }
+
+    function launchRound(uint8 _roundId, uint256 _vestingStartTime)
+        external
+        onlyAdmin
+    {
+        require(admin == msg.sender, "caller is not the admin ");
+        require(!roundData[_roundId].islaunched, "Already Listed!");
+        roundData[_roundId].vestingStartTime = _vestingStartTime;
+        roundData[_roundId].islaunched = true;
+    }
+
+    function getCurrentTime() internal view virtual returns (uint256) {
+        return block.timestamp;
+    }
+
+    function balance() public view returns (uint256) {
+        return IToken(token).balanceOf(address(this));
+    }
+
+    function setTimeUnit(uint256 _unit) public onlyAdmin {
+        timeUnit = _unit;
+    }
+
+    receive() external payable {}
+
+    //Recover eth accidentally sent to the contract
+    function removeEth(address payable destination) public onlyAdmin {
+        require(
+            destination != address(0),
+            "Invalid Address, Address should not be zero"
+        );
+        destination.transfer(address(this).balance);
+    }
+
+    function removeERC20() public {
+        require(admin == msg.sender, "caller is not the admin ");
+        IToken(token).transfer(admin, IToken(token).balanceOf(address(this)));
+    }
+
+    ///////////////////////////////////////////////////////////////////////////////
+
+    function getLaunchedAt(uint8 _roundId) public view returns (uint256) {
+        return (roundData[_roundId].vestingStartTime);
+    }
+
+    function getClaimableAmount(address _walletAddress, uint256 _vestingId)
+        public
+        view
+        returns (uint256 _claimAmount)
+    {
+        claimInfo storage userData = userClaimData[_walletAddress][_vestingId];
+
+        uint8 _roundId = userData.roundId;
+        if (roundData[_roundId].islaunched == false) {
+            return 0;
+        }
+
+        uint256 timeLeft = 0;
+        uint256 slicePeriodSeconds = userData.slicePeriod * timeUnit;
+        uint256 claimAmount = 0;
+        uint256 _amount = 0;
+
+        uint256 currentTime = getCurrentTime();
+        uint256 totalEligible = userData.totalEligible;
+        uint256 lastClaimedAt = userData.lastClaimedAt;
+        if (roundData[_roundId].islaunched && lastClaimedAt == 0) {
+            if (currentTime > getLaunchedAt(_roundId)) {
+                timeLeft = currentTime.sub(getLaunchedAt(_roundId));
+            } else {
+                timeLeft = getLaunchedAt(_roundId).sub(currentTime);
+            }
+        } else {
+            if (currentTime > lastClaimedAt) {
+                timeLeft = currentTime.sub(lastClaimedAt);
+            } else {
+                timeLeft = lastClaimedAt.sub(currentTime);
+            }
+        }
+        _amount = totalEligible;
+
+        if (timeLeft / slicePeriodSeconds > 0) {
+            claimAmount =
+                ((_amount * userData.slicePeriod) / userData.totalVestingDays) *
+                (timeLeft / slicePeriodSeconds);
+        }
+
+        uint256 _lastReleaseAmount = userData.totalClaimed;
+
+        uint256 temp = _lastReleaseAmount.add(claimAmount);
+
+        if (temp > totalEligible) {
+            _amount = totalEligible.sub(_lastReleaseAmount);
+            return (_amount);
+        }
+        return (claimAmount);
+    }
+
+    function getIslaunched(uint8 _roundId) external view returns(bool) {
+        return roundData[_roundId].islaunched ;
+    }
+
+    function claim(address _walletAddress, uint256 _vestingId) public {
+
+        claimInfo storage userData = userClaimData[_walletAddress][_vestingId];
+        uint8 _roundId = userData.roundId;
+        require(roundData[_roundId].islaunched, "Not yet launched");
+        require( getClaimableAmount(_walletAddress, _vestingId) > 0, "Insufficient funds to claims." );
+        require(msg.sender == userData.owner, "You are not the owner");
+        uint256 _amount = getClaimableAmount(_walletAddress, _vestingId);
+        userData.totalClaimed += _amount;
+        userData.remainingBalTokens = userData.totalEligible - userData.totalClaimed;
+        userData.lastClaimedAt = getCurrentTime();
+        IToken(token).transfer(_walletAddress, _amount);
+        
+    }
+
+    function getVestingIds(address _walletAddress) public view returns(uint256[] memory) {
+        return vestingIds[_walletAddress];
+    }
+
+    // function updateTotalTokenSold(uint8 _roundIds,uint256 _amount) external onlyAdmin {
+    //     roundData[_roundIds].totalSold += _amount ;
+    // }
+
+    function getRoundData(uint8 _roundId) external view returns(bool,uint256,uint256,uint256,uint256,uint256,uint256){
+       
+        return(roundData[_roundId].islaunched,roundData[_roundId].totalTokensForSale,
+        roundData[_roundId].tokenPrice,
+        roundData[_roundId].totalvestingDays,
+        roundData[_roundId].vestingStartTime,
+        roundData[_roundId].vestingSlicePeriod,
+        roundData[_roundId].tgePrecentage
+        );
+    }
+
+}
