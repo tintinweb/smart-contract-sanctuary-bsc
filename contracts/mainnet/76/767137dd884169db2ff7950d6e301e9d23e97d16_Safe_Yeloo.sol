@@ -1,0 +1,533 @@
+/**
+ *Submitted for verification at BscScan.com on 2023-03-01
+*/
+
+// File: @openzeppelin/contracts/utils/math/SafeMath.sol
+
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v4.6.0) (utils/math/SafeMath.sol)
+
+pragma solidity ^0.8.0;
+
+// CAUTION
+// This version of SafeMath should only be used with Solidity 0.8 or later,
+// because it relies on the compiler's built in overflow checks.
+
+/**
+ * @dev Wrappers over Solidity's arithmetic operations.
+ *
+ * NOTE: `SafeMath` is generally not needed starting with Solidity 0.8, since the compiler
+ * now has built in overflow checking.
+ */
+library SafeMath {
+    /**
+     * @dev Returns the addition of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryAdd(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            uint256 c = a + b;
+            if (c < a) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function trySub(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b > a) return (false, 0);
+            return (true, a - b);
+        }
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, with an overflow flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMul(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            // Gas optimization: this is cheaper than requiring 'a' not being zero, but the
+            // benefit is lost if 'b' is also tested.
+            // See: https://github.com/OpenZeppelin/openzeppelin-contracts/pull/522
+            if (a == 0) return (true, 0);
+            uint256 c = a * b;
+            if (c / a != b) return (false, 0);
+            return (true, c);
+        }
+    }
+
+    /**
+     * @dev Returns the division of two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryDiv(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a / b);
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers, with a division by zero flag.
+     *
+     * _Available since v3.4._
+     */
+    function tryMod(uint256 a, uint256 b) internal pure returns (bool, uint256) {
+        unchecked {
+            if (b == 0) return (false, 0);
+            return (true, a % b);
+        }
+    }
+
+    /**
+     * @dev Returns the addition of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `+` operator.
+     *
+     * Requirements:
+     *
+     * - Addition cannot overflow.
+     */
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting on
+     * overflow (when the result is negative).
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a - b;
+    }
+
+    /**
+     * @dev Returns the multiplication of two unsigned integers, reverting on
+     * overflow.
+     *
+     * Counterpart to Solidity's `*` operator.
+     *
+     * Requirements:
+     *
+     * - Multiplication cannot overflow.
+     */
+    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a * b;
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator.
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a / b;
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting when dividing by zero.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a % b;
+    }
+
+    /**
+     * @dev Returns the subtraction of two unsigned integers, reverting with custom message on
+     * overflow (when the result is negative).
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {trySub}.
+     *
+     * Counterpart to Solidity's `-` operator.
+     *
+     * Requirements:
+     *
+     * - Subtraction cannot overflow.
+     */
+    function sub(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b <= a, errorMessage);
+            return a - b;
+        }
+    }
+
+    /**
+     * @dev Returns the integer division of two unsigned integers, reverting with custom message on
+     * division by zero. The result is rounded towards zero.
+     *
+     * Counterpart to Solidity's `/` operator. Note: this function uses a
+     * `revert` opcode (which leaves remaining gas untouched) while Solidity
+     * uses an invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function div(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a / b;
+        }
+    }
+
+    /**
+     * @dev Returns the remainder of dividing two unsigned integers. (unsigned integer modulo),
+     * reverting with custom message when dividing by zero.
+     *
+     * CAUTION: This function is deprecated because it requires allocating memory for the error
+     * message unnecessarily. For custom revert reasons use {tryMod}.
+     *
+     * Counterpart to Solidity's `%` operator. This function uses a `revert`
+     * opcode (which leaves remaining gas untouched) while Solidity uses an
+     * invalid opcode to revert (consuming all remaining gas).
+     *
+     * Requirements:
+     *
+     * - The divisor cannot be zero.
+     */
+    function mod(
+        uint256 a,
+        uint256 b,
+        string memory errorMessage
+    ) internal pure returns (uint256) {
+        unchecked {
+            require(b > 0, errorMessage);
+            return a % b;
+        }
+    }
+}
+
+// File: @openzeppelin/contracts/token/ERC20/IERC20.sol
+
+pragma solidity ^0.8.0;
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20 {
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `to`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `from` to `to` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+}
+
+// File: contracts/safe.sol
+pragma solidity ^0.8.17;
+
+
+struct Slots {
+    address receiver;
+    uint amount;
+    uint commission;
+    bool isTransfer;
+    bool exist;
+}
+
+contract Safe_Yeloo {
+
+    mapping (address => mapping (uint => Slots)) public safes;
+
+    address public admin;
+    address public receiverComission;
+    address public controller_oracle;
+
+    uint public decimalsComission;
+
+    IERC20 public ERC20;
+
+    using SafeMath for uint;
+
+    modifier onlyAdmin {
+        require(admin == msg.sender, "Error: Access allow only for owner!");
+        _;
+    }
+    
+    modifier onlyOracle {
+        require(controller_oracle == msg.sender, "Error: Access allow only for oracle!");
+        _;
+    }
+
+
+    constructor (address ERC20_ADDRESS) {
+        admin = msg.sender;
+
+        ERC20 = IERC20(ERC20_ADDRESS);
+
+        decimalsComission = 1000;
+    }
+
+    // USER FUNCTIONS
+    
+    function safe(uint256 id, uint256 amount, uint256 commission, address receiver, bool isTransfer) external payable {
+
+        require(ERC20.transferFrom(msg.sender, address(this), amount), "Error: Transfer not successfully!");
+        require(amount > 0, "Error: Amount must be greater than zero!");
+        
+        require(receiver != address(0), "Error: receiver cannot be empty!");
+
+        require(id != 0, "Error: ID must be greater than zero!");
+
+        require(!safes[msg.sender][id].exist, "Error: You cannot re-deposit!");
+
+        if (isTransfer){
+            require(receiver != msg.sender, "Error: You cannot send funds to yourself");
+        }
+
+        safes[msg.sender][id].receiver = receiver;
+        safes[msg.sender][id].isTransfer = isTransfer;
+        safes[msg.sender][id].amount = amount;
+        safes[msg.sender][id].commission = commission;
+        safes[msg.sender][id].exist = true;
+
+        emit Safe(address(ERC20), msg.sender, id, amount, commission, isTransfer, receiver);
+    }
+
+    function approve(uint id) external {
+        require(msg.sender != address(0), "Error: creator cannot be empty!");
+        require(id != 0, "Error: id cannot be empty!");
+
+        Slots memory insideSlot = safes[msg.sender][id];
+
+        require(insideSlot.exist, "Error: This slot does not exist!");
+
+        require(insideSlot.isTransfer, "Error: This method is only available for actions with (isTransfer = true)");
+
+        uint amount = insideSlot.amount;
+
+        uint comissionAmount = ((insideSlot.commission * insideSlot.amount) / decimalsComission );
+
+        uint amountWithCommission = amount - comissionAmount;
+        
+        ERC20.transfer(receiverComission, comissionAmount);
+        
+        require(ERC20.balanceOf(address(this)) >= amountWithCommission, "Error: You cannot withdraw all tokens!");
+
+        ERC20.transfer(insideSlot.receiver, amountWithCommission);
+        
+        delete safes[msg.sender][id];
+
+        emit Approve(address(ERC20), insideSlot.receiver, msg.sender, id, amount, insideSlot.isTransfer, comissionAmount);
+    }
+
+    // ADMIN FUNCTIONS
+    function setReceiverComission(address receiver) external onlyAdmin {
+        require(receiver != address(0), "Error: receiver cannot be empty!");
+
+        receiverComission = receiver;
+    }
+
+    function setOracle(address new_oracle) external onlyAdmin {
+        require(new_oracle != address(0), "Error: new_oracle cannot be empty!");
+        controller_oracle = new_oracle;
+    }
+
+    function setTokenContract(address new_contract) external onlyAdmin {
+        require(new_contract != address(0), "Error: new_oracle cannot be empty!");
+        ERC20 = IERC20(new_contract);
+    }
+
+    function setDecimalsComission(uint new_decimals) external onlyAdmin {
+        require(new_decimals > 0, "Error: input number must be greater than 0");
+        decimalsComission = new_decimals;
+    }
+
+    // ФУНКЦИЯ CORRECT - Возвращает одной из двух сторон средства если что-то пошло не так
+    function correct(address creator, uint id, address receiver, bool withComission) external onlyAdmin {
+        require(receiver != address(0), "Error: receiver cannot be empty!");
+        require(creator != address(0), "Error: creator cannot be empty!");
+        require(id != 0, "Error: id cannot be empty!");
+
+        Slots memory insideSlot = safes[creator][id];
+
+        require(receiver == creator || receiver == insideSlot.receiver, "Error: Only authorized user can receive funds");
+        require(insideSlot.exist, "Error: This slot does not exist!");
+
+        uint amount = insideSlot.amount;
+        uint comissionAmount = 0;
+
+        if (withComission){
+            comissionAmount = ((insideSlot.commission * insideSlot.amount) / decimalsComission );
+            amount = amount - comissionAmount;
+            ERC20.transfer(receiverComission, comissionAmount);
+        }
+        
+        require(ERC20.balanceOf(address(this)) >= amount, "Error: You cannot withdraw all tokens!");
+
+        ERC20.transfer(receiver, amount);
+        
+        delete safes[creator][id];
+
+        emit Correct(address(ERC20), receiver, creator, id, amount, comissionAmount);
+    }
+
+    // ФУНКЦИЯ BACK - Возвращает обратно отправителю средства из СЕЙФА (только если isTransfer = false)
+    function back(address creator, uint id, bool withComission) external onlyOracle {
+        require(creator != address(0), "Error: creator cannot be empty!");
+        require(id != 0, "Error: id cannot be empty!");
+
+        Slots memory insideSlot = safes[creator][id];
+
+        require(insideSlot.exist, "Error: This slot does not exist!");
+
+        require(!insideSlot.isTransfer, "Error: This method is only available for actions with (isTransfer = false)");
+
+        uint amount = insideSlot.amount;
+        uint comissionAmount = 0;
+
+        if (withComission){
+            comissionAmount = ((insideSlot.commission * insideSlot.amount) / decimalsComission );
+            amount = amount - comissionAmount;
+            ERC20.transfer(receiverComission, comissionAmount);
+        }
+        
+        require(ERC20.balanceOf(address(this)) >= amount, "Error: You cannot withdraw all tokens!");
+
+        ERC20.transfer(insideSlot.receiver, amount);
+
+        delete safes[creator][id];
+        
+        emit Back(address(ERC20), creator, id, amount, insideSlot.isTransfer, comissionAmount);
+    }
+
+    event Correct(
+        address ERC20_ADDRESS,
+        address indexed receiver,
+        address indexed creator,
+        uint256 indexed id,
+        uint256 amount,
+        uint256 commission
+    );
+
+    event Back(
+        address ERC20_ADDRESS,
+        address indexed creator,
+        uint256 indexed id,
+        uint256 amount,
+        bool isTransfer,
+        uint256 commission
+    );
+
+    event Approve(
+        address ERC20_ADDRESS,
+        address indexed receiver,
+        address indexed creator,
+        uint256 indexed id,
+        uint256 amount,
+        bool isTransfer,
+        uint256 commission
+    );
+
+    event Safe(
+        address indexed ERC20_ADDRESS,
+        address indexed creator,
+        uint256 indexed id,
+        uint256 amount,
+        uint256 commission,
+        bool isTransfer,
+        address receiver
+    );
+
+}
